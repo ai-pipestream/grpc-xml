@@ -1,0 +1,6 @@
+# The build stage compiles from source inside the image; a host `target/` is
+# both enormous and built for the wrong toolchain.
+target/
+gen/
+.git/
+.github/

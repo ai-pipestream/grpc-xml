@@ -1,6 +1,6 @@
 # grpc-xml architecture
 
-**Status:** spec (no implementation yet)
+**Status:** implemented (v1); this file remains the contract the code answers to
 **Updated:** 2026-08-13
 
 Implementers start at [`AGENTS.md`](../AGENTS.md), then this file, `design.md`, and `guidelines.md`.

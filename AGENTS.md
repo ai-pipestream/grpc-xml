@@ -1,7 +1,13 @@
 # AGENTS.md — grpc-xml
 
-You are implementing **grpc-xml** from scratch in this repo. There is no
-application code yet. Specs are the source of truth.
+**Status: v1 is implemented.** The definition of done below is met; see
+`README.md` for what the server does today and for the v1 gaps that remain
+(XBRL label linkbases, the inferred DocLang schema, CALS `namest`/`nameend`).
+The rest of this file is the brief the implementation was built against, and
+the specs are still the source of truth for changing it.
+
+Originally: you are implementing **grpc-xml** from scratch in this repo. There
+is no application code yet. Specs are the source of truth.
 
 ## Read this first, in order
 

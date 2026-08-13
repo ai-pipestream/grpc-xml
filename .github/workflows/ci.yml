@@ -1,0 +1,58 @@
+# CI gates for grpc-xml: the same commands README.md documents, so a green
+# badge and a green local run mean the same thing.
+name: ci
+
+on:
+  push:
+    branches: [main, development]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-action@v1
+        with:
+          setup_only: true
+      - name: buf lint
+        run: buf lint
+      - name: buf format
+        run: buf format --diff --exit-code
+      # Contract evolution is guarded against main once history exists there.
+      - name: buf breaking
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch origin main --depth 1
+          buf breaking --against '.git#ref=origin/main'
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --check
+      - name: clippy (pedantic)
+        run: cargo clippy --all-targets --no-deps -- -D warnings -D clippy::pedantic
+      - name: tests
+        run: cargo test --locked
+      - name: rustdoc
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The image build runs the suite itself, so this also proves the tests
+      # pass in a clean container with no host toolchain state.
+      - name: docker build
+        run: docker build -t grpc-xml:ci .
