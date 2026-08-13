@@ -26,6 +26,14 @@ HTML islands inside JATS (or XHTML in XBRL labels) are **not**
 re-parsed with a second XML stack. They are handed to the HTML
 collector as opaque fragments, the same way email HTML bodies are.
 
+## Live results (vs Docling)
+
+Docling's XML backends build a complete `DoclingDocument` and return
+it. We stream sections, paragraphs, tables, and fact rows **as the
+parser yields them** so a UI can show a USPTO grant or an XBRL
+instance filling in, not a spinner until the last closing tag. Title
+and `XmlInfo` go out first. `ParseStatus` is a trailer.
+
 ## What this process owns
 
 - Secure XML: no network, no DTD fetch, no entity expansion. XXE and

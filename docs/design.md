@@ -7,7 +7,9 @@
 - One process, one port, format selected on the request.
 - Stream elements of large instances (USPTO claims, XBRL facts) as
   table rows / paragraphs rather than materializing a DOM of the whole
-  file when the dialect allows it.
+  file when the dialect allows it. Live UI is the reason: Docling
+  waits for the document; we paint each yielded item. A unary Document
+  convenience RPC is allowed; it is not the product path.
 - Identical `Document` projection gRParse can merge with a PDF
   collector of the same paper.
 
