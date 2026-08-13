@@ -1,0 +1,37 @@
+[package]
+name = "grpc-xml"
+version = "0.1.0"
+description = "Streaming gRPC collector for JATS, USPTO, XBRL and DocLang XML"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://git.rokkon.com/ai-pipestream/grpc-xml"
+keywords = ["xml", "jats", "xbrl", "grpc", "streaming"]
+categories = ["parsing", "network-programming"]
+edition = "2024"
+# Edition 2024 needs 1.85; quick-xml 0.41 needs 1.79.
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+# Streaming pull parser. No DTD processing, no entity expansion, no network:
+# general entity references surface as `Event::GeneralRef` and are never
+# resolved, which is the property the XXE and billion-laughs tests assert.
+quick-xml = { version = "0.41.0", features = ["encoding"] }
+prost = "0.14.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "net", "time"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14.6", features = ["gzip", "zstd"] }
+tonic-health = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-reflection = "0.14.6"
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+# "net" enables TcpListenerStream for the in-process integration test server.
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
