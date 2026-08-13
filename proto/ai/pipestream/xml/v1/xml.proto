@@ -1,0 +1,558 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Value types for the grpc-xml collector.
+//
+// The service reads JATS, USPTO, XBRL and DocLang XML and streams typed
+// document items as the parser yields them. These messages are the payloads
+// of that stream; the RPCs and their envelopes live in `xml_service.proto`.
+//
+// The model is deliberately a *collector* model, not a second Document
+// schema: item labels mirror `ai.pipestream.document.v1.DocItemLabel` by
+// name so gRParse can fold a stream into a Document without a translation
+// table, and everything the XML says that does not fit a label is carried
+// verbatim in `role`, `path` and `attributes` rather than dropped.
+
+syntax = "proto3";
+
+package ai.pipestream.xml.v1;
+
+option java_multiple_files = true;
+option java_outer_classname = "XmlProto";
+option java_package = "ai.pipestream.xml.v1";
+
+// XmlDialect selects the declarative XML family a document belongs to.
+//
+// One process serves all of them; the dialect decides which mapper runs, and
+// it is either stated on the request or sniffed from the prolog and root
+// element. Dialects outside this list are refused with `UNIMPLEMENTED`: this
+// service is not a generic XML-to-Document converter.
+enum XmlDialect {
+  // Not stated. On a request this means "sniff"; the server never reports
+  // it back on a successful parse.
+  XML_DIALECT_UNSPECIFIED = 0;
+
+  // NISO JATS journal article XML (`.xml` / `.nxml`), namespace
+  // `http://jats.nlm.nih.gov` or an NLM/JATS DOCTYPE public identifier.
+  XML_DIALECT_JATS = 1;
+
+  // USPTO patent grant and application XML, the WIPO ST.36 / ST.96 families
+  // (`us-patent-grant`, `us-patent-application`, `patent-document`).
+  XML_DIALECT_USPTO = 2;
+
+  // XBRL instance documents, namespace
+  // `http://www.xbrl.org/2003/instance` (`.xbrl` / `.xml`).
+  XML_DIALECT_XBRL = 3;
+
+  // Docling DocLang XML (`.dclg`), a document tree that is already close to
+  // the Document plane and needs only a typed decode.
+  XML_DIALECT_DOCLANG = 4;
+}
+
+// XmlItemLabel classifies one streamed text item.
+//
+// Names mirror `ai.pipestream.document.v1.DocItemLabel` so a coordinator can
+// map them one to one. Only the labels these four dialects can produce are
+// listed; a dialect-specific refinement that has no label of its own (an
+// abstract paragraph, a patent claim, an author name) keeps a generic label
+// and states the refinement in `TextItem.role`.
+enum XmlItemLabel {
+  // No label was determined. Treat as free text.
+  XML_ITEM_LABEL_UNSPECIFIED = 0;
+
+  // The document title.
+  XML_ITEM_LABEL_TITLE = 1;
+
+  // A section heading. `TextItem.level` carries its depth.
+  XML_ITEM_LABEL_SECTION_HEADER = 2;
+
+  // A body paragraph.
+  XML_ITEM_LABEL_PARAGRAPH = 3;
+
+  // Text that is not a paragraph and has no more specific label, such as an
+  // author name or a keyword.
+  XML_ITEM_LABEL_TEXT = 4;
+
+  // One item of a list.
+  XML_ITEM_LABEL_LIST_ITEM = 5;
+
+  // A caption attached to a table or figure.
+  XML_ITEM_LABEL_CAPTION = 6;
+
+  // A bibliographic reference entry.
+  XML_ITEM_LABEL_REFERENCE = 7;
+
+  // A footnote.
+  XML_ITEM_LABEL_FOOTNOTE = 8;
+
+  // A code or preformatted block.
+  XML_ITEM_LABEL_CODE = 9;
+
+  // A mathematical formula, kept as its source text.
+  XML_ITEM_LABEL_FORMULA = 10;
+
+  // A picture or figure placeholder. XML dialects carry a reference rather
+  // than pixels, so the item's text is the alt text or figure label.
+  XML_ITEM_LABEL_PICTURE = 11;
+}
+
+// CollectorSource attributes an item to the collector that produced it.
+//
+// Field names and semantics match `ai.pipestream.document.v1.CollectorSource`
+// so gRParse can attach it unchanged. Sources never overwrite each other: a
+// PDF collector parsing the same paper contributes its own source.
+message CollectorSource {
+  // Always `xml` for this service.
+  string collector = 1;
+
+  // The mapper that produced the item: `jats`, `uspto`, `xbrl` or `doclang`.
+  optional string model = 2;
+
+  // Version of this server, as reported by `GetServiceInfo`.
+  optional string version = 3;
+
+  // Producer confidence, 0.0 to 1.0. Unset here: a declarative XML mapping
+  // is deterministic, so claiming a confidence would be noise.
+  optional double confidence = 4;
+}
+
+// XmlInfo is the resolved identity of the document, sent before any content.
+//
+// It is the first event of every successful parse, so a UI can title the
+// view and pick a renderer before the first paragraph arrives.
+message XmlInfo {
+  // The dialect the rest of the stream was mapped with. Never
+  // `XML_DIALECT_UNSPECIFIED`.
+  XmlDialect dialect = 1;
+
+  // How the dialect was decided, for debugging a surprising mapping.
+  DialectEvidence evidence = 2;
+
+  // Namespace URI of the root element, empty when the root is unqualified.
+  string root_namespace = 3;
+
+  // Local name of the root element, for example `article` or `xbrl`.
+  string root_local_name = 4;
+
+  // Root name declared by the DOCTYPE, when the document has one.
+  optional string doctype_name = 5;
+
+  // DOCTYPE public identifier, when present. Recorded for provenance and
+  // used for sniffing; it is never dereferenced.
+  optional string public_id = 6;
+
+  // DOCTYPE system identifier, when present. Recorded only. This server
+  // performs no DTD, XInclude or schema retrieval of any kind, so a
+  // `file://` or `http://` system identifier is inert.
+  optional string system_id = 7;
+
+  // Document title, when the dialect exposes one in a position the parser
+  // has already passed. Absent when the title has not been seen yet; the
+  // title still arrives as a `TextItem` with `XML_ITEM_LABEL_TITLE`.
+  optional string title = 8;
+
+  // Character encoding named in the XML declaration, when present.
+  optional string encoding = 9;
+
+  // Version named in the XML declaration, for example `1.0`.
+  optional string xml_version = 10;
+}
+
+// DialectEvidence names the signal that resolved the dialect.
+enum DialectEvidence {
+  // Not stated.
+  DIALECT_EVIDENCE_UNSPECIFIED = 0;
+
+  // The request named the dialect explicitly; no sniffing ran.
+  DIALECT_EVIDENCE_REQUESTED = 1;
+
+  // Matched on the root element's namespace URI.
+  DIALECT_EVIDENCE_ROOT_NAMESPACE = 2;
+
+  // Matched on the DOCTYPE public identifier.
+  DIALECT_EVIDENCE_PUBLIC_ID = 3;
+
+  // Matched on a well-known root element local name.
+  DIALECT_EVIDENCE_ROOT_ELEMENT = 4;
+}
+
+// Attribute is one source attribute carried through verbatim.
+message Attribute {
+  // Attribute name as written, including any prefix (`xlink:href`).
+  string name = 1;
+
+  // Attribute value after XML escape resolution of predefined and character
+  // references only. General entity references are never expanded.
+  string value = 2;
+}
+
+// TextItem is one streamed unit of text, in document order.
+//
+// This is the workhorse event: titles, headings, paragraphs, list items,
+// captions, references, patent claims and author names all arrive as
+// `TextItem`, distinguished by `label` and refined by `role`.
+message TextItem {
+  // Zero-based index of this item within the stream, counting every
+  // `TextItem`, `TableStart` and `Fact`. Stable within one parse only.
+  uint64 index = 1;
+
+  // Structural label.
+  XmlItemLabel label = 2;
+
+  // Dialect-specific refinement of `label`, an open vocabulary: `abstract`,
+  // `claim`, `author`, `inventor`, `keyword`, `description`,
+  // `drawing-description`, `affiliation`, `doi`. Empty when the label says
+  // everything.
+  string role = 3;
+
+  // The item's text: descendant character data concatenated in document
+  // order, with inline markup flattened away and runs of whitespace
+  // collapsed. Never empty.
+  string text = 4;
+
+  // Heading depth for `XML_ITEM_LABEL_SECTION_HEADER`, starting at 1.
+  // Absent for every other label.
+  optional uint32 level = 5;
+
+  // Position of the item within its numbered series when the source
+  // numbers it: a patent claim number, a list item number, a reference
+  // number. Absent when the source does not number it.
+  optional uint64 ordinal = 6;
+
+  // Location of the source element, as a positional path from the document
+  // root: `/article/body/sec[2]/p[3]`. Prefix-free of namespaces, because
+  // it addresses the serialized document rather than the infoset.
+  string path = 7;
+
+  // Value of the element's `id` or `xml:id` attribute, when it has one.
+  optional string element_id = 8;
+
+  // Attributes of the source element that the mapping did not consume,
+  // preserved so nothing observable is silently discarded.
+  repeated Attribute attributes = 9;
+
+  // Provenance, always set.
+  CollectorSource source = 10;
+}
+
+// TableStart opens a streamed table. Rows follow, then `TableEnd`.
+message TableStart {
+  // Stream index, in the same series as `TextItem.index`.
+  uint64 index = 1;
+
+  // Identifier used by the `TableRow` and `TableEnd` events of this table.
+  // Unique within one parse.
+  string table_ref = 2;
+
+  // Caption text, when the source carries one *before* the table body.
+  // A caption that follows the body arrives as a `TextItem` with
+  // `XML_ITEM_LABEL_CAPTION` instead, because the table has already
+  // streamed by then.
+  optional string caption = 3;
+
+  // Positional path of the source table element.
+  string path = 4;
+
+  // Value of the table element's `id` attribute, when it has one.
+  optional string element_id = 5;
+
+  // Provenance, always set.
+  CollectorSource source = 6;
+}
+
+// TableCell is one cell of a streamed table row.
+message TableCell {
+  // Zero-based column index, advanced by the column spans before it.
+  uint32 column_index = 1;
+
+  // Cell text, flattened the same way as `TextItem.text`. May be empty.
+  string text = 2;
+
+  // Columns this cell spans, from the source `colspan`. At least 1.
+  uint32 column_span = 3;
+
+  // Rows this cell spans, from the source `rowspan`. At least 1.
+  uint32 row_span = 4;
+
+  // True when the source marks the cell as a header (`th`, or a cell inside
+  // `thead`).
+  bool is_header = 5;
+}
+
+// TableRow is one row of a table, emitted as soon as its end tag is read.
+message TableRow {
+  // The table this row belongs to, matching `TableStart.table_ref`.
+  string table_ref = 1;
+
+  // Zero-based row index within the table.
+  uint32 row_index = 2;
+
+  // True when the row sits inside `thead`, or when every cell is a header
+  // cell.
+  bool is_header = 3;
+
+  // The row's cells in column order. Never empty.
+  repeated TableCell cells = 4;
+}
+
+// TableEnd closes a streamed table.
+message TableEnd {
+  // The table being closed, matching `TableStart.table_ref`.
+  string table_ref = 1;
+
+  // Number of `TableRow` events sent for this table.
+  uint32 row_count = 2;
+
+  // Widest row of the table, in columns after span expansion.
+  uint32 column_count = 3;
+}
+
+// XbrlPeriod is the reporting period of an XBRL context.
+message XbrlPeriod {
+  // Point-in-time date (`instant`), as written in the instance.
+  optional string instant = 1;
+
+  // Inclusive start of a duration (`startDate`).
+  optional string start_date = 2;
+
+  // Inclusive end of a duration (`endDate`).
+  optional string end_date = 3;
+
+  // True when the period is `forever`.
+  bool forever = 4;
+}
+
+// XbrlDimension is one explicit or typed dimension of a context's segment or
+// scenario.
+message XbrlDimension {
+  // Qualified name of the dimension axis, as written (`us-gaap:StatementScenarioAxis`).
+  string dimension = 1;
+
+  // Qualified name of the member, for an explicit dimension.
+  optional string member = 2;
+
+  // Serialized content of a typed dimension, when the dimension is typed
+  // rather than explicit.
+  optional string typed_value = 3;
+
+  // True when the dimension came from `scenario`, false when from `segment`.
+  bool is_scenario = 4;
+}
+
+// XbrlContext is a resolved `context` element of an XBRL instance.
+message XbrlContext {
+  // The context `id`, referenced by `Fact.context_ref`.
+  string id = 1;
+
+  // Scheme URI of the reporting entity identifier.
+  optional string entity_scheme = 2;
+
+  // The reporting entity identifier itself, for example a CIK or LEI.
+  optional string entity_identifier = 3;
+
+  // The reporting period.
+  XbrlPeriod period = 4;
+
+  // Segment and scenario dimensions, in document order.
+  repeated XbrlDimension dimensions = 5;
+}
+
+// XbrlUnit is a resolved `unit` element of an XBRL instance.
+message XbrlUnit {
+  // The unit `id`, referenced by `Fact.unit_ref`.
+  string id = 1;
+
+  // Measures of a simple unit, as written (`iso4217:USD`, `xbrli:shares`).
+  // Empty for a divide unit.
+  repeated string measures = 2;
+
+  // Numerator measures of a divide unit.
+  repeated string numerator_measures = 3;
+
+  // Denominator measures of a divide unit.
+  repeated string denominator_measures = 4;
+}
+
+// Fact is one XBRL instance fact, emitted as its element closes.
+//
+// Facts stream in document order. Contexts and units are declared before the
+// facts that use them in every conformant instance, so `context` and `unit`
+// are normally resolved inline; when a reference is forward or dangling they
+// are absent and only the `*_ref` string is set.
+message Fact {
+  // Stream index, in the same series as `TextItem.index`.
+  uint64 index = 1;
+
+  // Namespace URI of the concept element.
+  string concept_namespace = 2;
+
+  // Local name of the concept element, for example `Assets`.
+  string concept_local_name = 3;
+
+  // Element prefix as written in the instance, for example `us-gaap`.
+  // Empty when the concept element is unprefixed.
+  string concept_prefix = 4;
+
+  // Human-readable label. In v1 this is always the local name: label
+  // linkbase resolution is not implemented, so a supplied `taxonomy`
+  // changes nothing here and raises a warning on the trailer.
+  string label = 5;
+
+  // Value of the `contextRef` attribute. Always present on a fact.
+  string context_ref = 6;
+
+  // The resolved context, when it was declared earlier in the instance.
+  optional XbrlContext context = 7;
+
+  // Value of the `unitRef` attribute, for numeric facts.
+  optional string unit_ref = 8;
+
+  // The resolved unit, when it was declared earlier in the instance.
+  optional XbrlUnit unit = 9;
+
+  // The fact's value as written, whitespace-collapsed. Empty for a nil fact.
+  string value = 10;
+
+  // Value of the `decimals` attribute, as written (`-6`, `INF`).
+  optional string decimals = 11;
+
+  // Value of the `precision` attribute, as written.
+  optional string precision = 12;
+
+  // True when the fact carries `xsi:nil="true"`.
+  bool is_nil = 13;
+
+  // Value of the `sign` attribute (`-`) when present.
+  optional string sign = 14;
+
+  // Positional path of the fact element.
+  string path = 15;
+
+  // Provenance, always set.
+  CollectorSource source = 16;
+}
+
+// HtmlIsland is an XHTML fragment handed off rather than mapped.
+//
+// JATS bodies and XBRL footnotes and labels may embed XHTML. Re-parsing it
+// with an XML stack would produce a worse result than the HTML collector
+// gets, so the fragment is forwarded as opaque bytes with enough context to
+// place the result back into the document.
+message HtmlIsland {
+  // Stream index, in the same series as `TextItem.index`.
+  uint64 index = 1;
+
+  // Positional path of the element that roots the island.
+  string path = 2;
+
+  // Value of the element's `id` attribute, when it has one.
+  optional string element_id = 3;
+
+  // Namespace URI the island was recognized by, normally
+  // `http://www.w3.org/1999/xhtml`.
+  string namespace = 4;
+
+  // The fragment, re-serialized as UTF-8 XHTML including its root element.
+  // Byte-for-byte re-serialization of the source is not promised; entity
+  // references that this server refuses to expand are preserved verbatim.
+  bytes html = 5;
+
+  // Provenance, always set.
+  CollectorSource source = 6;
+}
+
+// WarningCode classifies a non-fatal finding of the parse.
+enum WarningCode {
+  // Not stated.
+  WARNING_CODE_UNSPECIFIED = 0;
+
+  // A general entity reference was found in content and was not expanded,
+  // because this server declares no entities and refuses declared ones. The
+  // reference text is preserved verbatim in the item text.
+  WARNING_CODE_UNEXPANDED_ENTITY = 1;
+
+  // A DOCTYPE external identifier was present. It was recorded on `XmlInfo`
+  // and not dereferenced.
+  WARNING_CODE_EXTERNAL_ID_IGNORED = 2;
+
+  // An element the mapper does not recognize was skipped. Its text, if any,
+  // is not in the stream.
+  WARNING_CODE_UNMAPPED_ELEMENT = 3;
+
+  // A `Fact` referenced a context or unit that was never declared, so the
+  // resolved message is absent.
+  WARNING_CODE_DANGLING_REFERENCE = 4;
+
+  // `taxonomy` bytes were supplied but not used: label linkbase resolution
+  // is not implemented in v1.
+  WARNING_CODE_TAXONOMY_IGNORED = 5;
+
+  // Character data was found in an encoding the parser had to guess at, or
+  // a malformed sequence was replaced.
+  WARNING_CODE_ENCODING_SUBSTITUTION = 6;
+}
+
+// ParseWarning is one non-fatal finding, carried on the trailer.
+message ParseWarning {
+  // What kind of finding this is.
+  WarningCode code = 1;
+
+  // Human-readable detail, safe to log.
+  string message = 2;
+
+  // How many times this exact finding occurred. Findings are aggregated per
+  // (code, message) pair so a document with ten thousand unexpanded
+  // entities produces one warning, not ten thousand.
+  uint64 count = 3;
+}
+
+// ParseCounts is the tally of what the stream carried.
+message ParseCounts {
+  // `TextItem` events sent.
+  uint64 text_items = 1;
+
+  // `TableStart` events sent, which is the number of tables.
+  uint64 tables = 2;
+
+  // `TableRow` events sent across all tables.
+  uint64 table_rows = 3;
+
+  // `Fact` events sent.
+  uint64 facts = 4;
+
+  // `HtmlIsland` events sent.
+  uint64 html_islands = 5;
+
+  // XBRL `context` elements resolved.
+  uint64 contexts = 6;
+
+  // XBRL `unit` elements resolved.
+  uint64 units = 7;
+
+  // XML elements the parser visited, including ones that produced nothing.
+  uint64 elements_visited = 8;
+}
+
+// ParseStatus is the trailer of a successful parse: the last event of the
+// stream, never the payload.
+//
+// A parse that fails does not send `ParseStatus`; it ends the stream with a
+// gRPC status instead (`INVALID_ARGUMENT` for malformed or truncated input,
+// `RESOURCE_EXHAUSTED` past the byte cap, `UNIMPLEMENTED` for an
+// unrecognized dialect, `INTERNAL` for a parser fault).
+message ParseStatus {
+  // The dialect the document was mapped with. Never
+  // `XML_DIALECT_UNSPECIFIED`.
+  XmlDialect dialect = 1;
+
+  // What the stream carried.
+  ParseCounts counts = 2;
+
+  // Non-fatal findings, aggregated. May be empty.
+  repeated ParseWarning warnings = 3;
+
+  // Bytes of XML consumed from the request stream.
+  uint64 bytes_consumed = 4;
+
+  // Wall-clock milliseconds from the first request frame to this trailer.
+  uint64 elapsed_millis = 5;
+}

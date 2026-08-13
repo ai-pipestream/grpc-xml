@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// gRPC service contract for the grpc-xml collector.
+//
+// The protocol is bidirectional and live: the client streams document bytes
+// while the server streams typed items back as its parser yields them. A
+// caller never waits for the last closing tag to see the first paragraph,
+// which is the whole difference between this service and a batch converter.
+//
+// The server never touches disk and never dereferences anything the document
+// names. DTDs, XInclude, schemas and external entities are refused or
+// recorded, never fetched.
+
+syntax = "proto3";
+
+package ai.pipestream.xml.v1;
+
+import "ai/pipestream/xml/v1/xml.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "XmlServiceProto";
+option java_package = "ai.pipestream.xml.v1";
+
+// XmlParseService maps declarative XML dialects into the Document plane.
+service XmlParseService {
+  // Parses one XML document and streams its items as they are produced.
+  //
+  // The first request message must set `options`; every message after it
+  // must set `chunk`, and the chunks concatenate in stream order to form the
+  // document. Sending `options` twice, or a message with neither field, is
+  // `INVALID_ARGUMENT`.
+  //
+  // The response stream is ordered: exactly one `info` event first, then
+  // content events in document order, then exactly one `status` trailer.
+  // Content events are sent as the parser reaches them, so the first of them
+  // normally arrives while the client is still uploading.
+  //
+  // Failures end the stream with a gRPC status and no `status` event:
+  // `RESOURCE_EXHAUSTED` when the document exceeds the byte cap or the
+  // server is at its concurrency limit, `INVALID_ARGUMENT` for malformed,
+  // truncated, or entity-declaring input, `UNIMPLEMENTED` when the dialect
+  // is not one this service maps, `INTERNAL` for a parser fault.
+  rpc ParseXml(stream ParseXmlRequest) returns (stream ParseXmlResponse);
+
+  // Reports the server's identity, limits, and the dialects it maps.
+  // Safe to call at any time; it parses nothing.
+  rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
+}
+
+// ParseOptions carries the settings of one parse. It must be the payload of
+// the first `ParseXmlRequest` message.
+message ParseOptions {
+  // Dialect to map with. `XML_DIALECT_UNSPECIFIED` asks the server to sniff
+  // it from the DOCTYPE public identifier and the root element; a sniff that
+  // finds nothing is `UNIMPLEMENTED` and a sniff whose signals disagree is
+  // `INVALID_ARGUMENT`. The server never guesses between two candidates.
+  XmlDialect dialect = 1;
+
+  // Upper bound on the document in mebibytes. Exceeding it ends the stream
+  // with `RESOURCE_EXHAUSTED` as soon as the byte that crosses the line is
+  // read, not after the upload finishes. 0 selects the server default; the
+  // server also enforces its own ceiling, so a larger value is clamped.
+  uint32 max_document_mib = 2;
+
+  // XBRL taxonomy package, a zip of schemas and linkbases, for resolving
+  // concept labels. Optional and XBRL-only. Accepted but unused in v1: the
+  // parse proceeds with local names as labels and the trailer carries a
+  // `WARNING_CODE_TAXONOMY_IGNORED` warning. Bytes, never a path — this
+  // service has no filesystem to read from.
+  bytes taxonomy = 3;
+
+  // Emit XHTML subtrees as `html_island` events instead of flattening them
+  // into item text. Default false, which flattens. Set it when a downstream
+  // HTML collector will render the fragment.
+  bool emit_html_islands = 4;
+
+  // Include source attributes the mapper did not consume on every item.
+  // Default false, which keeps the stream narrow.
+  bool include_attributes = 5;
+}
+
+// ParseXmlRequest is one frame of the upload.
+message ParseXmlRequest {
+  // Frame payload. The first frame sets `options`; all later frames set
+  // `chunk`.
+  oneof payload {
+    // Parse settings. First frame only.
+    ParseOptions options = 1;
+
+    // A slice of the document bytes, concatenated in stream order. An empty
+    // chunk is legal and ignored.
+    bytes chunk = 2;
+  }
+}
+
+// ParseXmlResponse is one event of the live parse stream.
+message ParseXmlResponse {
+  // Exactly one event kind is set per message.
+  oneof event {
+    // Resolved document identity. Always the first event, sent once.
+    XmlInfo info = 1;
+
+    // One unit of text, in document order.
+    TextItem text_item = 2;
+
+    // A table opens. Its rows follow.
+    TableStart table_start = 3;
+
+    // One row of the table opened by the preceding `table_start`.
+    TableRow table_row = 4;
+
+    // The table closes.
+    TableEnd table_end = 5;
+
+    // One XBRL instance fact.
+    Fact fact = 6;
+
+    // An XHTML fragment for the HTML collector. Only sent when
+    // `ParseOptions.emit_html_islands` is set.
+    HtmlIsland html_island = 7;
+
+    // Parse trailer. Always the last event of a successful parse, sent once.
+    ParseStatus status = 8;
+  }
+}
+
+// GetServiceInfoRequest asks for the server's identity and limits. It has no
+// fields; it exists because every RPC needs a request message.
+message GetServiceInfoRequest {}
+
+// GetServiceInfoResponse describes the running server.
+message GetServiceInfoResponse {
+  // Service name, always `grpc-xml`.
+  string service = 1;
+
+  // Version of this build, from the crate version.
+  string version = 2;
+
+  // Version of the XML parser this build links, for example
+  // `quick-xml 0.41.0`.
+  string parser = 3;
+
+  // Dialects this build maps. Never empty and never contains
+  // `XML_DIALECT_UNSPECIFIED`.
+  repeated XmlDialect dialects = 4;
+
+  // Default byte cap in mebibytes, applied when a request asks for 0.
+  uint32 default_max_document_mib = 5;
+
+  // Hard byte cap in mebibytes. A request asking for more is clamped here.
+  uint32 ceiling_max_document_mib = 6;
+
+  // Parses this server admits at once. Requests past the limit are refused
+  // with `RESOURCE_EXHAUSTED` rather than queued.
+  uint32 max_concurrent_parses = 7;
+
+  // True when the parser is configured to expand no general entities and to
+  // fetch no external resource. Always true in this build; it is on the
+  // wire so an operator can assert it from outside rather than trust a
+  // README.
+  bool entity_expansion_disabled = 8;
+}

@@ -1,0 +1,17 @@
+# Buf v2 configuration for the grpc-xml protobuf contracts.
+#
+# Lint runs the strictest built-in set (STANDARD) plus COMMENTS, so every
+# service, rpc, message, field, oneof, enum and enum value must carry a
+# documentation comment. Comment ignores are disallowed: a rule that is
+# inconvenient gets the contract fixed, not the lint silenced.
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+    - COMMENTS
+  disallow_comment_ignores: true
+breaking:
+  use:
+    - FILE

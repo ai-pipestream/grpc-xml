@@ -1,0 +1,15 @@
+# Optional standalone stub generation for the ai.pipestream.xml.v1 contracts.
+#
+# The canonical path is `build.rs` (tonic-prost-build), which compiles the
+# same files from `proto/` on every `cargo build`, so nothing generated is
+# committed and the stubs can never drift from the schema. This file exists
+# for the fleet convention and for generating stubs outside cargo:
+#
+#   cargo install protoc-gen-prost protoc-gen-tonic
+#   buf generate
+version: v2
+plugins:
+  - local: protoc-gen-prost
+    out: gen
+  - local: protoc-gen-tonic
+    out: gen
