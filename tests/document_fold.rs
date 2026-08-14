@@ -268,9 +268,11 @@ fn jats_labels_become_their_document_variants_in_document_order() {
         .expect("the nested section header is folded");
     assert_eq!(scope.level, 2);
 
-    // Every text event became exactly one text item, plus the caption the
-    // table start carried.
+    // Every text event became exactly one text item, less the picture events
+    // that went to the picture arena, plus the caption the table start
+    // carried.
     let text_events = common::text_items(&events).len();
+    let pictures = document.pictures.len();
     let captions = events
         .iter()
         .filter(|e| match e.event.as_ref() {
@@ -278,7 +280,7 @@ fn jats_labels_become_their_document_variants_in_document_order() {
             _ => false,
         })
         .count();
-    assert_eq!(document.texts.len(), text_events + captions);
+    assert_eq!(document.texts.len(), text_events - pictures + captions);
 }
 
 #[test]
@@ -523,7 +525,7 @@ fn uspto_claims_fold_as_numbered_text_items_keeping_their_role() {
 }
 
 #[test]
-fn a_drawing_folds_into_a_placeholder_picture_with_its_reference_as_a_caption() {
+fn a_drawing_folds_into_a_placeholder_picture_carrying_the_reference_it_named() {
     let (_, document) = fold_default(USPTO);
     assert_eq!(document.pictures.len(), 1);
     let picture = &document.pictures[0];
@@ -538,7 +540,7 @@ fn a_drawing_folds_into_a_placeholder_picture_with_its_reference_as_a_caption() 
     assert_eq!(collector(&picture.source).model.as_deref(), Some("uspto"));
 
     // The locators the item would have carried as a text item are carried
-    // here instead.
+    // here instead, the reference the parser lifted from `file` among them.
     let fields = &picture.meta.as_ref().expect("picture meta").custom_fields;
     assert_eq!(
         field(fields, "xml.path"),
@@ -546,19 +548,22 @@ fn a_drawing_folds_into_a_placeholder_picture_with_its_reference_as_a_caption() 
     );
     assert_eq!(field(fields, "xml.role"), Some("drawing"));
     assert_eq!(field(fields, "xml.element_id"), Some("img-0001"));
+    assert_eq!(
+        field(fields, "xml.href"),
+        Some("US11999999-20260210-D00001.TIF"),
+        "an attribute value is a locator, not a caption"
+    );
 
-    // The reference the event carried becomes a caption item, by the same
-    // mechanics a table caption uses: its own item, referenced by ref.
-    assert_eq!(picture.captions.len(), 1);
-    let index: usize = picture.captions[0]
-        .r#ref
-        .strip_prefix("#/texts/")
-        .expect("a caption ref points into the text arena")
-        .parse()
-        .expect("a dense index");
-    let caption = base(&document.texts[index]);
-    assert_eq!(caption.label, doc::DocItemLabel::Caption as i32);
-    assert_eq!(caption.text, "US11999999-20260210-D00001.TIF");
+    // Nothing is captioned with that filename, here or in the text arena.
+    assert!(
+        picture.captions.is_empty(),
+        "a figure's caption arrives as its own CAPTION event, if at all"
+    );
+    assert!(
+        !texts_labelled(&document, doc::DocItemLabel::Caption)
+            .iter()
+            .any(|text| text == "US11999999-20260210-D00001.TIF")
+    );
 
     // And it hangs off the heading ladder like any other content item.
     let detail = ref_of(&document, "DETAILED DESCRIPTION");
@@ -567,9 +572,9 @@ fn a_drawing_folds_into_a_placeholder_picture_with_its_reference_as_a_caption() 
 }
 
 #[test]
-fn a_picture_with_no_reference_gets_no_caption_item() {
+fn a_picture_with_no_reference_carries_no_href() {
     // The wire says a picture is there but names nothing: a placeholder with
-    // no caption is still the honest projection.
+    // no locator is still the honest projection.
     let event = pb::ParseXmlResponse {
         event: Some(pb::parse_xml_response::Event::TextItem(pb::TextItem {
             label: pb::XmlItemLabel::Picture as i32,
@@ -584,9 +589,20 @@ fn a_picture_with_no_reference_gets_no_caption_item() {
     assert!(integrity_errors(&document).is_empty());
     assert_eq!(document.pictures.len(), 1);
     assert!(document.pictures[0].captions.is_empty());
+    let fields = &document.pictures[0]
+        .meta
+        .as_ref()
+        .expect("picture meta")
+        .custom_fields;
+    assert_eq!(field(fields, "xml.path"), Some("/doc/figure"));
+    assert_eq!(
+        field(fields, "xml.href"),
+        None,
+        "no key is invented for a picture that names nothing"
+    );
     assert!(
         document.texts.is_empty(),
-        "no caption item is invented for a picture that names nothing"
+        "and no item of any kind is invented for it either"
     );
     assert_eq!(
         document.pictures[0]
@@ -874,7 +890,12 @@ async fn the_document_event_is_sent_once_and_immediately_before_the_trailer() {
     assert_eq!(document.tables.len(), 1);
     // The projection is of these events, not of a second parse.
     let text_events = common::text_items(&events).len();
-    assert_eq!(document.texts.len(), text_events + 1, "+ the table caption");
+    assert_eq!(document.pictures.len(), 1, "the figure, as a placeholder");
+    assert_eq!(
+        document.texts.len(),
+        text_events,
+        "- the figure, + the table caption"
+    );
 }
 
 #[tokio::test]

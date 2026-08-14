@@ -328,8 +328,7 @@ impl DocumentFold {
 
     // --------------------------------------------------------------- pictures
 
-    /// Append one picture as a placeholder `PictureItem`, with the text the
-    /// event carried as its caption.
+    /// Append one picture as a placeholder `PictureItem`.
     ///
     /// `image` is left unset: an XML picture is a filename or an `xlink:href`,
     /// never pixels, and this is exactly what docling does with one — JATS
@@ -338,37 +337,32 @@ impl DocumentFold {
     /// placeholder" path. A picture whose reference is all we have is still a
     /// picture, and the arena is where a downstream stage that can resolve it
     /// will look.
+    ///
+    /// `captions` stays empty. The text a PICTURE event carries is not prose:
+    /// every dialect lifts it from an attribute (the JATS `xlink:href`, the
+    /// USPTO drawing `file`, the `DocLang` `uri`), so it is a locator and it
+    /// goes where the other locators go. A figure's real caption reaches the
+    /// fold as its own CAPTION event and folds as its own item.
     fn push_picture(&mut self, item: &pb::TextItem) {
-        let mut captions = Vec::new();
-        if !item.text.is_empty() {
-            // Same mechanics as a table caption: the caption is an item of its
-            // own, created first so the ref the picture holds already
-            // resolves.
-            let caption_ref = self.push_text(&pb::TextItem {
-                label: pb::XmlItemLabel::Caption as i32,
-                text: item.text.clone(),
-                path: item.path.clone(),
-                source: item.source.clone(),
-                ..pb::TextItem::default()
-            });
-            captions.push(reference(&caption_ref));
-        }
         let parent = self.current_parent();
         let self_ref = format!("#/pictures/{}", self.document.pictures.len());
         let source = self.source_of(item.source.as_ref());
+        let mut fields = text_fields(item);
+        if !item.text.is_empty() {
+            fields.insert("xml.href".to_owned(), string(&item.text));
+        }
         self.document.pictures.push(doc::PictureItem {
             self_ref: self_ref.clone(),
             parent: Some(reference(&parent)),
             content_layer: doc::ContentLayer::Body as i32,
             // The locators the item would have carried as a text item, carried
             // here instead: the path, the source's own role vocabulary, the
-            // element id.
+            // element id, and the reference the parser lifted from the markup.
             meta: Some(doc::PictureMeta {
-                custom_fields: text_fields(item),
+                custom_fields: fields,
                 ..doc::PictureMeta::default()
             }),
             label: doc::DocItemLabel::Picture as i32,
-            captions,
             // No image: no bytes, no uri, no size. An ImageRef here would
             // claim a payload this collector does not have.
             image: None,

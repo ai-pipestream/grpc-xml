@@ -109,12 +109,13 @@ mapping is deterministic, so a confidence would be noise. No fake page bboxes.
   picture arena with `image` unset — no bytes, no uri, no size. Docling does
   exactly this: JATS calls `add_picture` without ever reading the graphic's
   `xlink:href`, and the HTML backend has an explicit "do not fetch the image,
-  just add a placeholder" path. The reference the event carried (the `href`,
-  the drawing filename) becomes a `CAPTION` text item referenced from the
-  picture's `captions[]`, by the same mechanics a table caption uses: its own
-  item, created first, pointed at by ref. The picture's `meta.custom_fields`
-  carries the same `xml.path` / `xml.role` / `xml.element_id` locators the item
-  would have had as a text item.
+  just add a placeholder" path. The text such an event carries is never prose:
+  every dialect lifts it from an attribute (the JATS `xlink:href`, the USPTO
+  drawing `file`, the DocLang `uri`), so it is a reference and it lands in
+  `meta.custom_fields["xml.href"]` beside the `xml.path` / `xml.role` /
+  `xml.element_id` locators the item would have had as a text item. `captions`
+  stays empty: a figure's real caption reaches the fold as its own `CAPTION`
+  event.
 - **Tables.** `table_start` opens one, each `table_row` becomes a grid row,
   `table_end` finalizes `num_rows`/`num_cols` and appends the `TableItem`.
   Both `grid` and the flat `table_cells` are populated; a cell's
@@ -143,8 +144,10 @@ mapping is deterministic, so a confidence would be noise. No fake page bboxes.
 - **Pairing a figure's own caption with its picture.** A `<fig>` caption
   reaches the fold as a standalone `CAPTION` event after the graphic, so it
   folds as a caption item under the same heading rather than into the picture's
-  `captions[]`. Attaching it would be a wire-order guess; the picture's caption
-  is the reference the picture event itself carried.
+  `captions[]`. Attaching it would be a wire-order guess. Nothing else is put
+  in `captions[]` in its place: the picture event's own text is an attribute
+  value, and rendering a filename as a caption would be worse than an empty
+  one.
 - **Unconsumed source attributes** (`include_attributes`). They are an
   inspection aid on the typed stream, not document structure.
 - **Warnings and counts** from the trailer. They describe the stream, not the

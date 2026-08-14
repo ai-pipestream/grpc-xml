@@ -120,7 +120,7 @@ never edited here.
 |---|---|
 | `info` | `name` (the title), `origin.mimetype = application/xml`, and `xml.dialect` / `xml.root_namespace` / `xml.root_local_name` on the body meta |
 | `text_item` | A `BaseTextItem` variant chosen by label — `TitleItem`, `SectionHeaderItem`, `ListItem`, `CodeItem`, `FormulaItem`, else `TextItem` — with `text` and `orig` set |
-| `text_item` labelled `PICTURE` | A placeholder `PictureItem` with `image` unset, and the reference the event carried (`href`, drawing filename) as a `CAPTION` item in its `captions[]` |
+| `text_item` labelled `PICTURE` | A placeholder `PictureItem` with `image` unset and no captions; the reference the parser lifted from the markup (`xlink:href`, drawing `file`, DocLang `uri`) lands in `meta.custom_fields["xml.href"]` |
 | `table_start` / `table_row` / `table_end` | One `TableItem`: both `grid` and flat `table_cells`, offsets computed honoring spans, the caption created as a `CAPTION` item and referenced |
 | `fact` | One row of a single lazily created "facts" table: concept, context, period, unit, value, decimals |
 | `html_island` | **Not mapped** — the HTML collector's job. The count lands in `body.meta.custom_fields["xml.html_islands"]` |
