@@ -15,6 +15,7 @@ syntax = "proto3";
 
 package ai.pipestream.xml.v1;
 
+import "ai/pipestream/document/v1/document.proto";
 import "ai/pipestream/xml/v1/xml.proto";
 
 option java_multiple_files = true;
@@ -77,6 +78,18 @@ message ParseOptions {
   // Include source attributes the mapper did not consume on every item.
   // Default false, which keeps the stream narrow.
   bool include_attributes = 5;
+
+  // Also fold this parse into one `ai.pipestream.document.v1.Document` and
+  // send it as a `document` event just before the trailer. Default false,
+  // which costs nothing: the fold is not constructed and no item is
+  // retained.
+  //
+  // The typed event stream stays the primary, lossless wire; the Document
+  // is a lossy structural projection of it, self-contained so a coordinator
+  // can merge it additively with another collector's parse of the same
+  // work. What the projection drops is listed in this repository's
+  // `docs/design.md`.
+  bool emit_document = 6;
 }
 
 // ParseXmlRequest is one frame of the upload.
@@ -121,6 +134,15 @@ message ParseXmlResponse {
 
     // Parse trailer. Always the last event of a successful parse, sent once.
     ParseStatus status = 8;
+
+    // The whole parse folded into one Document. Emitted once, immediately
+    // before `status`, and only when `ParseOptions.emit_document` was set.
+    //
+    // It is a projection of the events above rather than extra content: the
+    // fold that builds it consumes exactly this stream. Item refs are dense
+    // and local to this message (`#/texts/0`, `#/tables/1`), so a
+    // coordinator can renumber them into a larger document.
+    ai.pipestream.document.v1.Document document = 9;
   }
 }
 

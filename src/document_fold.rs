@@ -1,0 +1,1011 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The collector-side fold from this service's event stream into one
+//! `ai.pipestream.document.v1.Document`.
+//!
+//! The typed event stream is the primary, lossless wire. This module is the
+//! lossy structural projection of it, offered because a coordinator that only
+//! wants the Document plane should not have to reimplement the mapping — the
+//! canonical fold lives next to the collector that knows what the events mean.
+//!
+//! Three properties shape the code:
+//!
+//! - **Single pass, one event at a time.** [`DocumentFold::consume`] takes the
+//!   same [`ParseXmlResponse`](pb::ParseXmlResponse) the service is about to
+//!   write to the socket and does a bounded amount of work with it. The only
+//!   state that outlives an event is the table currently being streamed, which
+//!   is the one shape the wire splits across events.
+//! - **A self-contained fragment.** Refs are dense and local
+//!   (`#/texts/0`, `#/tables/1`), every item's `parent` is `#/body` and every
+//!   item is listed in `body.children`, so the coordinator's additive merge can
+//!   renumber the whole fragment mechanically. [`integrity_errors`] is the
+//!   check for that, and the tests assert it is empty.
+//! - **Provenance honesty.** XML has no pages and no boxes, so no item carries
+//!   `prov`. Source locators — the positional path, the element id, the
+//!   source's own role vocabulary — go in per-item `meta.custom_fields` under
+//!   `xml.` keys, where they are data rather than a fabricated coordinate.
+//!
+//! What is deliberately not mapped: `html_island` events (an XHTML fragment is
+//! the HTML collector's job, and re-parsing it here would produce a worse
+//! result than that collector gets) and the unconsumed source attributes of
+//! `include_attributes` (they are an inspection aid for the typed stream, not
+//! document structure). The count of islands the fold skipped is recorded on
+//! the body's meta so the omission is visible rather than silent.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+use prost_types::Value;
+use prost_types::value::Kind;
+
+use crate::document::v1 as doc;
+use crate::proto::v1 as pb;
+use crate::{COLLECTOR, VERSION};
+
+/// Value of `Document.schema_name`: the upstream docling schema this plane
+/// tracks.
+pub const SCHEMA_NAME: &str = "docling_document_v2";
+
+/// Value of `DocumentOrigin.mimetype`. Every dialect this service maps is
+/// XML; the dialect itself is on the body meta and on every item's
+/// `CollectorSource.model`.
+pub const MIMETYPE: &str = "application/xml";
+
+/// Self ref of the body group, and the parent of everything this fold makes.
+const BODY_REF: &str = "#/body";
+
+/// Self ref of the furniture group. Nothing is put in it: XML dialects have
+/// no page chrome to put there.
+const FURNITURE_REF: &str = "#/furniture";
+
+/// Column headings of the XBRL fact table, in order.
+const FACT_COLUMNS: [&str; 6] = ["concept", "context", "period", "unit", "value", "decimals"];
+
+/// A fold of one parse's events into one Document.
+///
+/// Feed it every event of one `ParseXml` response stream in order, then call
+/// [`take`](Self::take). Events from two different parses must not be mixed
+/// into one fold.
+pub struct DocumentFold {
+    document: doc::Document,
+    /// Attribution for items whose event carried no source of its own, and
+    /// for the rows of the fact table.
+    fallback_source: doc::CollectorSource,
+    /// The table opened by a `table_start` and not yet closed.
+    table: Option<PendingTable>,
+    /// Arena index of the fact table, created when the first fact arrives.
+    facts_table: Option<usize>,
+    /// `html_island` events seen and not mapped.
+    islands_skipped: u64,
+}
+
+/// A table being assembled from `table_start` / `table_row` / `table_end`.
+struct PendingTable {
+    /// The wire identifier rows and the end event carry.
+    reference: String,
+    /// Everything about the item except its position in the arena, which is
+    /// only known when it is appended at `table_end`.
+    item: doc::TableItem,
+    grid: Vec<doc::TableRow>,
+    cells: Vec<doc::TableCell>,
+    /// Grid slots already taken by a cell that spans into them, so a row
+    /// under a `rowspan` starts at the first free column.
+    occupied: BTreeSet<(i32, i32)>,
+    num_cols: i32,
+}
+
+impl Default for DocumentFold {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DocumentFold {
+    /// An empty fold, with the two root groups already in place.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            document: doc::Document {
+                schema_name: Some(SCHEMA_NAME.to_owned()),
+                origin: Some(doc::DocumentOrigin {
+                    mimetype: MIMETYPE.to_owned(),
+                    ..doc::DocumentOrigin::default()
+                }),
+                body: Some(group(BODY_REF, doc::ContentLayer::Body)),
+                furniture: Some(group(FURNITURE_REF, doc::ContentLayer::Furniture)),
+                ..doc::Document::default()
+            },
+            fallback_source: doc::CollectorSource {
+                collector: COLLECTOR.to_owned(),
+                model: None,
+                version: Some(VERSION.to_owned()),
+                confidence: None,
+            },
+            table: None,
+            facts_table: None,
+            islands_skipped: 0,
+        }
+    }
+
+    /// Fold one response event.
+    ///
+    /// Unrecognized and unmapped events are ignored rather than refused: the
+    /// fold is a projection, and an event it has no slot for is a gap in the
+    /// projection, not a parse failure.
+    pub fn consume(&mut self, event: &pb::ParseXmlResponse) {
+        use pb::parse_xml_response::Event;
+        match event.event.as_ref() {
+            Some(Event::Info(info)) => self.on_info(info),
+            Some(Event::TextItem(item)) => {
+                self.push_text(item);
+            }
+            Some(Event::TableStart(start)) => self.on_table_start(start),
+            Some(Event::TableRow(row)) => self.on_table_row(row),
+            Some(Event::TableEnd(end)) => self.on_table_end(end),
+            Some(Event::Fact(fact)) => self.on_fact(fact),
+            Some(Event::HtmlIsland(_)) => self.islands_skipped += 1,
+            // The trailer is counts and warnings, both of which describe the
+            // typed stream rather than the document; the fold sees it only so
+            // it knows the stream is over.
+            // A `document` event is this fold's own output; folding one back
+            // in would double the fragment.
+            Some(Event::Status(_) | Event::Document(_)) | None => {}
+        }
+    }
+
+    /// Finish the fragment and take it. The fold is empty afterwards.
+    pub fn take(&mut self) -> doc::Document {
+        // A table whose `table_end` never arrived still has rows worth
+        // keeping; the parse that produced it failed, but the fold does not
+        // get to decide that.
+        if let Some(pending) = self.table.take() {
+            self.append_table(pending);
+        }
+        if self.islands_skipped > 0 {
+            let count = self.islands_skipped;
+            if let Some(body) = self.document.body.as_mut() {
+                body.meta
+                    .get_or_insert_default()
+                    .custom_fields
+                    .insert("xml.html_islands".to_owned(), number(count));
+            }
+        }
+        self.islands_skipped = 0;
+        self.facts_table = None;
+        std::mem::replace(&mut self.document, Self::new().document)
+    }
+
+    // ------------------------------------------------------------------ info
+
+    /// `XmlInfo` names the document and the dialect that mapped it.
+    ///
+    /// The dialect and the root element go on the body's meta rather than on
+    /// each item, because they are true of the whole fragment. The merge
+    /// downstream is first-writer-wins for root meta: if another collector's
+    /// fragment already wrote `xml.dialect`, ours is dropped, which is
+    /// harmless because every item still carries the dialect in its
+    /// `CollectorSource.model`.
+    fn on_info(&mut self, info: &pb::XmlInfo) {
+        let dialect = pb::XmlDialect::try_from(info.dialect).unwrap_or_default();
+        let model = model_name(dialect);
+        self.fallback_source.model = Some(model.to_owned());
+        if let Some(title) = info.title.as_ref().filter(|t| !t.is_empty()) {
+            self.document.name.clone_from(title);
+        }
+        let mut fields = BTreeMap::new();
+        fields.insert("xml.dialect", string(model));
+        if !info.root_namespace.is_empty() {
+            fields.insert("xml.root_namespace", string(&info.root_namespace));
+        }
+        if !info.root_local_name.is_empty() {
+            fields.insert("xml.root_local_name", string(&info.root_local_name));
+        }
+        if let Some(body) = self.document.body.as_mut() {
+            let meta = body.meta.get_or_insert_default();
+            for (key, value) in fields {
+                meta.custom_fields.insert(key.to_owned(), value);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ text
+
+    /// Append one text item and return its self ref.
+    fn push_text(&mut self, item: &pb::TextItem) -> String {
+        let label = pb::XmlItemLabel::try_from(item.label).unwrap_or_default();
+        let self_ref = format!("#/texts/{}", self.document.texts.len());
+        let fields = text_fields(item);
+        let source = self.source_of(item.source.as_ref());
+        let variant = if label == pb::XmlItemLabel::Code {
+            // TRAP, and the reason this branch exists: CodeItem does not wrap
+            // a TextItemBase. Its base fields are inlined so that its single
+            // `meta` slot is a FloatingMeta; see the comment on CodeItem in
+            // document.proto.
+            doc::base_text_item::Item::Code(doc::CodeItem {
+                self_ref: self_ref.clone(),
+                parent: Some(reference(BODY_REF)),
+                content_layer: doc::ContentLayer::Body as i32,
+                meta: Some(doc::FloatingMeta {
+                    custom_fields: fields,
+                    ..doc::FloatingMeta::default()
+                }),
+                label: doc::DocItemLabel::Code as i32,
+                orig: item.text.clone(),
+                text: item.text.clone(),
+                source: vec![source],
+                ..doc::CodeItem::default()
+            })
+        } else {
+            let base = doc::TextItemBase {
+                self_ref: self_ref.clone(),
+                parent: Some(reference(BODY_REF)),
+                content_layer: doc::ContentLayer::Body as i32,
+                meta: Some(doc::BaseMeta {
+                    custom_fields: fields,
+                    ..doc::BaseMeta::default()
+                }),
+                label: doc_label(label) as i32,
+                // No prov: these dialects have no pages and no boxes, and an
+                // invented one would outlive the honesty of this comment.
+                orig: item.text.clone(),
+                text: item.text.clone(),
+                source: vec![source],
+                ..doc::TextItemBase::default()
+            };
+            match label {
+                pb::XmlItemLabel::Title => {
+                    doc::base_text_item::Item::Title(doc::TitleItem { base: Some(base) })
+                }
+                pb::XmlItemLabel::SectionHeader => {
+                    doc::base_text_item::Item::SectionHeader(doc::SectionHeaderItem {
+                        base: Some(base),
+                        level: int(item.level.unwrap_or(1)),
+                    })
+                }
+                pb::XmlItemLabel::ListItem => {
+                    doc::base_text_item::Item::ListItem(doc::ListItem {
+                        base: Some(base),
+                        // The source numbered it, so the list is ordered. The
+                        // marker itself is not on the wire: the parser strips
+                        // it into `ordinal`.
+                        enumerated: item.ordinal.is_some(),
+                        marker: None,
+                    })
+                }
+                pb::XmlItemLabel::Formula => {
+                    doc::base_text_item::Item::Formula(doc::FormulaItem { base: Some(base) })
+                }
+                _ => doc::base_text_item::Item::Text(doc::TextItem { base: Some(base) }),
+            }
+        };
+        self.document.texts.push(doc::BaseTextItem {
+            item: Some(variant),
+        });
+        self.link_child(&self_ref);
+        if self.document.name.is_empty() && label == pb::XmlItemLabel::Title {
+            // `XmlInfo.title` is only set when the dialect exposes the title
+            // before the parser has passed it, which none of the four
+            // currently do; the title arrives as the first TITLE item
+            // instead, and a Document with no name is worse than one named
+            // after its own title item.
+            self.document.name.clone_from(&item.text);
+        }
+        self_ref
+    }
+
+    // ----------------------------------------------------------------- tables
+
+    fn on_table_start(&mut self, start: &pb::TableStart) {
+        // An unclosed predecessor cannot happen on a conformant stream, but
+        // dropping its rows silently if it did would be worse than keeping
+        // them.
+        if let Some(previous) = self.table.take() {
+            self.append_table(previous);
+        }
+        let mut fields = HashMap::new();
+        if !start.path.is_empty() {
+            fields.insert("xml.path".to_owned(), string(&start.path));
+        }
+        if let Some(id) = start.element_id.as_ref().filter(|id| !id.is_empty()) {
+            fields.insert("xml.element_id".to_owned(), string(id));
+        }
+        let mut captions = Vec::new();
+        if let Some(caption) = start.caption.as_ref().filter(|c| !c.is_empty()) {
+            // The caption is an item in its own right — the Document plane
+            // references captions, it does not inline them — so it is created
+            // first and the table points at it.
+            let caption_ref = self.push_text(&pb::TextItem {
+                label: pb::XmlItemLabel::Caption as i32,
+                text: caption.clone(),
+                // The caption's own path is not on the wire; the table's is
+                // the closest true locator for it.
+                path: start.path.clone(),
+                source: start.source.clone(),
+                ..pb::TextItem::default()
+            });
+            captions.push(reference(&caption_ref));
+        }
+        let source = self.source_of(start.source.as_ref());
+        self.table = Some(PendingTable {
+            reference: start.table_ref.clone(),
+            item: doc::TableItem {
+                parent: Some(reference(BODY_REF)),
+                content_layer: doc::ContentLayer::Body as i32,
+                meta: Some(doc::FloatingMeta {
+                    custom_fields: fields,
+                    ..doc::FloatingMeta::default()
+                }),
+                label: doc::DocItemLabel::Table as i32,
+                captions,
+                source: vec![source],
+                ..doc::TableItem::default()
+            },
+            grid: Vec::new(),
+            cells: Vec::new(),
+            occupied: BTreeSet::new(),
+            num_cols: 0,
+        });
+    }
+
+    /// Lay one wire row into the grid, resolving column positions against the
+    /// spans already in flight.
+    fn on_table_row(&mut self, row: &pb::TableRow) {
+        let Some(table) = self.table.as_mut() else {
+            return;
+        };
+        if table.reference != row.table_ref {
+            return;
+        }
+        let row_index = int_from_usize(table.grid.len());
+        let mut column = 0i32;
+        let mut cells = Vec::with_capacity(row.cells.len());
+        for cell in &row.cells {
+            while table.occupied.contains(&(row_index, column)) {
+                column += 1;
+            }
+            let col_span = int(cell.column_span.max(1));
+            let row_span = int(cell.row_span.max(1));
+            let end_row = row_index.saturating_add(row_span);
+            let end_col = column.saturating_add(col_span);
+            for r in row_index..end_row {
+                for c in column..end_col {
+                    table.occupied.insert((r, c));
+                }
+            }
+            cells.push(doc::TableCell {
+                row_span,
+                col_span,
+                start_row_offset_idx: row_index,
+                end_row_offset_idx: end_row,
+                start_col_offset_idx: column,
+                end_col_offset_idx: end_col,
+                text: cell.text.clone(),
+                // A cell is a header when its row is one or when the source
+                // marked the cell itself (`th` outside a `thead`).
+                column_header: row.is_header || cell.is_header,
+                ..doc::TableCell::default()
+            });
+            table.num_cols = table.num_cols.max(end_col);
+            column = end_col;
+        }
+        table.cells.extend(cells.iter().cloned());
+        table.grid.push(doc::TableRow { cells });
+    }
+
+    fn on_table_end(&mut self, end: &pb::TableEnd) {
+        let Some(table) = self.table.as_ref() else {
+            return;
+        };
+        if table.reference != end.table_ref {
+            return;
+        }
+        let pending = self.table.take().expect("checked just above");
+        self.append_table(pending);
+    }
+
+    /// Give the finished table its arena slot and link it into the body.
+    fn append_table(&mut self, pending: PendingTable) {
+        let mut item = pending.item;
+        item.self_ref = format!("#/tables/{}", self.document.tables.len());
+        item.data = Some(doc::TableData {
+            num_rows: int_from_usize(pending.grid.len()),
+            num_cols: pending.num_cols,
+            // Both shapes are populated: `grid` is the row structure the
+            // renderers walk, `table_cells` the flat list the analyzers read.
+            table_cells: pending.cells,
+            grid: pending.grid,
+            ..doc::TableData::default()
+        });
+        let self_ref = item.self_ref.clone();
+        self.document.tables.push(item);
+        self.link_child(&self_ref);
+    }
+
+    // ------------------------------------------------------------------ facts
+
+    /// Fold one XBRL fact into a row of the single fact table.
+    ///
+    /// An instance is a flat list of facts, not a document tree, so the
+    /// Document plane gets one table rather than thousands of paragraphs. The
+    /// table is created when the first fact arrives, so an instance with no
+    /// facts produces no empty table. Its row count is bounded only by the
+    /// input: a large instance makes a large table, and the byte cap on the
+    /// request is what bounds both.
+    fn on_fact(&mut self, fact: &pb::Fact) {
+        let index = if let Some(index) = self.facts_table {
+            index
+        } else {
+            self.open_facts_table(fact)
+        };
+        let values = [
+            concept_name(fact),
+            fact.context_ref.clone(),
+            period_text(fact.context.as_ref()),
+            unit_text(fact),
+            fact.value.clone(),
+            fact.decimals.clone().unwrap_or_default(),
+        ];
+        let Some(data) = self
+            .document
+            .tables
+            .get_mut(index)
+            .and_then(|table| table.data.as_mut())
+        else {
+            return;
+        };
+        let row_index = int_from_usize(data.grid.len());
+        let cells: Vec<doc::TableCell> = values
+            .iter()
+            .enumerate()
+            .map(|(column, text)| {
+                let column = int_from_usize(column);
+                doc::TableCell {
+                    row_span: 1,
+                    col_span: 1,
+                    start_row_offset_idx: row_index,
+                    end_row_offset_idx: row_index + 1,
+                    start_col_offset_idx: column,
+                    end_col_offset_idx: column + 1,
+                    text: text.clone(),
+                    ..doc::TableCell::default()
+                }
+            })
+            .collect();
+        data.table_cells.extend(cells.iter().cloned());
+        data.grid.push(doc::TableRow { cells });
+        data.num_rows = int_from_usize(data.grid.len());
+    }
+
+    /// Create the fact table with its header row and return its arena index.
+    fn open_facts_table(&mut self, fact: &pb::Fact) -> usize {
+        let index = self.document.tables.len();
+        let self_ref = format!("#/tables/{index}");
+        let mut fields = HashMap::new();
+        fields.insert("xml.table".to_owned(), string("facts"));
+        let header = doc::TableRow {
+            cells: FACT_COLUMNS
+                .iter()
+                .enumerate()
+                .map(|(column, name)| header_cell(int_from_usize(column), name))
+                .collect(),
+        };
+        self.document.tables.push(doc::TableItem {
+            self_ref: self_ref.clone(),
+            parent: Some(reference(BODY_REF)),
+            content_layer: doc::ContentLayer::Body as i32,
+            meta: Some(doc::FloatingMeta {
+                custom_fields: fields,
+                ..doc::FloatingMeta::default()
+            }),
+            label: doc::DocItemLabel::Table as i32,
+            data: Some(doc::TableData {
+                table_cells: header.cells.clone(),
+                num_rows: 1,
+                num_cols: int_from_usize(FACT_COLUMNS.len()),
+                grid: vec![header],
+                ..doc::TableData::default()
+            }),
+            source: vec![self.source_of(fact.source.as_ref())],
+            ..doc::TableItem::default()
+        });
+        self.link_child(&self_ref);
+        self.facts_table = Some(index);
+        index
+    }
+
+    // ------------------------------------------------------------- primitives
+
+    /// Both halves of the parent link: the item names `#/body`, and `#/body`
+    /// lists the item. An integrity check fails on either one alone.
+    fn link_child(&mut self, child: &str) {
+        if let Some(body) = self.document.body.as_mut() {
+            body.children.push(reference(child));
+        }
+    }
+
+    /// The item's own attribution, converted field for field, or this
+    /// service's own when the event carried none.
+    fn source_of(&self, wire: Option<&pb::CollectorSource>) -> doc::SourceType {
+        let collector = wire.map_or_else(
+            || self.fallback_source.clone(),
+            |source| doc::CollectorSource {
+                collector: source.collector.clone(),
+                model: source.model.clone(),
+                version: source.version.clone(),
+                // Unset upstream and unset here: a declarative mapping is
+                // deterministic, so a confidence would be noise.
+                confidence: source.confidence,
+            },
+        );
+        doc::SourceType {
+            source: Some(doc::source_type::Source::Collector(collector)),
+        }
+    }
+}
+
+/// Per-item `meta.custom_fields`: everything the wire item says that the
+/// Document plane has no typed slot for.
+fn text_fields(item: &pb::TextItem) -> HashMap<String, Value> {
+    let mut fields = HashMap::new();
+    if !item.path.is_empty() {
+        fields.insert("xml.path".to_owned(), string(&item.path));
+    }
+    if !item.role.is_empty() {
+        fields.insert("xml.role".to_owned(), string(&item.role));
+    }
+    if let Some(id) = item.element_id.as_ref().filter(|id| !id.is_empty()) {
+        fields.insert("xml.element_id".to_owned(), string(id));
+    }
+    if let Some(ordinal) = item.ordinal {
+        fields.insert("xml.ordinal".to_owned(), number(ordinal));
+    }
+    fields
+}
+
+/// The Document label for a wire label.
+///
+/// The two vocabularies were written to match, so this is a rename and not an
+/// interpretation. `XML_ITEM_LABEL_UNSPECIFIED` means "free text", which is
+/// what `DOC_ITEM_LABEL_TEXT` means.
+const fn doc_label(label: pb::XmlItemLabel) -> doc::DocItemLabel {
+    match label {
+        pb::XmlItemLabel::Unspecified | pb::XmlItemLabel::Text => doc::DocItemLabel::Text,
+        pb::XmlItemLabel::Title => doc::DocItemLabel::Title,
+        pb::XmlItemLabel::SectionHeader => doc::DocItemLabel::SectionHeader,
+        pb::XmlItemLabel::Paragraph => doc::DocItemLabel::Paragraph,
+        pb::XmlItemLabel::ListItem => doc::DocItemLabel::ListItem,
+        pb::XmlItemLabel::Caption => doc::DocItemLabel::Caption,
+        pb::XmlItemLabel::Reference => doc::DocItemLabel::Reference,
+        pb::XmlItemLabel::Footnote => doc::DocItemLabel::Footnote,
+        pb::XmlItemLabel::Code => doc::DocItemLabel::Code,
+        pb::XmlItemLabel::Formula => doc::DocItemLabel::Formula,
+        // A picture item from an XML dialect is a reference and its alt text,
+        // never pixels. It stays a text item labelled PICTURE rather than
+        // becoming a PictureItem with no image, which would claim an image
+        // this collector does not have.
+        pb::XmlItemLabel::Picture => doc::DocItemLabel::Picture,
+    }
+}
+
+/// The dialect short name, matching `CollectorSource.model` on the wire.
+const fn model_name(dialect: pb::XmlDialect) -> &'static str {
+    match dialect {
+        pb::XmlDialect::Unspecified => "",
+        pb::XmlDialect::Jats => "jats",
+        pb::XmlDialect::Uspto => "uspto",
+        pb::XmlDialect::Xbrl => "xbrl",
+        pb::XmlDialect::Doclang => "doclang",
+    }
+}
+
+/// `prefix:localName` as the instance wrote it, or the local name alone.
+fn concept_name(fact: &pb::Fact) -> String {
+    if fact.concept_prefix.is_empty() {
+        fact.concept_local_name.clone()
+    } else {
+        format!("{}:{}", fact.concept_prefix, fact.concept_local_name)
+    }
+}
+
+/// The reporting period as one deterministic string: an instant date, an
+/// ISO 8601 `start/end` interval, `forever`, or empty when the context was
+/// not resolved.
+fn period_text(context: Option<&pb::XbrlContext>) -> String {
+    let Some(period) = context.and_then(|c| c.period.as_ref()) else {
+        return String::new();
+    };
+    if let Some(instant) = period.instant.as_ref().filter(|i| !i.is_empty()) {
+        return instant.clone();
+    }
+    match (period.start_date.as_deref(), period.end_date.as_deref()) {
+        (Some(start), Some(end)) => format!("{start}/{end}"),
+        (Some(start), None) => start.to_owned(),
+        (None, Some(end)) => end.to_owned(),
+        (None, None) => {
+            if period.forever {
+                "forever".to_owned()
+            } else {
+                String::new()
+            }
+        }
+    }
+}
+
+/// The unit as measures when it was resolved, otherwise the reference the
+/// fact named. A divide unit is written `numerator/denominator`.
+fn unit_text(fact: &pb::Fact) -> String {
+    let Some(unit) = fact.unit.as_ref() else {
+        return fact.unit_ref.clone().unwrap_or_default();
+    };
+    if !unit.measures.is_empty() {
+        return unit.measures.join(" ");
+    }
+    if !unit.numerator_measures.is_empty() || !unit.denominator_measures.is_empty() {
+        return format!(
+            "{}/{}",
+            unit.numerator_measures.join(" "),
+            unit.denominator_measures.join(" ")
+        );
+    }
+    unit.id.clone()
+}
+
+/// One header cell of the fact table.
+fn header_cell(column: i32, text: &str) -> doc::TableCell {
+    doc::TableCell {
+        row_span: 1,
+        col_span: 1,
+        start_row_offset_idx: 0,
+        end_row_offset_idx: 1,
+        start_col_offset_idx: column,
+        end_col_offset_idx: column + 1,
+        text: text.to_owned(),
+        column_header: true,
+        ..doc::TableCell::default()
+    }
+}
+
+/// A root group with nothing in it yet.
+fn group(self_ref: &str, layer: doc::ContentLayer) -> doc::GroupItem {
+    doc::GroupItem {
+        self_ref: self_ref.to_owned(),
+        content_layer: layer as i32,
+        ..doc::GroupItem::default()
+    }
+}
+
+/// A JSON-Pointer reference to another item.
+fn reference(target: &str) -> doc::RefItem {
+    doc::RefItem {
+        r#ref: target.to_owned(),
+    }
+}
+
+/// A `google.protobuf.Value` holding a string.
+fn string(text: &str) -> Value {
+    Value {
+        kind: Some(Kind::StringValue(text.to_owned())),
+    }
+}
+
+/// A `google.protobuf.Value` holding a number.
+fn number(value: u64) -> Value {
+    // JSON numbers are doubles, so this is the schema's own precision limit,
+    // not one this fold introduces. The counts and ordinals that reach here
+    // (claim numbers, list positions, island counts) are many orders of
+    // magnitude below 2^53.
+    #[allow(clippy::cast_precision_loss)]
+    let number = value as f64;
+    Value {
+        kind: Some(Kind::NumberValue(number)),
+    }
+}
+
+/// A wire `uint32` as the schema's `int32`, saturating rather than wrapping.
+fn int(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+/// A count as the schema's `int32`, saturating rather than wrapping.
+fn int_from_usize(value: usize) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+/// Everything wrong with a folded fragment, as messages, empty when it is
+/// sound.
+///
+/// This is the merge contract stated as a check, ported from
+/// `docling_integrity_errors` in gRParse: the coordinator merges fragments
+/// additively by renumbering refs, which only works if every ref is dense,
+/// unique and reciprocated. Every fold test asserts this is empty, because a
+/// fragment that fails it corrupts a document the fold never sees.
+#[must_use]
+pub fn integrity_errors(document: &doc::Document) -> Vec<String> {
+    let mut walk = Walk::default();
+    walk.roots(document);
+    walk.arenas(document);
+    walk.finish(document)
+}
+
+/// One pass over a document's refs, gathering what the three checks need:
+/// which refs exist, who lists whom as a child, and who claims whom as a
+/// parent.
+#[derive(Default)]
+struct Walk {
+    refs: BTreeSet<String>,
+    children: BTreeMap<String, BTreeSet<String>>,
+    parents: Vec<(String, String)>,
+    errors: Vec<String>,
+}
+
+impl Walk {
+    /// The two groups that exist before any item does.
+    fn roots(&mut self, document: &doc::Document) {
+        for (name, root) in [
+            (BODY_REF, document.body.as_ref()),
+            (FURNITURE_REF, document.furniture.as_ref()),
+        ] {
+            self.refs.insert(name.to_owned());
+            let entry = self.children.entry(name.to_owned()).or_default();
+            if let Some(root) = root {
+                for child in &root.children {
+                    entry.insert(child.r#ref.clone());
+                }
+            }
+        }
+    }
+
+    /// Every arena, in the order the refs number them.
+    fn arenas(&mut self, document: &doc::Document) {
+        for (index, group) in document.groups.iter().enumerate() {
+            let expected = format!("#/groups/{index}");
+            self.item(
+                &group.self_ref,
+                &expected,
+                &group.children,
+                group.parent.as_ref(),
+            );
+        }
+        for (index, item) in document.texts.iter().enumerate() {
+            let expected = format!("#/texts/{index}");
+            match item.item.as_ref() {
+                // CodeItem inlines its base fields, so it is walked directly
+                // rather than through `text_base`.
+                Some(doc::base_text_item::Item::Code(code)) => {
+                    self.item(
+                        &code.self_ref,
+                        &expected,
+                        &code.children,
+                        code.parent.as_ref(),
+                    );
+                }
+                Some(other) => match text_base(other) {
+                    Some(base) => {
+                        self.item(
+                            &base.self_ref,
+                            &expected,
+                            &base.children,
+                            base.parent.as_ref(),
+                        );
+                    }
+                    None => self
+                        .errors
+                        .push(format!("text item {expected} has no base")),
+                },
+                None => self
+                    .errors
+                    .push(format!("text item {expected} has no variant set")),
+            }
+        }
+        for (index, picture) in document.pictures.iter().enumerate() {
+            let expected = format!("#/pictures/{index}");
+            self.item(
+                &picture.self_ref,
+                &expected,
+                &picture.children,
+                picture.parent.as_ref(),
+            );
+        }
+        for (index, table) in document.tables.iter().enumerate() {
+            let expected = format!("#/tables/{index}");
+            self.item(
+                &table.self_ref,
+                &expected,
+                &table.children,
+                table.parent.as_ref(),
+            );
+        }
+    }
+
+    /// One item: its ref must be present, unique and exactly its position.
+    fn item(
+        &mut self,
+        self_ref: &str,
+        expected: &str,
+        children: &[doc::RefItem],
+        parent: Option<&doc::RefItem>,
+    ) {
+        if self_ref.is_empty() {
+            self.errors
+                .push(format!("item at {expected} has an empty self_ref"));
+            return;
+        }
+        if self_ref != expected {
+            self.errors.push(format!(
+                "self_ref {self_ref} does not match its arena position {expected}"
+            ));
+        }
+        if !self.refs.insert(self_ref.to_owned()) {
+            self.errors.push(format!("duplicate self_ref {self_ref}"));
+        }
+        let entry = self.children.entry(self_ref.to_owned()).or_default();
+        for child in children {
+            entry.insert(child.r#ref.clone());
+        }
+        if let Some(parent) = parent {
+            self.parents
+                .push((self_ref.to_owned(), parent.r#ref.clone()));
+        }
+    }
+
+    /// Resolve every ref gathered, and every caption a table points at.
+    fn finish(mut self, document: &doc::Document) -> Vec<String> {
+        for (parent, listed) in &self.children {
+            for child in listed {
+                if !self.refs.contains(child) {
+                    self.errors
+                        .push(format!("child {child} of {parent} does not resolve"));
+                }
+            }
+        }
+        for (child, parent) in &self.parents {
+            if !self.refs.contains(parent) {
+                self.errors
+                    .push(format!("parent {parent} of {child} does not resolve"));
+                continue;
+            }
+            if !self
+                .children
+                .get(parent)
+                .is_some_and(|listed| listed.contains(child))
+            {
+                self.errors
+                    .push(format!("parent {parent} does not list {child} as a child"));
+            }
+        }
+        for table in &document.tables {
+            for caption in &table.captions {
+                if !self.refs.contains(&caption.r#ref) {
+                    self.errors.push(format!(
+                        "caption {} of {} does not resolve",
+                        caption.r#ref, table.self_ref
+                    ));
+                }
+            }
+        }
+        self.errors
+    }
+}
+
+/// The shared base of every text variant that has one. `CodeItem` has none:
+/// its base fields are inlined.
+fn text_base(item: &doc::base_text_item::Item) -> Option<&doc::TextItemBase> {
+    match item {
+        doc::base_text_item::Item::Title(i) => i.base.as_ref(),
+        doc::base_text_item::Item::SectionHeader(i) => i.base.as_ref(),
+        doc::base_text_item::Item::ListItem(i) => i.base.as_ref(),
+        doc::base_text_item::Item::Formula(i) => i.base.as_ref(),
+        doc::base_text_item::Item::Text(i) => i.base.as_ref(),
+        doc::base_text_item::Item::FieldHeading(i) => i.base.as_ref(),
+        doc::base_text_item::Item::FieldValue(i) => i.base.as_ref(),
+        doc::base_text_item::Item::Code(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(label: pb::XmlItemLabel, body: &str) -> pb::ParseXmlResponse {
+        pb::ParseXmlResponse {
+            event: Some(pb::parse_xml_response::Event::TextItem(pb::TextItem {
+                label: label as i32,
+                text: body.to_owned(),
+                path: "/doc/p".to_owned(),
+                ..pb::TextItem::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn an_empty_fold_is_a_sound_empty_fragment() {
+        let mut fold = DocumentFold::new();
+        let document = fold.take();
+        assert_eq!(document.schema_name.as_deref(), Some(SCHEMA_NAME));
+        assert_eq!(
+            document.origin.as_ref().map(|o| o.mimetype.as_str()),
+            Some(MIMETYPE)
+        );
+        assert!(integrity_errors(&document).is_empty());
+    }
+
+    #[test]
+    fn the_checker_catches_a_child_nobody_created() {
+        let mut fold = DocumentFold::new();
+        fold.consume(&text(pb::XmlItemLabel::Paragraph, "one"));
+        let mut document = fold.take();
+        document
+            .body
+            .as_mut()
+            .expect("body")
+            .children
+            .push(reference("#/texts/7"));
+        let errors = integrity_errors(&document);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("#/texts/7"), "{errors:?}");
+    }
+
+    #[test]
+    fn the_checker_catches_a_parent_that_disowns_its_child() {
+        let mut fold = DocumentFold::new();
+        fold.consume(&text(pb::XmlItemLabel::Paragraph, "one"));
+        let mut document = fold.take();
+        document.body.as_mut().expect("body").children.clear();
+        let errors = integrity_errors(&document);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("does not list"), "{errors:?}");
+    }
+
+    #[test]
+    fn the_checker_catches_a_ref_that_lies_about_its_position() {
+        let mut fold = DocumentFold::new();
+        fold.consume(&text(pb::XmlItemLabel::Paragraph, "one"));
+        let mut document = fold.take();
+        let Some(doc::base_text_item::Item::Text(item)) = document.texts[0].item.as_mut() else {
+            panic!("a paragraph folds to a TextItem");
+        };
+        item.base.as_mut().expect("base").self_ref = "#/texts/4".to_owned();
+        let errors = integrity_errors(&document);
+        assert!(
+            errors.iter().any(|e| e.contains("arena position")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn taking_twice_does_not_repeat_the_first_fragment() {
+        let mut fold = DocumentFold::new();
+        fold.consume(&text(pb::XmlItemLabel::Paragraph, "one"));
+        assert_eq!(fold.take().texts.len(), 1);
+        assert_eq!(fold.take().texts.len(), 0);
+    }
+
+    #[test]
+    fn a_period_renders_deterministically_in_every_shape() {
+        let instant = pb::XbrlContext {
+            period: Some(pb::XbrlPeriod {
+                instant: Some("2026-12-31".to_owned()),
+                ..pb::XbrlPeriod::default()
+            }),
+            ..pb::XbrlContext::default()
+        };
+        let duration = pb::XbrlContext {
+            period: Some(pb::XbrlPeriod {
+                start_date: Some("2026-01-01".to_owned()),
+                end_date: Some("2026-12-31".to_owned()),
+                ..pb::XbrlPeriod::default()
+            }),
+            ..pb::XbrlContext::default()
+        };
+        let forever = pb::XbrlContext {
+            period: Some(pb::XbrlPeriod {
+                forever: true,
+                ..pb::XbrlPeriod::default()
+            }),
+            ..pb::XbrlContext::default()
+        };
+        assert_eq!(period_text(Some(&instant)), "2026-12-31");
+        assert_eq!(period_text(Some(&duration)), "2026-01-01/2026-12-31");
+        assert_eq!(period_text(Some(&forever)), "forever");
+        assert_eq!(period_text(None), "");
+    }
+}

@@ -35,6 +35,7 @@ fn kind(event: &pb::ParseXmlResponse) -> &'static str {
         Some(pb::parse_xml_response::Event::TableEnd(_)) => "table_end",
         Some(pb::parse_xml_response::Event::Fact(_)) => "fact",
         Some(pb::parse_xml_response::Event::HtmlIsland(_)) => "html_island",
+        Some(pb::parse_xml_response::Event::Document(_)) => "document",
         Some(pb::parse_xml_response::Event::Status(_)) => "status",
         None => "empty",
     }

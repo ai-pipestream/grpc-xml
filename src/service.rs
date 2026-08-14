@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
+use crate::document_fold::DocumentFold;
 use crate::metrics::Metrics;
 use crate::parse::{self, CAP_MARKER, InputStats, ParseConfig, ParseError};
 use crate::proto::v1 as pb;
@@ -192,6 +193,7 @@ impl XmlParseService for XmlGrpc {
         };
         let limit = self.resolve_cap(options.max_document_mib);
         let stats = InputStats::with_limit(limit);
+        let emit_document = options.emit_document;
 
         self.metrics.parses_started.fetch_add(1, Ordering::Relaxed);
 
@@ -200,46 +202,7 @@ impl XmlParseService for XmlGrpc {
         let forward_tx = event_tx.clone();
         let panic_tx = event_tx.clone();
 
-        // Forward document bytes into the parser. Dropping `chunk_tx` on the
-        // way out is what signals EOF, including when the client aborts.
-        tokio::spawn(async move {
-            loop {
-                match requests.message().await {
-                    Ok(Some(message)) => match message.payload {
-                        Some(pb::parse_xml_request::Payload::Chunk(chunk)) => {
-                            if chunk.is_empty() {
-                                continue;
-                            }
-                            if chunk_tx.send(chunk).await.is_err() {
-                                break;
-                            }
-                        }
-                        Some(pb::parse_xml_request::Payload::Options(_)) => {
-                            let _ = forward_tx
-                                .send(Err(Status::invalid_argument(
-                                    "`options` may only be set on the first request message",
-                                )))
-                                .await;
-                            break;
-                        }
-                        None => {
-                            let _ = forward_tx
-                                .send(Err(Status::invalid_argument(
-                                    "every ParseXml request message must set `options` or \
-                                     `chunk`",
-                                )))
-                                .await;
-                            break;
-                        }
-                    },
-                    Ok(None) => break,
-                    Err(transport) => {
-                        let _ = forward_tx.send(Err(transport)).await;
-                        break;
-                    }
-                }
-            }
-        });
+        forward_chunks(requests, chunk_tx, forward_tx);
 
         let metrics = Arc::clone(&self.metrics);
         let handle = tokio::runtime::Handle::current();
@@ -248,7 +211,15 @@ impl XmlParseService for XmlGrpc {
             // async wrapper, so it is moved into the blocking closure.
             let joined = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                run_parse(&handle, chunk_rx, &event_tx, &config, &stats, &metrics);
+                run_parse(
+                    &handle,
+                    chunk_rx,
+                    &event_tx,
+                    &config,
+                    &stats,
+                    &metrics,
+                    emit_document,
+                );
             })
             .await;
             match joined {
@@ -290,6 +261,11 @@ impl XmlParseService for XmlGrpc {
 }
 
 /// The blocking half of one parse.
+///
+/// `emit_document` adds the Document fold to the same event path: every event
+/// the driver produces is folded on its way out, and the folded Document is
+/// sent as its own event just before the trailer. With the flag off no fold
+/// exists and the path is byte for byte what it was.
 fn run_parse(
     handle: &tokio::runtime::Handle,
     chunk_rx: mpsc::Receiver<Vec<u8>>,
@@ -297,19 +273,29 @@ fn run_parse(
     config: &ParseConfig,
     stats: &InputStats,
     metrics: &Metrics,
+    emit_document: bool,
 ) {
     let reader =
         io::BufReader::with_capacity(64 * 1024, ChannelReader::new(chunk_rx, stats.clone()));
     let mut events = 0u64;
+    let mut fold = emit_document.then(DocumentFold::new);
     let mut emit = |event: pb::ParseXmlResponse| {
-        // A bounded send with a deadline: real backpressure for a client that
-        // is merely slow, and an exit for one that has stopped reading
-        // without closing the stream.
-        let sent = handle.block_on(async {
-            tokio::time::timeout(CONSUMER_STALL, event_tx.send(Ok(event)))
-                .await
-                .is_ok_and(|r| r.is_ok())
-        });
+        if let Some(fold) = fold.as_mut() {
+            fold.consume(&event);
+            // The trailer is the fold's cue that the stream is complete: it
+            // has now seen every event, so the Document goes out here, ahead
+            // of the trailer that is still the last event of the stream.
+            if matches!(event.event, Some(pb::parse_xml_response::Event::Status(_))) {
+                let document = pb::ParseXmlResponse {
+                    event: Some(pb::parse_xml_response::Event::Document(fold.take())),
+                };
+                if !deliver(handle, event_tx, document) {
+                    return false;
+                }
+                events += 1;
+            }
+        }
+        let sent = deliver(handle, event_tx, event);
         if sent {
             events += 1;
         }
@@ -332,6 +318,72 @@ fn run_parse(
             });
         }
     }
+}
+
+/// Forward document bytes from the request stream into the parser.
+///
+/// Dropping `chunk_tx` on the way out is what signals EOF, including when the
+/// client aborts. A frame that breaks the request contract ends the parse
+/// with `INVALID_ARGUMENT` on the event channel rather than being ignored.
+fn forward_chunks(
+    mut requests: Streaming<pb::ParseXmlRequest>,
+    chunk_tx: mpsc::Sender<Vec<u8>>,
+    forward_tx: mpsc::Sender<Result<pb::ParseXmlResponse, Status>>,
+) {
+    tokio::spawn(async move {
+        loop {
+            match requests.message().await {
+                Ok(Some(message)) => match message.payload {
+                    Some(pb::parse_xml_request::Payload::Chunk(chunk)) => {
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        if chunk_tx.send(chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(pb::parse_xml_request::Payload::Options(_)) => {
+                        let _ = forward_tx
+                            .send(Err(Status::invalid_argument(
+                                "`options` may only be set on the first request message",
+                            )))
+                            .await;
+                        break;
+                    }
+                    None => {
+                        let _ = forward_tx
+                            .send(Err(Status::invalid_argument(
+                                "every ParseXml request message must set `options` or `chunk`",
+                            )))
+                            .await;
+                        break;
+                    }
+                },
+                Ok(None) => break,
+                Err(transport) => {
+                    let _ = forward_tx.send(Err(transport)).await;
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// Send one event to the client.
+///
+/// A bounded send with a deadline: real backpressure for a client that is
+/// merely slow, and an exit for one that has stopped reading without closing
+/// the stream. Returns false when the consumer is gone.
+fn deliver(
+    handle: &tokio::runtime::Handle,
+    event_tx: &mpsc::Sender<Result<pb::ParseXmlResponse, Status>>,
+    event: pb::ParseXmlResponse,
+) -> bool {
+    handle.block_on(async {
+        tokio::time::timeout(CONSUMER_STALL, event_tx.send(Ok(event)))
+            .await
+            .is_ok_and(|r| r.is_ok())
+    })
 }
 
 /// The fleet's error taxonomy, in one place.

@@ -12,6 +12,9 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_root = "proto";
     let protos = [
+        // Vendored byte-identical from the gRParse repository: the Document
+        // plane this collector projects into. Never edited here.
+        "proto/ai/pipestream/document/v1/document.proto",
         "proto/ai/pipestream/xml/v1/xml.proto",
         "proto/ai/pipestream/xml/v1/xml_service.proto",
     ];

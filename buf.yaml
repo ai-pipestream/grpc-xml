@@ -12,6 +12,12 @@ lint:
     - STANDARD
     - COMMENTS
   disallow_comment_ignores: true
+  ignore_only:
+    # The document schema is vendored for parity with the upstream JSON
+    # schema (canonical copy in the gRParse repo); its comment coverage
+    # follows that schema, not this repo's comment rule.
+    COMMENTS:
+      - proto/ai/pipestream/document/v1/document.proto
 breaking:
   use:
     - FILE

@@ -20,9 +20,12 @@
 //! The modules follow the data: [`security`] and [`sniff`] decide whether and
 //! how to parse, [`dialect`] holds the per-family mapping rules, [`parse`]
 //! is the streaming driver that turns XML events into protobuf events, and
-//! [`service`] wires that to tonic.
+//! [`service`] wires that to tonic. [`document_fold`] is the optional second
+//! consumer of that same event stream: it folds it into one
+//! `ai.pipestream.document.v1.Document` when a caller asks for one.
 
 pub mod dialect;
+pub mod document_fold;
 pub mod metrics;
 pub mod parse;
 pub mod security;
@@ -43,6 +46,27 @@ pub mod proto {
     /// Messages, client and server for the `ai.pipestream.xml.v1` package.
     pub mod v1 {
         tonic::include_proto!("ai.pipestream.xml.v1");
+    }
+}
+
+/// Generated protobuf messages for `ai.pipestream.document.v1`, the Document
+/// plane this collector projects into.
+///
+/// The schema is vendored byte-identical from the gRParse repository and is
+/// never edited here; [`document_fold`] is the only thing in this crate that
+/// builds one.
+///
+/// The module sits at the crate root rather than under [`proto`] because
+/// prost resolves a cross-package reference by walking up from the
+/// referring package's module: the `document` variant generated into
+/// `proto::v1::parse_xml_response` names `super::super::super::document::v1`,
+/// which is `crate::document::v1`. Moving this module changes nothing but
+/// the compile error.
+#[allow(missing_docs, clippy::all, clippy::pedantic, clippy::nursery)]
+pub mod document {
+    /// Messages for the `ai.pipestream.document.v1` package.
+    pub mod v1 {
+        tonic::include_proto!("ai.pipestream.document.v1");
     }
 }
 

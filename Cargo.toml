@@ -18,6 +18,9 @@ publish = false
 # resolved, which is the property the XXE and billion-laughs tests assert.
 quick-xml = { version = "0.41.0", features = ["encoding"] }
 prost = "0.14.4"
+# `google.protobuf.Value`, which the vendored document schema uses for the
+# `BaseMeta.custom_fields` escape hatch the Document fold writes into.
+prost-types = "0.14.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "net", "time"] }
 tokio-stream = "0.1"
 tonic = { version = "0.14.6", features = ["gzip", "zstd"] }

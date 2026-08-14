@@ -60,6 +60,7 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 | `taxonomy` | XBRL taxonomy package bytes. Accepted, unused in v1 (see below) |
 | `emit_html_islands` | Hand XHTML subtrees to the HTML collector instead of flattening them |
 | `include_attributes` | Attach unconsumed source attributes to every item |
+| `emit_document` | Also fold the parse into one `ai.pipestream.document.v1.Document`, sent just before the trailer (see below) |
 
 **Response.** Exactly one `info` first, content events in document order,
 exactly one `status` last.
@@ -71,6 +72,7 @@ exactly one `status` last.
 | `table_start` / `table_row` / `table_end` | A table, streamed a row at a time as each row's end tag is read |
 | `fact` | One XBRL fact with its context and unit resolved inline |
 | `html_island` | An XHTML fragment, re-serialized, for the HTML collector |
+| `document` | The whole parse folded into one `Document`. Only when `emit_document` was set, exactly once, immediately before `status` |
 | `status` | `ParseStatus`: dialect, counts, aggregated warnings, bytes consumed, elapsed |
 
 Every item carries a `CollectorSource` (`collector = "xml"`,
@@ -98,6 +100,43 @@ that content has already arrived, and only then sends the rest. An
 implementation that buffered the parse and flushed at the end would hang
 there rather than fail an equality check. That test was verified against a
 deliberately batching build before being committed.
+
+## The Document projection (opt-in)
+
+Set `emit_document` and the server folds its own event stream into one
+`ai.pipestream.document.v1.Document` and sends it as a `document` event
+immediately before the trailer. The typed events still go out first, unchanged
+and in order: the Document is a **lossy projection** of them, not a second
+source of truth. With the option off, the fold is never constructed.
+
+The fold is [`src/document_fold.rs`](src/document_fold.rs) — a standalone,
+directly-testable module, so a coordinator gets the mapping from the collector
+that knows what the events mean instead of reimplementing it. The schema is
+vendored byte-identical from gRParse into
+[`proto/ai/pipestream/document/v1`](proto/ai/pipestream/document/v1) and is
+never edited here.
+
+| Wire event | Document |
+|---|---|
+| `info` | `name` (the title), `origin.mimetype = application/xml`, and `xml.dialect` / `xml.root_namespace` / `xml.root_local_name` on the body meta |
+| `text_item` | A `BaseTextItem` variant chosen by label — `TitleItem`, `SectionHeaderItem`, `ListItem`, `CodeItem`, `FormulaItem`, else `TextItem` — with `text` and `orig` set |
+| `table_start` / `table_row` / `table_end` | One `TableItem`: both `grid` and flat `table_cells`, offsets computed honoring spans, the caption created as a `CAPTION` item and referenced |
+| `fact` | One row of a single lazily created "facts" table: concept, context, period, unit, value, decimals |
+| `html_island` | **Not mapped** — the HTML collector's job. The count lands in `body.meta.custom_fields["xml.html_islands"]` |
+| `status` | Nothing; it describes the stream, not the document |
+
+Every item carries a `CollectorSource` (`collector = "xml"`, `model` = the
+dialect, `version` = this build, no `confidence`), and **no `prov`**: these
+dialects have no pages and no boxes. The source locators — positional path,
+element id, source role, ordinal — are per-item `meta.custom_fields` under
+`xml.` keys. Refs are dense and local (`#/texts/0`, `#/tables/1`) with
+`parent` and `children` reciprocal, which is what lets the coordinator merge
+the fragment additively; `document_fold::integrity_errors` is that contract as
+a check, and every fold test asserts it is empty. A fact table's row count is
+bounded only by the input — the request byte cap bounds both.
+
+[`docs/design.md`](docs/design.md) §4 has the full mapping and the list of
+what is deliberately not projected.
 
 ## Security
 
@@ -177,16 +216,19 @@ being resolved by precedence.
 ## Layout
 
 ```text
-proto/ai/pipestream/xml/v1/   the contract; buf lint STANDARD + COMMENTS
-src/security.rs               what the parser refuses and what it records
-src/sniff.rs                  dialect resolution and its evidence
-src/dialect.rs                per-family mapping rules, one pure function each
-src/parse.rs                  the streaming driver: XML events to protobuf events
-src/service.rs                tonic wiring, byte cap, admission control
-src/metrics.rs                counters and the interval line
-tests/dialects.rs             golden mappings for all four families
-tests/security.rs             XXE, entity bombs, truncation, caps, refusals
-tests/live_stream.rs          the tests that fail if the stream becomes a batch
+proto/ai/pipestream/xml/v1/       the contract; buf lint STANDARD + COMMENTS
+proto/ai/pipestream/document/v1/  the Document plane, vendored from gRParse
+src/security.rs                   what the parser refuses and what it records
+src/sniff.rs                      dialect resolution and its evidence
+src/dialect.rs                    per-family mapping rules, one pure function each
+src/parse.rs                      the streaming driver: XML events to protobuf events
+src/document_fold.rs              the opt-in fold from those events to one Document
+src/service.rs                    tonic wiring, byte cap, admission control
+src/metrics.rs                    counters and the interval line
+tests/dialects.rs                 golden mappings for all four families
+tests/document_fold.rs            the fold per dialect, and the wire event's placement
+tests/security.rs                 XXE, entity bombs, truncation, caps, refusals
+tests/live_stream.rs              the tests that fail if the stream becomes a batch
 ```
 
 ## Docs
