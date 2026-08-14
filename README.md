@@ -120,18 +120,28 @@ never edited here.
 |---|---|
 | `info` | `name` (the title), `origin.mimetype = application/xml`, and `xml.dialect` / `xml.root_namespace` / `xml.root_local_name` on the body meta |
 | `text_item` | A `BaseTextItem` variant chosen by label — `TitleItem`, `SectionHeaderItem`, `ListItem`, `CodeItem`, `FormulaItem`, else `TextItem` — with `text` and `orig` set |
+| `text_item` labelled `PICTURE` | A placeholder `PictureItem` with `image` unset, and the reference the event carried (`href`, drawing filename) as a `CAPTION` item in its `captions[]` |
 | `table_start` / `table_row` / `table_end` | One `TableItem`: both `grid` and flat `table_cells`, offsets computed honoring spans, the caption created as a `CAPTION` item and referenced |
 | `fact` | One row of a single lazily created "facts" table: concept, context, period, unit, value, decimals |
 | `html_island` | **Not mapped** — the HTML collector's job. The count lands in `body.meta.custom_fields["xml.html_islands"]` |
 | `status` | Nothing; it describes the stream, not the document |
 
+Structure follows docling's heading-as-parent idiom rather than a flat body: a
+section header of level N is parented to the nearest open header of a level
+below N (`#/body` when there is none), and the content after it — text, table,
+picture — hangs off that header. Content before the first heading sits on
+`#/body`. There are no section `GroupItem`s; upstream uses those only to fill
+in heading levels an HTML document skipped, and these dialects give the parser
+real levels.
+
 Every item carries a `CollectorSource` (`collector = "xml"`, `model` = the
 dialect, `version` = this build, no `confidence`), and **no `prov`**: these
 dialects have no pages and no boxes. The source locators — positional path,
 element id, source role, ordinal — are per-item `meta.custom_fields` under
-`xml.` keys. Refs are dense and local (`#/texts/0`, `#/tables/1`) with
-`parent` and `children` reciprocal, which is what lets the coordinator merge
-the fragment additively; `document_fold::integrity_errors` is that contract as
+`xml.` keys. Refs are dense and local (`#/texts/0`, `#/pictures/0`,
+`#/tables/1`) with `parent` and `children` reciprocal, which is what lets the
+coordinator merge the fragment additively;
+`document_fold::integrity_errors` is that contract as
 a check, and every fold test asserts it is empty. A fact table's row count is
 bounded only by the input — the request byte cap bounds both.
 

@@ -16,10 +16,19 @@
 //!   state that outlives an event is the table currently being streamed, which
 //!   is the one shape the wire splits across events.
 //! - **A self-contained fragment.** Refs are dense and local
-//!   (`#/texts/0`, `#/tables/1`), every item's `parent` is `#/body` and every
-//!   item is listed in `body.children`, so the coordinator's additive merge can
-//!   renumber the whole fragment mechanically. [`integrity_errors`] is the
-//!   check for that, and the tests assert it is empty.
+//!   (`#/texts/0`, `#/tables/1`), every item's `parent` is the section header
+//!   it sits under (or `#/body`) and every parent lists the item in its
+//!   `children`, so the coordinator's additive merge can renumber the whole
+//!   fragment mechanically. [`integrity_errors`] is the check for that, and the
+//!   tests assert it is empty.
+//! - **Docling's heading-as-parent nesting.** A section header of level N is
+//!   parented to the nearest open header of a lower level, and the content
+//!   after it hangs off that header rather than off the body. This is the idiom
+//!   upstream docling's JATS and USPTO backends use — `add_heading` returns the
+//!   item that the following content names as its parent — and it is why this
+//!   fold builds no section `GroupItem`s: upstream uses those only as filler
+//!   for heading levels an HTML document skipped, and our levels come straight
+//!   from the parser.
 //! - **Provenance honesty.** XML has no pages and no boxes, so no item carries
 //!   `prov`. Source locators — the positional path, the element id, the
 //!   source's own role vocabulary — go in per-item `meta.custom_fields` under
@@ -50,7 +59,8 @@ pub const SCHEMA_NAME: &str = "docling_document_v2";
 /// `CollectorSource.model`.
 pub const MIMETYPE: &str = "application/xml";
 
-/// Self ref of the body group, and the parent of everything this fold makes.
+/// Self ref of the body group: the parent of everything this fold makes that
+/// is not under a section header.
 const BODY_REF: &str = "#/body";
 
 /// Self ref of the furniture group. Nothing is put in it: XML dialects have
@@ -74,6 +84,10 @@ pub struct DocumentFold {
     table: Option<PendingTable>,
     /// Arena index of the fact table, created when the first fact arrives.
     facts_table: Option<usize>,
+    /// The open section headers, outermost first: the level the wire gave each
+    /// one and the self ref content under it names as its parent. Empty means
+    /// the body is the parent.
+    headings: Vec<(u32, String)>,
     /// `html_island` events seen and not mapped.
     islands_skipped: u64,
 }
@@ -122,6 +136,7 @@ impl DocumentFold {
             },
             table: None,
             facts_table: None,
+            headings: Vec::new(),
             islands_skipped: 0,
         }
     }
@@ -136,7 +151,11 @@ impl DocumentFold {
         match event.event.as_ref() {
             Some(Event::Info(info)) => self.on_info(info),
             Some(Event::TextItem(item)) => {
-                self.push_text(item);
+                if pb::XmlItemLabel::try_from(item.label) == Ok(pb::XmlItemLabel::Picture) {
+                    self.push_picture(item);
+                } else {
+                    self.push_text(item);
+                }
             }
             Some(Event::TableStart(start)) => self.on_table_start(start),
             Some(Event::TableRow(row)) => self.on_table_row(row),
@@ -171,6 +190,7 @@ impl DocumentFold {
         }
         self.islands_skipped = 0;
         self.facts_table = None;
+        self.headings.clear();
         std::mem::replace(&mut self.document, Self::new().document)
     }
 
@@ -210,8 +230,17 @@ impl DocumentFold {
     // ------------------------------------------------------------------ text
 
     /// Append one text item and return its self ref.
+    ///
+    /// A section header opens a level on the heading ladder before it is
+    /// placed, so it is parented to the header enclosing it rather than to the
+    /// one it closes.
     fn push_text(&mut self, item: &pb::TextItem) -> String {
         let label = pb::XmlItemLabel::try_from(item.label).unwrap_or_default();
+        let level = item.level.unwrap_or(1);
+        if label == pb::XmlItemLabel::SectionHeader {
+            self.close_headings(level);
+        }
+        let parent = self.current_parent();
         let self_ref = format!("#/texts/{}", self.document.texts.len());
         let fields = text_fields(item);
         let source = self.source_of(item.source.as_ref());
@@ -222,7 +251,7 @@ impl DocumentFold {
             // document.proto.
             doc::base_text_item::Item::Code(doc::CodeItem {
                 self_ref: self_ref.clone(),
-                parent: Some(reference(BODY_REF)),
+                parent: Some(reference(&parent)),
                 content_layer: doc::ContentLayer::Body as i32,
                 meta: Some(doc::FloatingMeta {
                     custom_fields: fields,
@@ -237,7 +266,7 @@ impl DocumentFold {
         } else {
             let base = doc::TextItemBase {
                 self_ref: self_ref.clone(),
-                parent: Some(reference(BODY_REF)),
+                parent: Some(reference(&parent)),
                 content_layer: doc::ContentLayer::Body as i32,
                 meta: Some(doc::BaseMeta {
                     custom_fields: fields,
@@ -258,7 +287,9 @@ impl DocumentFold {
                 pb::XmlItemLabel::SectionHeader => {
                     doc::base_text_item::Item::SectionHeader(doc::SectionHeaderItem {
                         base: Some(base),
-                        level: int(item.level.unwrap_or(1)),
+                        // Redundant with the nesting, and kept anyway: docling
+                        // populates both.
+                        level: int(level),
                     })
                 }
                 pb::XmlItemLabel::ListItem => {
@@ -280,7 +311,10 @@ impl DocumentFold {
         self.document.texts.push(doc::BaseTextItem {
             item: Some(variant),
         });
-        self.link_child(&self_ref);
+        self.link_child(&parent, &self_ref);
+        if label == pb::XmlItemLabel::SectionHeader {
+            self.headings.push((level, self_ref.clone()));
+        }
         if self.document.name.is_empty() && label == pb::XmlItemLabel::Title {
             // `XmlInfo.title` is only set when the dialect exposes the title
             // before the parser has passed it, which none of the four
@@ -290,6 +324,58 @@ impl DocumentFold {
             self.document.name.clone_from(&item.text);
         }
         self_ref
+    }
+
+    // --------------------------------------------------------------- pictures
+
+    /// Append one picture as a placeholder `PictureItem`, with the text the
+    /// event carried as its caption.
+    ///
+    /// `image` is left unset: an XML picture is a filename or an `xlink:href`,
+    /// never pixels, and this is exactly what docling does with one — JATS
+    /// calls `add_picture` without ever reading the graphic's href, and the
+    /// HTML backend has an explicit "do not fetch the image, just add a
+    /// placeholder" path. A picture whose reference is all we have is still a
+    /// picture, and the arena is where a downstream stage that can resolve it
+    /// will look.
+    fn push_picture(&mut self, item: &pb::TextItem) {
+        let mut captions = Vec::new();
+        if !item.text.is_empty() {
+            // Same mechanics as a table caption: the caption is an item of its
+            // own, created first so the ref the picture holds already
+            // resolves.
+            let caption_ref = self.push_text(&pb::TextItem {
+                label: pb::XmlItemLabel::Caption as i32,
+                text: item.text.clone(),
+                path: item.path.clone(),
+                source: item.source.clone(),
+                ..pb::TextItem::default()
+            });
+            captions.push(reference(&caption_ref));
+        }
+        let parent = self.current_parent();
+        let self_ref = format!("#/pictures/{}", self.document.pictures.len());
+        let source = self.source_of(item.source.as_ref());
+        self.document.pictures.push(doc::PictureItem {
+            self_ref: self_ref.clone(),
+            parent: Some(reference(&parent)),
+            content_layer: doc::ContentLayer::Body as i32,
+            // The locators the item would have carried as a text item, carried
+            // here instead: the path, the source's own role vocabulary, the
+            // element id.
+            meta: Some(doc::PictureMeta {
+                custom_fields: text_fields(item),
+                ..doc::PictureMeta::default()
+            }),
+            label: doc::DocItemLabel::Picture as i32,
+            captions,
+            // No image: no bytes, no uri, no size. An ImageRef here would
+            // claim a payload this collector does not have.
+            image: None,
+            source: vec![source],
+            ..doc::PictureItem::default()
+        });
+        self.link_child(&parent, &self_ref);
     }
 
     // ----------------------------------------------------------------- tables
@@ -325,10 +411,13 @@ impl DocumentFold {
             captions.push(reference(&caption_ref));
         }
         let source = self.source_of(start.source.as_ref());
+        // The parent is the ladder as it stood when the table opened, not as
+        // it stands when the last row lands.
+        let parent = self.current_parent();
         self.table = Some(PendingTable {
             reference: start.table_ref.clone(),
             item: doc::TableItem {
-                parent: Some(reference(BODY_REF)),
+                parent: Some(reference(&parent)),
                 content_layer: doc::ContentLayer::Body as i32,
                 meta: Some(doc::FloatingMeta {
                     custom_fields: fields,
@@ -416,8 +505,12 @@ impl DocumentFold {
             ..doc::TableData::default()
         });
         let self_ref = item.self_ref.clone();
+        let parent = item
+            .parent
+            .as_ref()
+            .map_or_else(|| BODY_REF.to_owned(), |parent| parent.r#ref.clone());
         self.document.tables.push(item);
-        self.link_child(&self_ref);
+        self.link_child(&parent, &self_ref);
     }
 
     // ------------------------------------------------------------------ facts
@@ -479,6 +572,7 @@ impl DocumentFold {
     fn open_facts_table(&mut self, fact: &pb::Fact) -> usize {
         let index = self.document.tables.len();
         let self_ref = format!("#/tables/{index}");
+        let parent = self.current_parent();
         let mut fields = HashMap::new();
         fields.insert("xml.table".to_owned(), string("facts"));
         let header = doc::TableRow {
@@ -490,7 +584,7 @@ impl DocumentFold {
         };
         self.document.tables.push(doc::TableItem {
             self_ref: self_ref.clone(),
-            parent: Some(reference(BODY_REF)),
+            parent: Some(reference(&parent)),
             content_layer: doc::ContentLayer::Body as i32,
             meta: Some(doc::FloatingMeta {
                 custom_fields: fields,
@@ -507,18 +601,54 @@ impl DocumentFold {
             source: vec![self.source_of(fact.source.as_ref())],
             ..doc::TableItem::default()
         });
-        self.link_child(&self_ref);
+        self.link_child(&parent, &self_ref);
         self.facts_table = Some(index);
         index
     }
 
     // ------------------------------------------------------------- primitives
 
-    /// Both halves of the parent link: the item names `#/body`, and `#/body`
-    /// lists the item. An integrity check fails on either one alone.
-    fn link_child(&mut self, child: &str) {
-        if let Some(body) = self.document.body.as_mut() {
-            body.children.push(reference(child));
+    /// The ref new content parents to: the innermost open section header, or
+    /// the body when no header has opened yet. Content before the first
+    /// heading sits on the body, as it does upstream.
+    fn current_parent(&self) -> String {
+        self.headings
+            .last()
+            .map_or_else(|| BODY_REF.to_owned(), |(_, self_ref)| self_ref.clone())
+    }
+
+    /// Close every open header a level-`level` header ends, so that the next
+    /// heading is nested under the nearest header of a lower level. A header
+    /// of the same level closes the one before it: siblings, not parent and
+    /// child.
+    fn close_headings(&mut self, level: u32) {
+        while self.headings.last().is_some_and(|(open, _)| *open >= level) {
+            self.headings.pop();
+        }
+    }
+
+    /// Both halves of the parent link: the item names its parent, and the
+    /// parent lists the item. An integrity check fails on either one alone.
+    ///
+    /// The only parents this fold makes are the body and section headers, so
+    /// a ref that is neither is a bug in the caller rather than something to
+    /// resolve generically.
+    fn link_child(&mut self, parent: &str, child: &str) {
+        if parent == BODY_REF {
+            if let Some(body) = self.document.body.as_mut() {
+                body.children.push(reference(child));
+            }
+        } else if let Some(base) = self.heading_base(parent) {
+            base.children.push(reference(child));
+        }
+    }
+
+    /// The base of the section header at a `#/texts/N` ref.
+    fn heading_base(&mut self, self_ref: &str) -> Option<&mut doc::TextItemBase> {
+        let index: usize = self_ref.strip_prefix("#/texts/")?.parse().ok()?;
+        match self.document.texts.get_mut(index)?.item.as_mut()? {
+            doc::base_text_item::Item::SectionHeader(header) => header.base.as_mut(),
+            _ => None,
         }
     }
 
@@ -578,10 +708,9 @@ const fn doc_label(label: pb::XmlItemLabel) -> doc::DocItemLabel {
         pb::XmlItemLabel::Footnote => doc::DocItemLabel::Footnote,
         pb::XmlItemLabel::Code => doc::DocItemLabel::Code,
         pb::XmlItemLabel::Formula => doc::DocItemLabel::Formula,
-        // A picture item from an XML dialect is a reference and its alt text,
-        // never pixels. It stays a text item labelled PICTURE rather than
-        // becoming a PictureItem with no image, which would claim an image
-        // this collector does not have.
+        // A PICTURE event does not reach this mapping: it folds into a
+        // placeholder `PictureItem` in the picture arena rather than into a
+        // text item. The arm is here so the label vocabulary stays covered.
         pb::XmlItemLabel::Picture => doc::DocItemLabel::Picture,
     }
 }
@@ -872,12 +1001,22 @@ impl Walk {
                     .push(format!("parent {parent} does not list {child} as a child"));
             }
         }
-        for table in &document.tables {
-            for caption in &table.captions {
+        let captions = document
+            .tables
+            .iter()
+            .map(|table| (table.self_ref.as_str(), table.captions.as_slice()))
+            .chain(
+                document
+                    .pictures
+                    .iter()
+                    .map(|picture| (picture.self_ref.as_str(), picture.captions.as_slice())),
+            );
+        for (owner, listed) in captions {
+            for caption in listed {
                 if !self.refs.contains(&caption.r#ref) {
                     self.errors.push(format!(
-                        "caption {} of {} does not resolve",
-                        caption.r#ref, table.self_ref
+                        "caption {} of {owner} does not resolve",
+                        caption.r#ref
                     ));
                 }
             }
@@ -968,6 +1107,90 @@ mod tests {
         assert!(
             errors.iter().any(|e| e.contains("arena position")),
             "{errors:?}"
+        );
+    }
+
+    /// A heading and one paragraph under it, which is the shallowest fragment
+    /// with a parent link that is not the body's.
+    fn nested() -> doc::Document {
+        let mut fold = DocumentFold::new();
+        fold.consume(&pb::ParseXmlResponse {
+            event: Some(pb::parse_xml_response::Event::TextItem(pb::TextItem {
+                label: pb::XmlItemLabel::SectionHeader as i32,
+                level: Some(1),
+                text: "Introduction".to_owned(),
+                path: "/doc/sec/title".to_owned(),
+                ..pb::TextItem::default()
+            })),
+        });
+        fold.consume(&text(pb::XmlItemLabel::Paragraph, "under the heading"));
+        let document = fold.take();
+        assert!(integrity_errors(&document).is_empty());
+        document
+    }
+
+    /// The base of a text item that has one, for the tests that damage a
+    /// fragment deliberately.
+    fn base_at(document: &mut doc::Document, index: usize) -> &mut doc::TextItemBase {
+        match document.texts[index].item.as_mut().expect("a variant") {
+            doc::base_text_item::Item::SectionHeader(header) => header.base.as_mut(),
+            doc::base_text_item::Item::Text(item) => item.base.as_mut(),
+            _ => panic!("this fragment holds a header and a paragraph"),
+        }
+        .expect("the base is set")
+    }
+
+    #[test]
+    fn the_checker_catches_a_heading_that_disowns_its_child() {
+        // The same break as on the body, one level down: the merge needs both
+        // halves of every link, not only the ones the body holds.
+        let mut document = nested();
+        base_at(&mut document, 0).children.clear();
+        let errors = integrity_errors(&document);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("#/texts/0 does not list"), "{errors:?}");
+    }
+
+    #[test]
+    fn the_checker_catches_a_nested_parent_that_does_not_exist() {
+        let mut document = nested();
+        base_at(&mut document, 1).parent = Some(reference("#/texts/9"));
+        let errors = integrity_errors(&document);
+        assert!(
+            errors.iter().any(|e| e.contains("parent #/texts/9")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_heading_parents_the_content_that_follows_it() {
+        let mut document = nested();
+        let header = base_at(&mut document, 0).clone();
+        let paragraph = base_at(&mut document, 1).clone();
+        assert_eq!(header.parent.map(|p| p.r#ref).as_deref(), Some(BODY_REF));
+        assert_eq!(
+            paragraph.parent.map(|p| p.r#ref).as_deref(),
+            Some("#/texts/0")
+        );
+        assert_eq!(
+            header
+                .children
+                .iter()
+                .map(|c| c.r#ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#/texts/1"]
+        );
+        assert_eq!(
+            document
+                .body
+                .as_ref()
+                .expect("body")
+                .children
+                .iter()
+                .map(|c| c.r#ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#/texts/0"],
+            "only the heading is a child of the body"
         );
     }
 

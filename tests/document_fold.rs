@@ -125,6 +125,12 @@ fn assert_attribution(document: &doc::Document, model: &str) {
             Some(doc::base_text_item::Item::Code(code)) => code.source.as_slice(),
             _ => base(item).source.as_slice(),
         })
+        .chain(
+            document
+                .pictures
+                .iter()
+                .map(|picture| picture.source.as_slice()),
+        )
         .chain(document.tables.iter().map(|table| table.source.as_slice()));
     let mut stamped = 0;
     for source in sources {
@@ -138,9 +144,66 @@ fn assert_attribution(document: &doc::Document, model: &str) {
     assert!(stamped > 0, "the fragment has items to attribute");
 }
 
-/// The `#/body` group, which parents everything this fold makes.
+/// The `#/body` group, which parents everything that is not under a heading.
 fn body(document: &doc::Document) -> &doc::GroupItem {
     document.body.as_ref().expect("the body group is set")
+}
+
+/// The self ref of the one text item carrying this text.
+fn ref_of(document: &doc::Document, text: &str) -> String {
+    let found: Vec<&doc::TextItemBase> = document
+        .texts
+        .iter()
+        .filter(|item| !matches!(item.item, Some(doc::base_text_item::Item::Code(_))))
+        .map(base)
+        .filter(|item| item.text == text)
+        .collect();
+    assert_eq!(found.len(), 1, "{text:?} names exactly one item");
+    found[0].self_ref.clone()
+}
+
+/// The `parent` of the one text item carrying this text.
+fn parent_of(document: &doc::Document, text: &str) -> String {
+    let index = arena_index(&ref_of(document, text));
+    base(&document.texts[index])
+        .parent
+        .as_ref()
+        .expect("every folded item names a parent")
+        .r#ref
+        .clone()
+}
+
+/// The position an item's self ref gives it in the text arena.
+fn arena_index(self_ref: &str) -> usize {
+    self_ref
+        .strip_prefix("#/texts/")
+        .expect("a ref into the text arena")
+        .parse()
+        .expect("a dense index")
+}
+
+/// The `children` of any ref this fold can parent to: the body, or a section
+/// header in the text arena.
+fn children_of(document: &doc::Document, self_ref: &str) -> Vec<String> {
+    let children = if self_ref == "#/body" {
+        &body(document).children
+    } else {
+        &base(&document.texts[arena_index(self_ref)]).children
+    };
+    children.iter().map(|child| child.r#ref.clone()).collect()
+}
+
+/// Assert the two halves of one parent link, which is what the merge needs.
+fn assert_parented(document: &doc::Document, child: &str, parent: &str) {
+    assert_eq!(
+        parent_of(document, child),
+        parent,
+        "{child:?} names {parent}"
+    );
+    assert!(
+        children_of(document, parent).contains(&ref_of(document, child)),
+        "{parent} lists {child:?}"
+    );
 }
 
 // ------------------------------------------------------------- fold, by dialect
@@ -241,7 +304,128 @@ fn a_jats_item_carries_its_locators_in_meta_and_no_provenance() {
     assert_eq!(item.orig, item.text, "orig is set alongside text");
     assert_eq!(
         item.parent.as_ref().map(|p| p.r#ref.as_str()),
-        Some("#/body")
+        Some(ref_of(&document, "Introduction").as_str()),
+        "a paragraph hangs off the section header that opened its section"
+    );
+}
+
+#[test]
+fn jats_sections_nest_under_the_heading_that_opened_them() {
+    let (_, document) = fold_default(JATS);
+
+    // Front matter arrives before any heading, so it sits on the body — as it
+    // does upstream, where content before the first heading has no other
+    // parent.
+    assert_parented(&document, "Streaming XML Without a DOM", "#/body");
+    assert_parented(
+        &document,
+        "A collector need not build a tree to produce a document.",
+        "#/body",
+    );
+
+    // A level 1 heading is a child of the body; its content is a child of it.
+    assert_parented(&document, "Introduction", "#/body");
+    let introduction = ref_of(&document, "Introduction");
+    assert_parented(
+        &document,
+        "A pull parser yields events in document order.",
+        &introduction,
+    );
+
+    // A level 2 heading nests under the level 1 heading, two deep.
+    assert_parented(&document, "Scope", &introduction);
+    let scope = ref_of(&document, "Scope");
+    assert_parented(&document, "Four dialects are in scope.", &scope);
+
+    // The next level 1 heading closes both: it is a sibling of the first, not
+    // a descendant of the section it ended.
+    assert_parented(&document, "Results", "#/body");
+    let results = ref_of(&document, "Results");
+    assert_parented(
+        &document,
+        "Throughput scales with the number of concurrent streams.",
+        &results,
+    );
+
+    // Tables and pictures take the same parent as any other content, in
+    // arrival order among the heading's children.
+    let children = children_of(&document, &results);
+    let position = |item: &str| {
+        children
+            .iter()
+            .position(|child| child == item)
+            .unwrap_or_else(|| panic!("{item} is a child of the Results heading"))
+    };
+    assert!(position("#/tables/0") < position("#/pictures/0"));
+    assert_eq!(
+        document.tables[0].parent.as_ref().map(|p| &p.r#ref),
+        Some(&results)
+    );
+
+    // The body lists only what is not under a heading.
+    let body_children = children_of(&document, "#/body");
+    assert!(body_children.contains(&introduction));
+    assert!(body_children.contains(&results));
+    assert!(
+        !body_children.contains(&scope),
+        "a nested heading is not also a child of the body"
+    );
+}
+
+#[test]
+fn a_heading_ladder_pops_on_a_shallower_heading_and_on_a_sibling() {
+    // Hand-built: the fixtures nest tidily, and the pops are the part of the
+    // ladder they do not exercise.
+    let heading = |level: u32, body: &str| pb::ParseXmlResponse {
+        event: Some(pb::parse_xml_response::Event::TextItem(pb::TextItem {
+            label: pb::XmlItemLabel::SectionHeader as i32,
+            level: Some(level),
+            text: body.to_owned(),
+            path: "/doc/sec/title".to_owned(),
+            ..pb::TextItem::default()
+        })),
+    };
+    let paragraph = |body: &str| pb::ParseXmlResponse {
+        event: Some(pb::parse_xml_response::Event::TextItem(pb::TextItem {
+            label: pb::XmlItemLabel::Paragraph as i32,
+            text: body.to_owned(),
+            path: "/doc/sec/p".to_owned(),
+            ..pb::TextItem::default()
+        })),
+    };
+
+    let mut fold = DocumentFold::new();
+    fold.consume(&paragraph("before any heading"));
+    fold.consume(&heading(1, "one"));
+    fold.consume(&heading(2, "one.one"));
+    fold.consume(&heading(3, "one.one.one"));
+    fold.consume(&paragraph("deep"));
+    fold.consume(&heading(2, "one.two"));
+    fold.consume(&paragraph("back up one"));
+    fold.consume(&heading(1, "two"));
+    fold.consume(&paragraph("back at the top"));
+    let document = fold.take();
+    assert!(integrity_errors(&document).is_empty());
+
+    assert_parented(&document, "before any heading", "#/body");
+    assert_parented(&document, "one", "#/body");
+    assert_parented(&document, "one.one", &ref_of(&document, "one"));
+    assert_parented(&document, "one.one.one", &ref_of(&document, "one.one"));
+    assert_parented(&document, "deep", &ref_of(&document, "one.one.one"));
+    // A level 2 heading closes the level 3 and the level 2 before it.
+    assert_parented(&document, "one.two", &ref_of(&document, "one"));
+    assert_parented(&document, "back up one", &ref_of(&document, "one.two"));
+    // A level 1 heading closes everything below it.
+    assert_parented(&document, "two", "#/body");
+    assert_parented(&document, "back at the top", &ref_of(&document, "two"));
+    assert_eq!(
+        children_of(&document, "#/body"),
+        vec![
+            ref_of(&document, "before any heading"),
+            ref_of(&document, "one"),
+            ref_of(&document, "two"),
+        ],
+        "the body lists only the top level, in arrival order"
     );
 }
 
@@ -324,12 +508,104 @@ fn uspto_claims_fold_as_numbered_text_items_keeping_their_role() {
         Some(3.0)
     );
 
-    // A drawing reference is a picture label on a text item: the XML names a
-    // file, it does not carry pixels.
-    assert_eq!(
-        texts_labelled(&document, doc::DocItemLabel::Picture),
-        vec!["US11999999-20260210-D00001.TIF"]
+    // Claims arrive after the last heading, so that is what parents them.
+    assert_parented(
+        &document,
+        "1. A method comprising streaming items.",
+        &ref_of(&document, "DETAILED DESCRIPTION"),
     );
+
+    // A drawing is a picture item, not a text item labelled PICTURE.
+    assert!(
+        texts_labelled(&document, doc::DocItemLabel::Picture).is_empty(),
+        "the picture arena is where a picture goes"
+    );
+}
+
+#[test]
+fn a_drawing_folds_into_a_placeholder_picture_with_its_reference_as_a_caption() {
+    let (_, document) = fold_default(USPTO);
+    assert_eq!(document.pictures.len(), 1);
+    let picture = &document.pictures[0];
+    assert_eq!(picture.self_ref, "#/pictures/0");
+    assert_eq!(picture.label, doc::DocItemLabel::Picture as i32);
+    assert_eq!(picture.content_layer, doc::ContentLayer::Body as i32);
+    assert_eq!(
+        picture.image, None,
+        "no bytes, no uri, no size: the XML names a file, it does not carry pixels"
+    );
+    assert!(picture.prov.is_empty(), "no pages and no boxes here either");
+    assert_eq!(collector(&picture.source).model.as_deref(), Some("uspto"));
+
+    // The locators the item would have carried as a text item are carried
+    // here instead.
+    let fields = &picture.meta.as_ref().expect("picture meta").custom_fields;
+    assert_eq!(
+        field(fields, "xml.path"),
+        Some("/us-patent-grant/description/img")
+    );
+    assert_eq!(field(fields, "xml.role"), Some("drawing"));
+    assert_eq!(field(fields, "xml.element_id"), Some("img-0001"));
+
+    // The reference the event carried becomes a caption item, by the same
+    // mechanics a table caption uses: its own item, referenced by ref.
+    assert_eq!(picture.captions.len(), 1);
+    let index: usize = picture.captions[0]
+        .r#ref
+        .strip_prefix("#/texts/")
+        .expect("a caption ref points into the text arena")
+        .parse()
+        .expect("a dense index");
+    let caption = base(&document.texts[index]);
+    assert_eq!(caption.label, doc::DocItemLabel::Caption as i32);
+    assert_eq!(caption.text, "US11999999-20260210-D00001.TIF");
+
+    // And it hangs off the heading ladder like any other content item.
+    let detail = ref_of(&document, "DETAILED DESCRIPTION");
+    assert_eq!(picture.parent.as_ref().map(|p| &p.r#ref), Some(&detail));
+    assert!(children_of(&document, &detail).contains(&picture.self_ref));
+}
+
+#[test]
+fn a_picture_with_no_reference_gets_no_caption_item() {
+    // The wire says a picture is there but names nothing: a placeholder with
+    // no caption is still the honest projection.
+    let event = pb::ParseXmlResponse {
+        event: Some(pb::parse_xml_response::Event::TextItem(pb::TextItem {
+            label: pb::XmlItemLabel::Picture as i32,
+            text: String::new(),
+            path: "/doc/figure".to_owned(),
+            ..pb::TextItem::default()
+        })),
+    };
+    let mut fold = DocumentFold::new();
+    fold.consume(&event);
+    let document = fold.take();
+    assert!(integrity_errors(&document).is_empty());
+    assert_eq!(document.pictures.len(), 1);
+    assert!(document.pictures[0].captions.is_empty());
+    assert!(
+        document.texts.is_empty(),
+        "no caption item is invented for a picture that names nothing"
+    );
+    assert_eq!(
+        document.pictures[0]
+            .parent
+            .as_ref()
+            .map(|p| p.r#ref.as_str()),
+        Some("#/body")
+    );
+}
+
+#[test]
+fn a_document_with_no_figures_has_an_empty_picture_arena() {
+    for fixture in [XBRL, DOCLANG] {
+        let (_, document) = fold_default(fixture);
+        assert!(
+            document.pictures.is_empty(),
+            "an arena is filled by figures, not created for them"
+        );
+    }
 }
 
 #[test]

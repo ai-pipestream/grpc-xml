@@ -62,7 +62,7 @@ Follow Docling's backends, not a 1:1 XML clone:
 | Dialect | Typical items |
 |---|---|
 | JATS | title, authors, abstract, sections, paragraphs, tables, refs |
-| USPTO | title, inventors, abstract, claims (numbered), description, drawings as pictures if present as embedded images |
+| USPTO | title, inventors, abstract, claims (numbered), description, drawings as placeholder pictures |
 | XBRL | fact table(s): concept, context, unit, value; taxonomy labels when provided |
 | DocLang | already-close-to-Document; mostly a typed decode |
 
@@ -72,12 +72,21 @@ mapping is deterministic, so a confidence would be noise. No fake page bboxes.
 
 ### 4.1 What the fold builds
 
-- **Shape.** Flat arenas plus refs: `#/texts/N`, `#/tables/N`, each item's
-  `parent` is `#/body` and each is listed in `body.children`. No groups: the
-  typed stream carries nesting only as a heading `level`, and inventing
-  section groups from it would be a guess the merge cannot undo.
+- **Shape.** Flat arenas plus refs: `#/texts/N`, `#/pictures/N`, `#/tables/N`,
+  each item naming its `parent` and each parent listing it in `children`.
   `field_regions` and `field_items` stay empty — the coordinator's merge does
   not renumber them.
+- **Nesting: heading-as-parent, as in docling.** A `SECTION_HEADER` of level N
+  is parented to the nearest open header of a level below N (`#/body` when
+  there is none), and every content item after it — text, table, picture —
+  names that header as its parent. This is upstream's idiom: docling's JATS and
+  USPTO backends keep the item `add_heading` returned and pass it as `parent`
+  for what follows. `SectionHeaderItem.level` stays populated even though the
+  nesting now says the same thing, because docling populates both. Content that
+  arrives before the first heading sits on `#/body`, as it does upstream. **No
+  section `GroupItem`s**: upstream creates those only as filler for heading
+  levels an HTML document skipped, and our levels come from the parser rather
+  than from tag names, so there is nothing to fill.
 - **Identity.** `schema_name = "docling_document_v2"`,
   `origin.mimetype = "application/xml"`, `name` = `XmlInfo.title` when the
   dialect exposed one, otherwise the first `TITLE` item's text (none of the
@@ -96,6 +105,16 @@ mapping is deterministic, so a confidence would be noise. No fake page bboxes.
   `meta.custom_fields` carries `xml.path`, plus `xml.role`, `xml.element_id`
   and `xml.ordinal` when the event has them. **No `prov`**: these dialects
   have no pages and no boxes, and the path is the honest locator.
+- **Pictures.** A `PICTURE` event becomes a placeholder `PictureItem` in the
+  picture arena with `image` unset — no bytes, no uri, no size. Docling does
+  exactly this: JATS calls `add_picture` without ever reading the graphic's
+  `xlink:href`, and the HTML backend has an explicit "do not fetch the image,
+  just add a placeholder" path. The reference the event carried (the `href`,
+  the drawing filename) becomes a `CAPTION` text item referenced from the
+  picture's `captions[]`, by the same mechanics a table caption uses: its own
+  item, created first, pointed at by ref. The picture's `meta.custom_fields`
+  carries the same `xml.path` / `xml.role` / `xml.element_id` locators the item
+  would have had as a text item.
 - **Tables.** `table_start` opens one, each `table_row` becomes a grid row,
   `table_end` finalizes `num_rows`/`num_cols` and appends the `TableItem`.
   Both `grid` and the flat `table_cells` are populated; a cell's
@@ -117,9 +136,15 @@ mapping is deterministic, so a confidence would be noise. No fake page bboxes.
   re-parsing it with an XML stack would produce a worse result than that
   collector gets. The fold counts what it skipped in
   `body.meta.custom_fields["xml.html_islands"]` so the omission is visible.
-- **`PictureItem`s.** An XML picture is a filename or an `xlink:href`, never
-  pixels, so it stays a text item labelled `PICTURE`. A `PictureItem` with no
-  `ImageRef` would claim an image this collector does not have.
+- **Image payloads.** An XML picture is a filename or an `xlink:href`, never
+  pixels: the `PictureItem` is a placeholder and its `image` stays unset. This
+  collector does not fetch what the href names, and never invents an
+  `ImageRef`.
+- **Pairing a figure's own caption with its picture.** A `<fig>` caption
+  reaches the fold as a standalone `CAPTION` event after the graphic, so it
+  folds as a caption item under the same heading rather than into the picture's
+  `captions[]`. Attaching it would be a wire-order guess; the picture's caption
+  is the reference the picture event itself carried.
 - **Unconsumed source attributes** (`include_attributes`). They are an
   inspection aid on the typed stream, not document structure.
 - **Warnings and counts** from the trailer. They describe the stream, not the
