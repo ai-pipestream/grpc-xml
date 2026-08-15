@@ -1,4 +1,4 @@
-# AGENTS.md — grpc-xml
+# AGENTS.md: grpc-xml
 
 **Status: v1 is implemented.** The definition of done below is met; see
 `README.md` for what the server does today and for the v1 gaps that remain
@@ -12,9 +12,9 @@ is no application code yet. Specs are the source of truth.
 ## Read this first, in order
 
 1. This file
-2. `docs/architecture.md` — fleet boundary, language, what we refuse to own
-3. `docs/design.md` — wire API sketch, Document mapping, tests
-4. `docs/guidelines.md` — fleet rules (streaming, proto, git, tests)
+2. `docs/architecture.md`: fleet boundary, language, what we refuse to own
+3. `docs/design.md`: wire API sketch, Document mapping, tests
+4. `docs/guidelines.md`: fleet rules (streaming, proto, git, tests)
 
 Do not start coding until those four are in your context. If architecture
 and an existing sibling disagree on *process* (diskless, health, buf),

@@ -7,13 +7,12 @@ Implementers start at [`AGENTS.md`](../AGENTS.md), then this file, `design.md`, 
 
 ## Where this sits
 
-Docling ships four XML *declarative* backends (JATS, USPTO, XBRL,
-DocLang). They turn tagged trees into a `DoclingDocument` with no
-pixels. One gRPC service with a format enum covers all four so we do
-not run four almost-identical servers. The same enum also covers the
-two docling container formats whose payload is XML: DocLang archives
-(`.dclx`, a zip around `document.xml`) and Google Books METS exports
-(`.tar.gz`, a manifest plus per-page hOCR), unpacked in memory into
+Four declarative XML dialects (JATS, USPTO, XBRL, DocLang) turn tagged
+trees into documents with no pixels. One gRPC service with a format enum
+covers all four so we do not run four almost-identical servers. The same
+enum also covers the two container formats whose payload is XML: DocLang
+archives (`.dclx`, a zip around `document.xml`) and Google Books METS
+exports (`.tar.gz`, a manifest plus per-page hOCR), unpacked in memory into
 the same streaming machinery.
 
 ```text
@@ -32,27 +31,41 @@ HTML islands inside JATS (or XHTML in XBRL labels) are **not**
 re-parsed with a second XML stack. They are handed to the HTML
 collector as opaque fragments, the same way email HTML bodies are.
 
-## Live results (vs Docling)
+## Live results
 
-Docling's XML backends build a complete `DoclingDocument` and return
-it. We stream sections, paragraphs, tables, and fact rows **as the
-parser yields them** so a UI can show a USPTO grant or an XBRL
-instance filling in, not a spinner until the last closing tag. Title
-and `XmlInfo` go out first. `ParseStatus` is a trailer.
+Sections, paragraphs, tables, and fact rows stream **as the parser yields
+them**, so a UI can show a USPTO grant or an XBRL instance filling in
+instead of a spinner until the last closing tag. Title and `XmlInfo` go out
+first. `ParseStatus` is a trailer.
+
+## Inside the process
+
+```mermaid
+flowchart TD
+    req[request stream] --> sniff[sniff.rs: dialect resolution]
+    sniff --> magic{archive magic bytes?}
+    magic -->|zip or gzip| unpack[archive.rs: unpack in memory, cap inflated bytes]
+    magic -->|plain XML| parse[parse.rs: quick-xml event driver]
+    unpack --> parse
+    parse --> map[dialect.rs: per-dialect mapper]
+    map --> events[typed ParseXmlResponse events]
+    events --> fold[document_fold.rs: optional Document fold]
+    events --> out[response stream]
+    fold --> out
+    sec[security.rs: no entities, no fetches, byte cap] -.-> parse
+```
 
 ## What this process owns
 
-- Secure XML: no network, no DTD fetch, no entity expansion. XXE and
-  billion-laughs die at the parser, matching Docling's lxml flags.
-- Dialect detection: explicit option wins; otherwise archive magic
-  bytes first, then sniff root namespace / public id. Ambiguous `.xml`
-  without a hint is `INVALID_ARGUMENT`, not a guess.
-- Projection to sections, paragraphs, tables, lists, citations, and
-  (for XBRL) fact tables.
-- USPTO: the ST.36 / ST.96 grant and application XML families Docling
-  already maps.
-- XBRL: instance facts + optional taxonomy **bytes** on the request
-  (not a filesystem path — this service is diskless).
+This process owns secure XML parsing: no network, no DTD fetch, no entity
+expansion, so XXE and billion-laughs die at the parser. It owns dialect
+detection: the explicit option wins, otherwise archive magic bytes first,
+then root namespace and public id, and an ambiguous `.xml` without a hint
+is `INVALID_ARGUMENT`, not a guess. It owns the projection to sections,
+paragraphs, tables, lists, citations, and (for XBRL) fact tables. For USPTO
+it maps the ST.36 / ST.96 grant and application XML families. For XBRL it
+accepts instance facts plus an optional taxonomy as **bytes** on the
+request, not a filesystem path, because this service is diskless.
 
 ## What this process does not own
 
