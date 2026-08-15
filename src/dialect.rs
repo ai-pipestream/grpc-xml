@@ -183,8 +183,8 @@ pub const fn section_containers(dialect: Dialect) -> &'static [&'static str] {
     match dialect {
         Dialect::Jats => &["sec"],
         Dialect::Uspto => &["description", "section"],
-        Dialect::Xbrl => &[],
-        Dialect::Doclang => &["section", "group"],
+        Dialect::Xbrl | Dialect::MetsGbs => &[],
+        Dialect::Doclang | Dialect::Dclx => &["section", "group"],
     }
 }
 
@@ -194,10 +194,14 @@ pub fn action(dialect: Dialect, ctx: &ElementCtx<'_>) -> Action {
     match dialect {
         Dialect::Jats => jats(ctx),
         Dialect::Uspto => uspto(ctx),
-        // XBRL is not element-mapped: an instance is contexts, units and
-        // facts, and the driver reads those shapes directly.
-        Dialect::Xbrl => Action::Descend,
-        Dialect::Doclang => doclang(ctx),
+        // Neither of these is element-mapped. An XBRL instance is contexts,
+        // units and facts, which the driver reads directly; a METS-GBS
+        // export is read whole by the archive driver in `crate::archive`,
+        // which never consults these rules.
+        Dialect::Xbrl | Dialect::MetsGbs => Action::Descend,
+        // A DocLang archive's `document.xml` member is a DocLang document,
+        // so the archive dialect maps with the same rules.
+        Dialect::Doclang | Dialect::Dclx => doclang(ctx),
     }
 }
 

@@ -17,7 +17,7 @@
 //! islands — are explicit branches here rather than mapping rules.
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::BufRead;
+use std::io::{self, BufRead, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -41,8 +41,9 @@ use crate::{COLLECTOR, VERSION};
 /// Warnings aggregate by (code, message), so a normal document produces a
 /// handful. A hostile one could mint a distinct message per element, which is
 /// unbounded memory on the trailer; past this many the driver stops adding
-/// new kinds and keeps counting the ones it has.
-const MAX_WARNING_KINDS: usize = 64;
+/// new kinds and keeps counting the ones it has. The archive driver applies
+/// the same bound to its own warning map.
+pub(crate) const MAX_WARNING_KINDS: usize = 64;
 
 /// Consumer of parse events; returns `false` when the client is gone and the
 /// parse should stop.
@@ -113,7 +114,7 @@ pub enum ParseError {
     Refused(String),
     /// Sniffing found two signals that disagree. `INVALID_ARGUMENT`.
     Ambiguous(String),
-    /// The document is not one of the four mapped families. `UNIMPLEMENTED`.
+    /// The document is not one of the mapped families. `UNIMPLEMENTED`.
     Unsupported(String),
     /// The document exceeded the byte cap. `RESOURCE_EXHAUSTED`.
     TooLarge {
@@ -148,6 +149,12 @@ impl std::fmt::Display for ParseError {
 
 /// Parse one document, emitting events as they are produced.
 ///
+/// The payload's first bytes decide the path before any XML is read: ZIP or
+/// gzip magic routes to the archive drivers in [`crate::archive`], anything
+/// else to the XML driver. An explicit request still wins — it selects the
+/// path, and a payload whose magic contradicts it fails closed instead of
+/// being re-sniffed.
+///
 /// # Errors
 ///
 /// Any [`ParseError`]. A parse that returns `Ok` has already emitted its
@@ -157,6 +164,73 @@ pub fn parse<R: BufRead>(
     config: &ParseConfig,
     input: &InputStats,
     emit: EmitFn<'_>,
+) -> Result<Dialect, ParseError> {
+    let mut reader = reader;
+    let head = peek_head(&mut reader, input)?;
+    let magic = crate::archive::sniff_magic(&head);
+    let reader = io::Cursor::new(head).chain(reader);
+    match magic {
+        Some(archive) => match config.dialect {
+            None => crate::archive::parse(archive, reader, config, input, emit, false),
+            Some(requested) if requested == archive.dialect() => {
+                crate::archive::parse(archive, reader, config, input, emit, true)
+            }
+            Some(requested) => Err(ParseError::Ambiguous(format!(
+                "the request states dialect {} but the payload begins with {} magic, which \
+                 means {}; omit the dialect or state the one the payload is",
+                requested.model(),
+                archive.magic_name(),
+                archive.dialect().model()
+            ))),
+        },
+        None => match config.dialect {
+            Some(requested) if requested.is_archive() => Err(ParseError::Malformed(format!(
+                "dialect {} names an archive format and the payload does not begin with its \
+                 magic bytes; it is not one",
+                requested.model()
+            ))),
+            _ => parse_xml(reader, config, input, emit, None),
+        },
+    }
+}
+
+/// Read up to four bytes from the front of the stream, for magic sniffing.
+///
+/// Fewer than four come back only when the stream itself is shorter; the
+/// caller chains what was taken back in front of the reader, so the parse
+/// still sees every byte.
+fn peek_head<R: BufRead>(reader: &mut R, input: &InputStats) -> Result<Vec<u8>, ParseError> {
+    let mut head = [0u8; 4];
+    let mut filled = 0;
+    while filled < head.len() {
+        match reader.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                if input.capped.load(Ordering::Relaxed) || e.to_string().contains(CAP_MARKER) {
+                    return Err(ParseError::TooLarge {
+                        limit_bytes: input.limit_bytes,
+                    });
+                }
+                return Err(ParseError::Io(e.to_string()));
+            }
+        }
+    }
+    Ok(head[..filled].to_vec())
+}
+
+/// Parse one XML document with the streaming driver.
+///
+/// `forced` carries a resolution the caller already made — an archive driver
+/// knows the dialect from the archive, not from the document inside it — and
+/// skips the sniff entirely; `None` sniffs as [`crate::sniff`] specifies.
+pub(crate) fn parse_xml<R: BufRead>(
+    reader: R,
+    config: &ParseConfig,
+    input: &InputStats,
+    emit: EmitFn<'_>,
+    forced: Option<(Dialect, sniff::Evidence)>,
 ) -> Result<Dialect, ParseError> {
     let started = std::time::Instant::now();
     let mut xml = NsReader::from_reader(reader);
@@ -176,6 +250,7 @@ pub fn parse<R: BufRead>(
         input,
         emit,
         started,
+        forced,
         dialect: Dialect::Jats,
         source: pb::CollectorSource::default(),
         index: 0,
@@ -318,6 +393,9 @@ struct Driver<'a, R: BufRead> {
     input: &'a InputStats,
     emit: EmitFn<'a>,
     started: std::time::Instant,
+    /// A resolution made before the XML was read, from an archive's magic;
+    /// it replaces the sniff, not merely the request.
+    forced: Option<(Dialect, sniff::Evidence)>,
     dialect: Dialect,
     source: pb::CollectorSource,
     index: u64,
@@ -409,13 +487,7 @@ impl<R: BufRead> Driver<'_, R> {
                         root_local_name: local.clone(),
                         public_id: doctype.public_id.clone(),
                     };
-                    let (dialect, evidence) = sniff::resolve(self.config.dialect, &signals)
-                        .map_err(|e| match e {
-                            SniffError::Conflict { .. } => ParseError::Ambiguous(e.to_string()),
-                            SniffError::Unrecognized { .. } => {
-                                ParseError::Unsupported(e.to_string())
-                            }
-                        })?;
+                    let (dialect, evidence) = self.resolve_dialect(&signals)?;
                     self.dialect = dialect;
                     self.source = pb::CollectorSource {
                         collector: COLLECTOR.to_owned(),
@@ -451,6 +523,18 @@ impl<R: BufRead> Driver<'_, R> {
                 }
             }
         }
+    }
+
+    /// Resolve the dialect for this document: the resolution the archive
+    /// driver already made when there is one, the sniff otherwise.
+    fn resolve_dialect(&self, signals: &Signals) -> Result<(Dialect, sniff::Evidence), ParseError> {
+        if let Some(resolution) = self.forced {
+            return Ok(resolution);
+        }
+        sniff::resolve(self.config.dialect, signals).map_err(|e| match e {
+            SniffError::Conflict { .. } => ParseError::Ambiguous(e.to_string()),
+            SniffError::Unrecognized { .. } => ParseError::Unsupported(e.to_string()),
+        })
     }
 
     // ---------------------------------------------------------------- content
@@ -1520,7 +1604,7 @@ fn convert_error(error: &quick_xml::Error, input: &InputStats) -> ParseError {
 /// anything else needs a declaration, this parser has none, and manufacturing
 /// one is precisely the entity-expansion vulnerability — so it returns
 /// `None` and the caller preserves the reference verbatim.
-fn resolve_reference(name: &str) -> Option<String> {
+pub(crate) fn resolve_reference(name: &str) -> Option<String> {
     if name.starts_with('#') {
         return quick_xml::events::BytesRef::new(name.to_owned())
             .resolve_char_ref()

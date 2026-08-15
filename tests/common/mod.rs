@@ -5,8 +5,10 @@
 //! Every fixture in this file is a string literal, and the one large document
 //! is synthesized in a loop. Nothing is read from disk, nothing is fetched,
 //! and no corpus is committed: the tests are the specification of what these
-//! four dialects look like as far as this repository is concerned, so they
-//! have to be readable next to the assertions that consume them.
+//! dialects look like as far as this repository is concerned, so they have
+//! to be readable next to the assertions that consume them. The archive
+//! fixtures live in `tests/archives.rs`, built there with the same crates
+//! the server reads them with.
 //!
 //! The harness runs a real tonic server on an ephemeral port and drives it
 //! with the generated client, because the properties under test — that events
@@ -65,12 +67,21 @@ pub fn frames(
     options: pb::ParseOptions,
     chunk_size: usize,
 ) -> Vec<pb::ParseXmlRequest> {
+    byte_frames(document.as_bytes(), options, chunk_size)
+}
+
+/// Build the request frames for a binary payload, the shape the archive
+/// dialects upload.
+pub fn byte_frames(
+    document: &[u8],
+    options: pb::ParseOptions,
+    chunk_size: usize,
+) -> Vec<pb::ParseXmlRequest> {
     let mut frames = vec![pb::ParseXmlRequest {
         payload: Some(pb::parse_xml_request::Payload::Options(options)),
     }];
     frames.extend(
         document
-            .as_bytes()
             .chunks(chunk_size)
             .map(|chunk| pb::ParseXmlRequest {
                 payload: Some(pb::parse_xml_request::Payload::Chunk(chunk.to_vec())),
@@ -99,6 +110,40 @@ pub async fn parse(
     Ok(events)
 }
 
+/// Parse a binary payload end to end and return every event, or the status
+/// that ended the stream.
+pub async fn parse_bytes(
+    client: &XmlParseServiceClient<Channel>,
+    document: &[u8],
+    options: pb::ParseOptions,
+) -> Result<Vec<pb::ParseXmlResponse>, tonic::Status> {
+    let mut client = client.clone();
+    let requests = byte_frames(document, options, 8 * 1024);
+    let mut stream = client
+        .parse_xml(tokio_stream::iter(requests))
+        .await?
+        .into_inner();
+    let mut events = Vec::new();
+    while let Some(event) = stream.message().await? {
+        events.push(event);
+    }
+    Ok(events)
+}
+
+/// Parse a binary payload that is expected to succeed, with the same
+/// envelope assertions as [`parse_ok`].
+pub async fn parse_bytes_ok(
+    client: &XmlParseServiceClient<Channel>,
+    document: &[u8],
+    options: pb::ParseOptions,
+) -> Vec<pb::ParseXmlResponse> {
+    let events = parse_bytes(client, document, options)
+        .await
+        .expect("parse succeeds");
+    assert_envelope(&events);
+    events
+}
+
 /// Parse a document that is expected to succeed, asserting the stream
 /// envelope: exactly one `info` first, exactly one `status` last.
 pub async fn parse_ok(
@@ -109,6 +154,12 @@ pub async fn parse_ok(
     let events = parse(client, document, options)
         .await
         .expect("parse succeeds");
+    assert_envelope(&events);
+    events
+}
+
+/// Assert the stream envelope of a successful parse.
+fn assert_envelope(events: &[pb::ParseXmlResponse]) {
     assert!(
         events.len() >= 2,
         "a successful parse is at least info + status"
@@ -137,7 +188,6 @@ pub async fn parse_ok(
         .count();
     assert_eq!(infos, 1, "XmlInfo is sent exactly once");
     assert_eq!(statuses, 1, "ParseStatus is sent exactly once");
-    events
 }
 
 /// A parse whose request stream the test feeds by hand, so it can hold bytes

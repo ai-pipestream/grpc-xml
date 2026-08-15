@@ -10,10 +10,14 @@ Implementers start at [`AGENTS.md`](../AGENTS.md), then this file, `design.md`, 
 Docling ships four XML *declarative* backends (JATS, USPTO, XBRL,
 DocLang). They turn tagged trees into a `DoclingDocument` with no
 pixels. One gRPC service with a format enum covers all four so we do
-not run four almost-identical servers.
+not run four almost-identical servers. The same enum also covers the
+two docling container formats whose payload is XML: DocLang archives
+(`.dclx`, a zip around `document.xml`) and Google Books METS exports
+(`.tar.gz`, a manifest plus per-page hOCR), unpacked in memory into
+the same streaming machinery.
 
 ```text
-.xml / .nxml / .xbrl / .dclg
+.xml / .nxml / .xbrl / .dclg / .dclx / .tar.gz
         │
         ▼
    grpc-xml            schema plugin per dialect
@@ -40,9 +44,9 @@ and `XmlInfo` go out first. `ParseStatus` is a trailer.
 
 - Secure XML: no network, no DTD fetch, no entity expansion. XXE and
   billion-laughs die at the parser, matching Docling's lxml flags.
-- Dialect detection: explicit option wins; otherwise sniff root
-  namespace / public id. Ambiguous `.xml` without a hint is
-  `INVALID_ARGUMENT`, not a guess.
+- Dialect detection: explicit option wins; otherwise archive magic
+  bytes first, then sniff root namespace / public id. Ambiguous `.xml`
+  without a hint is `INVALID_ARGUMENT`, not a guess.
 - Projection to sections, paragraphs, tables, lists, citations, and
   (for XBRL) fact tables.
 - USPTO: the ST.36 / ST.96 grant and application XML families Docling

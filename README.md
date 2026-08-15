@@ -1,12 +1,16 @@
 # grpc-xml
 
-gRPC collector for JATS, USPTO, XBRL, and DocLang XML, projecting into the gRParse Document data plane
+gRPC collector for JATS, USPTO, XBRL, and DocLang XML — plus the DocLang
+archive (`.dclx`) and Google Books METS (`.tar.gz`) containers that carry
+XML — projecting into the gRParse Document data plane
 
 One Rust process reads declarative XML with [`quick-xml`](https://github.com/tafia/quick-xml)
 and **streams typed document items as the parser yields them**. Docling's XML
 backends build a whole `DoclingDocument` and hand it back at the end; this
 service sends the title before it has read the body, and the trailer only
 carries counts. It is not PipeStream core and not a Docling Python wrapper.
+The two archive dialects are unpacked in memory and fed through the same
+streaming machinery; nothing touches disk for them either.
 
 ## Build and run
 
@@ -55,8 +59,8 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 
 | Option | Meaning |
 |---|---|
-| `dialect` | `JATS` / `USPTO` / `XBRL` / `DOCLANG`, or unset to sniff |
-| `max_document_mib` | Per-request byte cap; 0 takes the server default, over the ceiling clamps |
+| `dialect` | `JATS` / `USPTO` / `XBRL` / `DOCLANG` / `DCLX` / `METS_GBS`, or unset to sniff |
+| `max_document_mib` | Per-request byte cap; 0 takes the server default, over the ceiling clamps. For an archive it also caps the *decompressed* bytes |
 | `taxonomy` | XBRL taxonomy package bytes. Accepted, unused in v1 (see below) |
 | `emit_html_islands` | Hand XHTML subtrees to the HTML collector instead of flattening them |
 | `include_attributes` | Attach unconsumed source attributes to every item |
@@ -171,7 +175,11 @@ is the whole policy:
 - **Bounded.** A byte cap enforced by the reader, so it trips on the chunk
   that crosses it rather than after the upload finishes; a cap on concurrent
   parses, refused rather than queued; small bounded channels in both
-  directions, so a client that stops reading stops the parse.
+  directions, so a client that stops reading stops the parse. For the
+  archive dialects the same cap also counts every byte *inflated* out of the
+  archive, while it is inflating and without trusting any member header's
+  claimed size, because a decompression bomb is small on the wire by
+  construction.
 
 `GetServiceInfo` reports `entity_expansion_disabled` so an operator can
 assert the policy from outside instead of trusting this section.
@@ -202,12 +210,17 @@ wanted.
 | USPTO | `//USPTO//` public id, ST.96 namespace, root `us-patent-grant` / `us-patent-application` / `patent-document` | title, inventors, assignees, document and application numbers, abstract, headings, description, drawing descriptions, numbered claims, drawing references, CALS tables |
 | XBRL | `http://www.xbrl.org/2003/instance` namespace, root `xbrl` | contexts (entity, period, segment/scenario dimensions), units (simple and divide), facts with `contextRef` / `unitRef` resolved inline, `decimals`, `precision`, `sign`, `xsi:nil` |
 | DocLang | `http://docling-project.org/ns/doclang/v1` namespace, root `doclang` / `docling-document` | typed decode of label-named elements and of a generic `item` carrying a `DocItemLabel` short name |
+| DCLX | ZIP magic `PK\x03\x04` | the archive's root `document.xml` member — the layout docling-core's `save_as_doclang_archive` writes — mapped exactly as DocLang; `assets/` and `pages/` images stay compressed and undecoded |
+| METS_GBS | gzip magic `\x1f\x8b`, then a tar holding a METS manifest with `PROFILE="gbs"` | pages in manifest (`div TYPE="page" ORDER`) order, one `TextItem` with `role = "ocr-line"` per hOCR `ocr_line` span of each page's `coordOCR` file, `x_wconf` as the item's source confidence; scans and plain OCR text are counted, warned about and never decoded |
 
 Sniffing order is the one [`docs/design.md`](docs/design.md) fixes: an
-explicit request wins, then the root namespace, then the DOCTYPE public
-identifier, then a well-known root element name as a fallback. Two *strong*
-signals that disagree fail closed with both names in the message rather than
-being resolved by precedence.
+explicit request wins, then — before any XML is read, because an archived
+document is not XML at byte 0 — the payload's archive magic, then the root
+namespace, then the DOCTYPE public identifier, then a well-known root
+element name as a fallback. Two *strong* signals that disagree fail closed
+with both names in the message rather than being resolved by precedence —
+including a stated dialect against contradicting archive magic, and a stated
+archive dialect on a payload without its magic.
 
 ### Known v1 gaps
 
@@ -222,6 +235,13 @@ being resolved by precedence.
 - **CALS `namest`/`nameend` column spans** are not expanded through
   `colspec`; `colspan`, `rowspan` and `morerows` are.
 - Nested tables are flattened into the outer table's cell text.
+- **METS-GBS maps text only.** Scans are never decoded and no geometry is
+  carried — this plane has no `prov` — so the hOCR boxes reduce to reading
+  order plus a per-line source confidence; word-level spans are read past,
+  not emitted.
+- **DCLX images stay in the archive.** `assets/` and `pages/` members are
+  never inflated; pictures land as the same placeholder items the plain
+  `DocLang` dialect produces, referenced by `uri`.
 
 ## Layout
 
@@ -230,12 +250,14 @@ proto/ai/pipestream/xml/v1/       the contract; buf lint STANDARD + COMMENTS
 proto/ai/pipestream/document/v1/  the Document plane, vendored from gRParse
 src/security.rs                   what the parser refuses and what it records
 src/sniff.rs                      dialect resolution and its evidence
+src/archive.rs                    the .dclx and METS-GBS drivers: unpack in memory, cap inflated bytes
 src/dialect.rs                    per-family mapping rules, one pure function each
 src/parse.rs                      the streaming driver: XML events to protobuf events
 src/document_fold.rs              the opt-in fold from those events to one Document
 src/service.rs                    tonic wiring, byte cap, admission control
 src/metrics.rs                    counters and the interval line
-tests/dialects.rs                 golden mappings for all four families
+tests/dialects.rs                 golden mappings for the four XML families
+tests/archives.rs                 the archive dialects, fixtures built in-test, bomb caps
 tests/document_fold.rs            the fold per dialect, and the wire event's placement
 tests/security.rs                 XXE, entity bombs, truncation, caps, refusals
 tests/live_stream.rs              the tests that fail if the stream becomes a batch

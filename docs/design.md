@@ -3,7 +3,8 @@
 ## 1. Goals
 
 - Feature parity with Docling `XML_JATS`, `XML_USPTO`, `XML_XBRL`,
-  `XML_DOCLANG`.
+  `XML_DOCLANG`, plus the two docling archive formats that carry XML:
+  `DCLX` (a DocLang OPC zip) and `METS_GBS` (a Google Books `tar.gz`).
 - One process, one port, format selected on the request.
 - Stream elements of large instances (USPTO claims, XBRL facts) as
   table rows / paragraphs rather than materializing a DOM of the whole
@@ -17,8 +18,10 @@
 
 - Generic XML-to-JSON or XSLT hosting.
 - Fetching remote taxonomies, DTDs, or XInclude.
-- METS/GBS (`tar.gz` of many files) — that is an unpacker that fans
-  inner XML/PDF into this service and gRParse, not an XML dialect.
+- Decoding archive images. A METS/GBS export and a DCLX archive both carry
+  scans; this service maps their XML text planes and counts the image bytes
+  against the cap without ever decoding a pixel. Fanning page images out to
+  other collectors is a coordinator's job.
 - Pretty-printing or canonicalizing the source XML as an output
   format (the sink might, later).
 
@@ -33,8 +36,8 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (ServiceInfo);
 
 Options:
 
-- `dialect` — `JATS` / `USPTO` / `XBRL` / `DOCLANG` / `UNSPECIFIED`
-  (sniff)
+- `dialect` — `JATS` / `USPTO` / `XBRL` / `DOCLANG` / `DCLX` /
+  `METS_GBS` / `UNSPECIFIED` (sniff)
 - `taxonomy` — optional bytes (XBRL only), a zip of schemas/linkbases
 - `max_document_mib`
 
@@ -65,6 +68,8 @@ Follow Docling's backends, not a 1:1 XML clone:
 | USPTO | title, inventors, abstract, claims (numbered), description, drawings as placeholder pictures |
 | XBRL | fact table(s): concept, context, unit, value; taxonomy labels when provided |
 | DocLang | already-close-to-Document; mostly a typed decode |
+| DCLX | the zip's root `document.xml` (docling-core's `save_as_doclang_archive` layout), mapped exactly as DocLang; images stay compressed |
+| METS_GBS | one text item per hOCR `ocr_line`, pages in manifest order, `x_wconf` as source confidence; no geometry, no pixels |
 
 Every item: `CollectorSource.collector = "xml"`, `model` = dialect
 name, `version` = this server's version, `confidence` unset — a declarative
@@ -158,10 +163,14 @@ mapping is deterministic, so a confidence would be noise. No fake page bboxes.
 
 ## 5. Sniffing
 
-Order: request dialect if set → root xmlns → DOCTYPE public id →
+Order: request dialect if set → archive magic bytes (`PK\x03\x04` means
+DCLX, `\x1f\x8b` means METS_GBS; checked before any XML is read, since an
+archived document is not XML at byte 0) → root xmlns → DOCTYPE public id →
 well-known root local-name (`article`+JATS ns, `us-patent-grant`,
 `xbrl`, DocLang root). Two matches that disagree →
-`INVALID_ARGUMENT` with both names in the message.
+`INVALID_ARGUMENT` with both names in the message; that includes a stated
+dialect against contradicting archive magic, and a stated archive dialect
+on a payload without its magic.
 
 ## 6. Tests
 
@@ -172,3 +181,8 @@ well-known root local-name (`article`+JATS ns, `us-patent-grant`,
 - Entity bomb → `RESOURCE_EXHAUSTED` / parse error, bounded time.
 - XBRL without taxonomy still returns facts; labels stay local-name.
 - Sniff tests for each root; ambiguous tiny `<root/>` fails closed.
+- Archive fixtures are constructed in the test with the zip/tar/flate2
+  crates rather than committed as binaries: happy path per format, a zip
+  or tar that is not the format, a small-on-the-wire bomb that must trip
+  the inflated-byte cap, and the explicit-request mismatches in both
+  directions.

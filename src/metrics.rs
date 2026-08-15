@@ -34,7 +34,7 @@ pub struct Metrics {
     pub events_out: AtomicU64,
     /// Successful parses per dialect, indexed by [`Dialect`] declaration
     /// order.
-    pub by_dialect: [AtomicU64; 4],
+    pub by_dialect: [AtomicU64; 6],
 }
 
 impl Metrics {
@@ -54,6 +54,8 @@ impl Metrics {
             Dialect::Uspto => 1,
             Dialect::Xbrl => 2,
             Dialect::Doclang => 3,
+            Dialect::Dclx => 4,
+            Dialect::MetsGbs => 5,
         };
         self.by_dialect[slot].fetch_add(1, Ordering::Relaxed);
     }
@@ -65,7 +67,7 @@ impl Metrics {
         let get = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         format!(
             "grpc-xml metrics started={} ok={} failed={} refused={} capped={} bytes_in={} \
-             events_out={} jats={} uspto={} xbrl={} doclang={}",
+             events_out={} jats={} uspto={} xbrl={} doclang={} dclx={} mets_gbs={}",
             get(&self.parses_started),
             get(&self.parses_ok),
             get(&self.parses_failed),
@@ -77,6 +79,8 @@ impl Metrics {
             get(&self.by_dialect[1]),
             get(&self.by_dialect[2]),
             get(&self.by_dialect[3]),
+            get(&self.by_dialect[4]),
+            get(&self.by_dialect[5]),
         )
     }
 }

@@ -1,6 +1,6 @@
 # grpc-xml — guidelines
 
-**This repo:** gRPC collector for JATS, USPTO, XBRL, and DocLang XML, projecting into the gRParse Document data plane
+**This repo:** gRPC collector for JATS, USPTO, XBRL, and DocLang XML — plus DocLang archives (`.dclx`) and Google Books METS exports (`.tar.gz`) — projecting into the gRParse Document data plane
 
 **Language:** Rust (tonic + quick-xml). No libxml2, no lxml.
 

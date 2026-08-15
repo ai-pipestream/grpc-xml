@@ -52,9 +52,13 @@ service XmlParseService {
 // the first `ParseXmlRequest` message.
 message ParseOptions {
   // Dialect to map with. `XML_DIALECT_UNSPECIFIED` asks the server to sniff
-  // it from the DOCTYPE public identifier and the root element; a sniff that
-  // finds nothing is `UNIMPLEMENTED` and a sniff whose signals disagree is
-  // `INVALID_ARGUMENT`. The server never guesses between two candidates.
+  // it: archive magic bytes first (ZIP means a DocLang archive, gzip means a
+  // Google Books export), then the DOCTYPE public identifier and the root
+  // element; a sniff that finds nothing is `UNIMPLEMENTED` and a sniff whose
+  // signals disagree is `INVALID_ARGUMENT`. The server never guesses between
+  // two candidates, and a stated dialect the payload cannot be — an archive
+  // dialect without its magic, an XML dialect on archive bytes — is
+  // `INVALID_ARGUMENT` rather than a guess.
   XmlDialect dialect = 1;
 
   // Upper bound on the document in mebibytes. Exceeding it ends the stream

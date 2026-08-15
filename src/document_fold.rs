@@ -54,9 +54,10 @@ use crate::{COLLECTOR, VERSION};
 /// tracks.
 pub const SCHEMA_NAME: &str = "docling_document_v2";
 
-/// Value of `DocumentOrigin.mimetype`. Every dialect this service maps is
-/// XML; the dialect itself is on the body meta and on every item's
-/// `CollectorSource.model`.
+/// Value of `DocumentOrigin.mimetype` for the single-document dialects. The
+/// archive dialects override it in [`mimetype`] with the type of the archive
+/// itself; the dialect is on the body meta and on every item's
+/// `CollectorSource.model` either way.
 pub const MIMETYPE: &str = "application/xml";
 
 /// Self ref of the body group: the parent of everything this fold makes that
@@ -208,6 +209,9 @@ impl DocumentFold {
         let dialect = pb::XmlDialect::try_from(info.dialect).unwrap_or_default();
         let model = model_name(dialect);
         self.fallback_source.model = Some(model.to_owned());
+        if let Some(origin) = self.document.origin.as_mut() {
+            mimetype(dialect).clone_into(&mut origin.mimetype);
+        }
         if let Some(title) = info.title.as_ref().filter(|t| !t.is_empty()) {
             self.document.name.clone_from(title);
         }
@@ -717,6 +721,19 @@ const fn model_name(dialect: pb::XmlDialect) -> &'static str {
         pb::XmlDialect::Uspto => "uspto",
         pb::XmlDialect::Xbrl => "xbrl",
         pb::XmlDialect::Doclang => "doclang",
+        pb::XmlDialect::Dclx => "dclx",
+        pb::XmlDialect::MetsGbs => "mets-gbs",
+    }
+}
+
+/// The origin mimetype, which describes the payload the caller uploaded: the
+/// archive for an archive dialect, XML for everything else. The names for the
+/// archives are the ones docling registers for the same formats.
+const fn mimetype(dialect: pb::XmlDialect) -> &'static str {
+    match dialect {
+        pb::XmlDialect::Dclx => "application/zip",
+        pb::XmlDialect::MetsGbs => "application/mets+xml",
+        _ => MIMETYPE,
     }
 }
 

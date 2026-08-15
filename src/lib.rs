@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A gRPC collector that maps JATS, USPTO, XBRL and `DocLang` XML into the
-//! gRParse Document plane, streaming items as the parser yields them.
+//! A gRPC collector that maps JATS, USPTO, XBRL and `DocLang` XML — plus the
+//! two docling archive formats that carry XML, `DocLang` archives (`.dclx`)
+//! and Google Books METS exports (`.tar.gz`) — into the gRParse Document
+//! plane, streaming items as the parser yields them.
 //!
 //! Design rules, in the order they constrain everything else:
 //!
@@ -18,12 +20,14 @@
 //!   exists.
 //!
 //! The modules follow the data: [`security`] and [`sniff`] decide whether and
-//! how to parse, [`dialect`] holds the per-family mapping rules, [`parse`]
-//! is the streaming driver that turns XML events into protobuf events, and
+//! how to parse, [`archive`] unpacks the two archive dialects in memory,
+//! [`dialect`] holds the per-family mapping rules, [`parse`] is the
+//! streaming driver that turns XML events into protobuf events, and
 //! [`service`] wires that to tonic. [`document_fold`] is the optional second
 //! consumer of that same event stream: it folds it into one
 //! `ai.pipestream.document.v1.Document` when a caller asks for one.
 
+pub mod archive;
 pub mod dialect;
 pub mod document_fold;
 pub mod metrics;

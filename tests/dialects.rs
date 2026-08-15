@@ -551,6 +551,8 @@ async fn service_info_reports_the_policy_that_is_compiled_in() {
             pb::XmlDialect::Uspto as i32,
             pb::XmlDialect::Xbrl as i32,
             pb::XmlDialect::Doclang as i32,
+            pb::XmlDialect::Dclx as i32,
+            pb::XmlDialect::MetsGbs as i32,
         ]
     );
     assert!(info.entity_expansion_disabled);

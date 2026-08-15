@@ -9,6 +9,12 @@
 //! strong signal matched, so a namespaced document is never overruled by its
 //! element name.
 //!
+//! The archive dialects never reach this module's signal matching: a payload
+//! opening with ZIP or gzip magic is routed by [`crate::archive`] before any
+//! XML is read, because an archived document is not XML at byte 0 and has no
+//! prolog to sniff. This module still owns the [`Dialect`] vocabulary they
+//! resolve to.
+//!
 //! Two strong signals that disagree are an error, not a tie broken by
 //! precedence. A document whose namespace says JATS and whose public
 //! identifier says USPTO is not a JATS document with a stale DOCTYPE as far
@@ -17,7 +23,7 @@
 
 use crate::proto::v1 as pb;
 
-/// The four families this service maps.
+/// The families this service maps.
 ///
 /// A Rust-side mirror of [`pb::XmlDialect`] minus its unspecified variant, so
 /// the mappers can match exhaustively on a value that is known to be real.
@@ -31,6 +37,11 @@ pub enum Dialect {
     Xbrl,
     /// Docling `DocLang` documents.
     Doclang,
+    /// Docling `DocLang` archives (`.dclx`): a ZIP whose `document.xml`
+    /// member is mapped with the `DocLang` rules.
+    Dclx,
+    /// Google Books exports (`.tar.gz`): a METS manifest plus per-page hOCR.
+    MetsGbs,
 }
 
 impl Dialect {
@@ -42,6 +53,8 @@ impl Dialect {
             Self::Uspto => "uspto",
             Self::Xbrl => "xbrl",
             Self::Doclang => "doclang",
+            Self::Dclx => "dclx",
+            Self::MetsGbs => "mets-gbs",
         }
     }
 
@@ -53,6 +66,8 @@ impl Dialect {
             Self::Uspto => pb::XmlDialect::Uspto,
             Self::Xbrl => pb::XmlDialect::Xbrl,
             Self::Doclang => pb::XmlDialect::Doclang,
+            Self::Dclx => pb::XmlDialect::Dclx,
+            Self::MetsGbs => pb::XmlDialect::MetsGbs,
         }
     }
 
@@ -65,13 +80,29 @@ impl Dialect {
             pb::XmlDialect::Uspto => Some(Self::Uspto),
             pb::XmlDialect::Xbrl => Some(Self::Xbrl),
             pb::XmlDialect::Doclang => Some(Self::Doclang),
+            pb::XmlDialect::Dclx => Some(Self::Dclx),
+            pb::XmlDialect::MetsGbs => Some(Self::MetsGbs),
         }
     }
 
     /// Every dialect this build maps, in wire-enum order.
     #[must_use]
-    pub const fn all() -> [Self; 4] {
-        [Self::Jats, Self::Uspto, Self::Xbrl, Self::Doclang]
+    pub const fn all() -> [Self; 6] {
+        [
+            Self::Jats,
+            Self::Uspto,
+            Self::Xbrl,
+            Self::Doclang,
+            Self::Dclx,
+            Self::MetsGbs,
+        ]
+    }
+
+    /// True for the dialects whose payload is an archive rather than an XML
+    /// document, which is what routes them around the XML sniff entirely.
+    #[must_use]
+    pub const fn is_archive(self) -> bool {
+        matches!(self, Self::Dclx | Self::MetsGbs)
     }
 }
 
@@ -105,6 +136,8 @@ pub enum Evidence {
     PublicId,
     /// A well-known root element name matched.
     RootElement,
+    /// The payload's archive magic bytes matched, before any XML was read.
+    ArchiveMagic,
 }
 
 impl Evidence {
@@ -116,6 +149,7 @@ impl Evidence {
             Self::RootNamespace => pb::DialectEvidence::RootNamespace,
             Self::PublicId => pb::DialectEvidence::PublicId,
             Self::RootElement => pb::DialectEvidence::RootElement,
+            Self::ArchiveMagic => pb::DialectEvidence::ArchiveMagic,
         }
     }
 }

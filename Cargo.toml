@@ -1,7 +1,7 @@
 [package]
 name = "grpc-xml"
 version = "0.1.0"
-description = "Streaming gRPC collector for JATS, USPTO, XBRL and DocLang XML"
+description = "Streaming gRPC collector for JATS, USPTO, XBRL and DocLang XML, plus DocLang archives and Google Books METS exports"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://git.rokkon.com/ai-pipestream/grpc-xml"
@@ -27,6 +27,13 @@ tonic = { version = "0.14.6", features = ["gzip", "zstd"] }
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-reflection = "0.14.6"
+# DocLang archives (.dclx) are OPC zips; only deflate is needed to read the
+# ones docling-core writes, and the tests build theirs with the same crate.
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
+# Google Books METS exports are gzipped tars; the archive driver streams the
+# gzip through the tar reader and counts every inflated byte against the cap.
+flate2 = "1.1.9"
+tar = "0.4.46"
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"

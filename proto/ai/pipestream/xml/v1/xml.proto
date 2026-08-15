@@ -23,9 +23,11 @@ option java_package = "ai.pipestream.xml.v1";
 // XmlDialect selects the declarative XML family a document belongs to.
 //
 // One process serves all of them; the dialect decides which mapper runs, and
-// it is either stated on the request or sniffed from the prolog and root
-// element. Dialects outside this list are refused with `UNIMPLEMENTED`: this
-// service is not a generic XML-to-Document converter.
+// it is either stated on the request or sniffed. Archive dialects are sniffed
+// from their magic bytes before any XML is read; XML dialects are sniffed
+// from the prolog and root element. Dialects outside this list are refused
+// with `UNIMPLEMENTED`: this service is not a generic XML-to-Document
+// converter.
 enum XmlDialect {
   // Not stated. On a request this means "sniff"; the server never reports
   // it back on a successful parse.
@@ -46,15 +48,26 @@ enum XmlDialect {
   // Docling DocLang XML (`.dclg`), a document tree that is already close to
   // the Document plane and needs only a typed decode.
   XML_DIALECT_DOCLANG = 4;
+
+  // Docling DocLang archive (`.dclx`), a ZIP whose root `document.xml`
+  // member is a DocLang document; `assets/` and `pages/` members carry
+  // images this service never decodes. The inner document is mapped exactly
+  // as `XML_DIALECT_DOCLANG` maps it.
+  XML_DIALECT_DCLX = 5;
+
+  // Google Books export (`.tar.gz`), a gzipped tar holding one METS
+  // manifest with `PROFILE="gbs"` plus per-page hOCR files. Pages map in
+  // manifest order, one text item per OCR line.
+  XML_DIALECT_METS_GBS = 6;
 }
 
 // XmlItemLabel classifies one streamed text item.
 //
 // Names mirror `ai.pipestream.document.v1.DocItemLabel` so a coordinator can
-// map them one to one. Only the labels these four dialects can produce are
+// map them one to one. Only the labels the mapped dialects can produce are
 // listed; a dialect-specific refinement that has no label of its own (an
-// abstract paragraph, a patent claim, an author name) keeps a generic label
-// and states the refinement in `TextItem.role`.
+// abstract paragraph, a patent claim, an author name, an OCR line) keeps a
+// generic label and states the refinement in `TextItem.role`.
 enum XmlItemLabel {
   // No label was determined. Treat as free text.
   XML_ITEM_LABEL_UNSPECIFIED = 0;
@@ -104,7 +117,8 @@ message CollectorSource {
   // Always `xml` for this service.
   string collector = 1;
 
-  // The mapper that produced the item: `jats`, `uspto`, `xbrl` or `doclang`.
+  // The mapper that produced the item: `jats`, `uspto`, `xbrl`, `doclang`,
+  // `dclx` or `mets-gbs`.
   optional string model = 2;
 
   // Version of this server, as reported by `GetServiceInfo`.
@@ -118,7 +132,10 @@ message CollectorSource {
 // XmlInfo is the resolved identity of the document, sent before any content.
 //
 // It is the first event of every successful parse, so a UI can title the
-// view and pick a renderer before the first paragraph arrives.
+// view and pick a renderer before the first paragraph arrives. For an
+// archive dialect the root fields describe the XML document inside the
+// archive: the `document.xml` member of a DocLang archive, the METS
+// manifest of a Google Books export.
 message XmlInfo {
   // The dialect the rest of the stream was mapped with. Never
   // `XML_DIALECT_UNSPECIFIED`.
@@ -173,6 +190,11 @@ enum DialectEvidence {
 
   // Matched on a well-known root element local name.
   DIALECT_EVIDENCE_ROOT_ELEMENT = 4;
+
+  // Matched on the payload's archive magic bytes (ZIP or gzip), which are
+  // read before any XML sniffing because an archived document is not XML at
+  // byte 0.
+  DIALECT_EVIDENCE_ARCHIVE_MAGIC = 5;
 }
 
 // Attribute is one source attribute carried through verbatim.
@@ -200,8 +222,8 @@ message TextItem {
 
   // Dialect-specific refinement of `label`, an open vocabulary: `abstract`,
   // `claim`, `author`, `inventor`, `keyword`, `description`,
-  // `drawing-description`, `affiliation`, `doi`. Empty when the label says
-  // everything.
+  // `drawing-description`, `affiliation`, `doi`, `ocr-line`. Empty when the
+  // label says everything.
   string role = 3;
 
   // The item's text: descendant character data concatenated in document
@@ -489,6 +511,12 @@ enum WarningCode {
   // Character data was found in an encoding the parser had to guess at, or
   // a malformed sequence was replaced.
   WARNING_CODE_ENCODING_SUBSTITUTION = 6;
+
+  // An archive member was read past but not mapped: an image this service
+  // never decodes, a manifest entry naming a member the archive does not
+  // contain, or a page without OCR. The member still counts against the
+  // decompressed byte cap.
+  WARNING_CODE_ARCHIVE_MEMBER_IGNORED = 7;
 }
 
 // ParseWarning is one non-fatal finding, carried on the trailer.
@@ -530,6 +558,10 @@ message ParseCounts {
 
   // XML elements the parser visited, including ones that produced nothing.
   uint64 elements_visited = 8;
+
+  // Pages mapped from an archive manifest. Zero for the single-document
+  // dialects, which have no page structure to count.
+  uint64 pages = 9;
 }
 
 // ParseStatus is the trailer of a successful parse: the last event of the
@@ -550,7 +582,8 @@ message ParseStatus {
   // Non-fatal findings, aggregated. May be empty.
   repeated ParseWarning warnings = 3;
 
-  // Bytes of XML consumed from the request stream.
+  // Bytes consumed from the request stream: XML for the single-document
+  // dialects, compressed archive bytes for the archive dialects.
   uint64 bytes_consumed = 4;
 
   // Wall-clock milliseconds from the first request frame to this trailer.
