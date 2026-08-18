@@ -6,7 +6,7 @@
 //! Every knob is an optional environment variable, because the image is
 //! read-only and has no config file to mount:
 //!
-//! - `GRPC_XML_ADDR` — listen address (default `0.0.0.0:50051`).
+//! - `GRPC_XML_ADDR` — listen address (default `0.0.0.0:50066`).
 //! - `GRPC_XML_WORKERS` — tokio worker threads (default: CPU count).
 //! - `GRPC_XML_BLOCKING_THREADS` — cap on the blocking pool that runs the
 //!   parsers (default 512, tokio's own default).
@@ -33,7 +33,7 @@ use grpc_xml::service::{
 use tonic::transport::Server;
 
 /// Default listen address when `GRPC_XML_ADDR` is not set.
-const DEFAULT_ADDR: &str = "0.0.0.0:50051";
+const DEFAULT_ADDR: &str = "0.0.0.0:50066";
 
 /// Default HTTP/2 initial window, for both the stream and the connection.
 ///

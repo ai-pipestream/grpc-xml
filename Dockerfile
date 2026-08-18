@@ -25,8 +25,8 @@ COPY --from=build /src/target/release/grpc-xml /usr/local/bin/grpc-xml
 # spills. `docker run --read-only` therefore works with no tmpfs mount at all
 # — the compose stack runs it that way and the parse tests cover the paths.
 USER grpcxml
-EXPOSE 50051
-ENV GRPC_XML_ADDR=0.0.0.0:50051
+EXPOSE 50066
+ENV GRPC_XML_ADDR=0.0.0.0:50066
 
 # grpc.health.v1.Health is registered, so an orchestrator probes the service
 # rather than the port. There is no HTTP endpoint and no curl in the image;

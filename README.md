@@ -20,22 +20,22 @@ cargo clippy --all-targets --no-deps -- -D warnings -D clippy::pedantic
 cargo fmt --check
 buf lint && buf format --diff --exit-code
 
-./target/release/grpc-xml      # listens on 0.0.0.0:50051
+./target/release/grpc-xml      # listens on 0.0.0.0:50066
 ```
 
 Container, with the tests gating the image and a read-only root filesystem:
 
 ```bash
 docker build -t grpc-xml .
-docker run --rm --read-only -p 50051:50051 grpc-xml
+docker run --rm --read-only -p 50066:50066 grpc-xml
 ```
 
 Poke at it with reflection, no local protos required:
 
 ```bash
-grpcurl -plaintext localhost:50051 list
-grpcurl -plaintext localhost:50051 ai.pipestream.xml.v1.XmlParseService/GetServiceInfo
-grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
+grpcurl -plaintext localhost:50066 list
+grpcurl -plaintext localhost:50066 ai.pipestream.xml.v1.XmlParseService/GetServiceInfo
+grpcurl -plaintext localhost:50066 grpc.health.v1.Health/Check
 ```
 
 `protoc` is required to build (the build script invokes it through
@@ -200,7 +200,7 @@ assert the policy from outside instead of trusting this section.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GRPC_XML_ADDR` | `0.0.0.0:50051` | Listen address |
+| `GRPC_XML_ADDR` | `0.0.0.0:50066` | Listen address |
 | `GRPC_XML_WORKERS` | CPU count | Tokio worker threads |
 | `GRPC_XML_BLOCKING_THREADS` | 512 | Blocking pool that runs the parsers |
 | `GRPC_XML_MAX_CONCURRENT_PARSES` | 64 | Parses admitted at once; past it, `RESOURCE_EXHAUSTED` |
