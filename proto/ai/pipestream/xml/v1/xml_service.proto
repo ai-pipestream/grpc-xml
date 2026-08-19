@@ -185,4 +185,21 @@ message GetServiceInfoResponse {
   // wire so an operator can assert it from outside rather than trust a
   // README.
   bool entity_expansion_disabled = 8;
+
+  // Frontend advertisement for the shared demo shell. Same shape in every
+  // ai-pipestream grpc service: the shell reads it to build its tab bar.
+  UiInfo ui = 9;
+}
+
+// UiInfo advertises this service's tab in the shared ai-pipestream demo
+// shell. Same shape in every service.
+message UiInfo {
+  // Tab title, for example `XML`.
+  string title = 1;
+
+  // Shell mount path the tab is reverse-proxied to, for example `/ui/xml`.
+  string path = 2;
+
+  // One line describing the service, used as the tab tooltip.
+  string description = 3;
 }

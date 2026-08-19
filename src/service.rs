@@ -256,6 +256,13 @@ impl XmlParseService for XmlGrpc {
             max_concurrent_parses: u32::try_from(self.max_concurrent_parses).unwrap_or(u32::MAX),
             // Compiled in, not configured: see `crate::security`.
             entity_expansion_disabled: true,
+            // Frontend advertisement for the shared demo shell; the values
+            // are part of the contract, not configuration.
+            ui: Some(pb::UiInfo {
+                title: "XML".to_owned(),
+                path: "/ui/xml".to_owned(),
+                description: "Declarative XML to the gRParse Document data plane".to_owned(),
+            }),
         }))
     }
 }

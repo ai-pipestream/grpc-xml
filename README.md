@@ -53,6 +53,10 @@ rpc ParseXml(stream ParseXmlRequest) returns (stream ParseXmlResponse);
 rpc GetServiceInfo(GetServiceInfoRequest) returns (GetServiceInfoResponse);
 ```
 
+`GetServiceInfoResponse.ui` carries the shared-shell `UiInfo` advertisement
+(title `XML`, path `/ui/xml`) that the ai-pipestream demo app reads to build
+its tab bar; every grpc service exposes the same shape.
+
 ```mermaid
 sequenceDiagram
     participant C as Client

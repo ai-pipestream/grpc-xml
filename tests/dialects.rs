@@ -559,4 +559,11 @@ async fn service_info_reports_the_policy_that_is_compiled_in() {
     assert!(info.default_max_document_mib > 0);
     assert!(info.ceiling_max_document_mib >= info.default_max_document_mib);
     assert!(info.max_concurrent_parses > 0);
+    let ui = info.ui.expect("ui advertisement");
+    assert_eq!(ui.title, "XML");
+    assert_eq!(ui.path, "/ui/xml");
+    assert_eq!(
+        ui.description,
+        "Declarative XML to the gRParse Document data plane"
+    );
 }
