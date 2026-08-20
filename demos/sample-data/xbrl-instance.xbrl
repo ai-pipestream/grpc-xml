@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xbrl xmlns="http://www.xbrl.org/2003/instance"
+      xmlns:link="http://www.xbrl.org/2003/linkbase"
+      xmlns:xlink="http://www.w3.org/1999/xlink"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+      xmlns:us-gaap="http://fasb.org/us-gaap/2026">
+  <link:schemaRef xlink:type="simple" xlink:href="acme-20261231.xsd"/>
+  <context id="D2026">
+    <entity><identifier scheme="http://www.sec.gov/CIK">0000123456</identifier></entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-12-31</endDate></period>
+  </context>
+  <context id="I2026">
+    <entity><identifier scheme="http://www.sec.gov/CIK">0000123456</identifier></entity>
+    <period><instant>2026-12-31</instant></period>
+  </context>
+  <context id="D2026-NA">
+    <entity>
+      <identifier scheme="http://www.sec.gov/CIK">0000123456</identifier>
+      <segment>
+        <xbrldi:explicitMember dimension="us-gaap:StatementGeographicalAxis">us-gaap:NorthAmericaMember</xbrldi:explicitMember>
+      </segment>
+    </entity>
+    <period><startDate>2026-01-01</startDate><endDate>2026-12-31</endDate></period>
+  </context>
+  <unit id="usd"><measure>iso4217:USD</measure></unit>
+  <unit id="usd-per-share">
+    <divide>
+      <unitNumerator><measure>iso4217:USD</measure></unitNumerator>
+      <unitDenominator><measure>xbrli:shares</measure></unitDenominator>
+    </divide>
+  </unit>
+  <us-gaap:Assets contextRef="I2026" unitRef="usd" decimals="-6">1234000000</us-gaap:Assets>
+  <us-gaap:Revenues contextRef="D2026" unitRef="usd" decimals="-6">987000000</us-gaap:Revenues>
+  <us-gaap:Revenues contextRef="D2026-NA" unitRef="usd" decimals="-6">412000000</us-gaap:Revenues>
+  <us-gaap:EarningsPerShareBasic contextRef="D2026" unitRef="usd-per-share" decimals="2" xsi:nil="true"/>
+</xbrl>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<doclang xmlns="http://docling-project.org/ns/doclang/v1" version="1">
+  <metadata><origin>quarterly.pdf</origin></metadata>
+  <title>Quarterly Operations Review</title>
+  <section level="1">
+    <section-header level="1">Summary</section-header>
+    <paragraph>Throughput rose in every region.</paragraph>
+    <list-item ordinal="1">North America up 12 percent.</list-item>
+    <list-item ordinal="2">EMEA up 4 percent.</list-item>
+    <caption>Regional throughput.</caption>
+    <table>
+      <row><cell>Region</cell><cell>Delta</cell></row>
+      <row><cell>NA</cell><cell>+12%</cell></row>
+      <row><cell>EMEA</cell><cell>+4%</cell></row>
+    </table>
+    <item label="footnote">Figures are unaudited.</item>
+    <section level="2">
+      <section-header>Outlook</section-header>
+      <paragraph>Guidance is unchanged.</paragraph>
+    </section>
+  </section>
+</doclang>

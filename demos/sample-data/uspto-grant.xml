@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE us-patent-grant PUBLIC "-//USPTO//DTD ICE Patent Grant V4.5 2014//EN" "us-patent-grant-v45-2014-04-03.dtd">
+<us-patent-grant lang="EN" country="US" date-produced="20260210">
+  <us-bibliographic-data-grant>
+    <publication-reference>
+      <document-id>
+        <country>US</country><doc-number>11999999</doc-number>
+        <kind>B2</kind><date>20260210</date>
+      </document-id>
+    </publication-reference>
+    <application-reference appl-type="utility">
+      <document-id><doc-number>17123456</doc-number><date>20240401</date></document-id>
+    </application-reference>
+    <invention-title id="d2e43">Method for streaming structured documents</invention-title>
+    <us-parties>
+      <inventors>
+        <inventor sequence="001">
+          <addressbook><last-name>Rivera</last-name><first-name>Ana</first-name></addressbook>
+        </inventor>
+      </inventors>
+      <assignees>
+        <assignee><orgname>Acme Streaming Corp</orgname></assignee>
+      </assignees>
+    </us-parties>
+    <classifications-cpc><main-cpc><classification-cpc><section>G</section></classification-cpc></main-cpc></classifications-cpc>
+  </us-bibliographic-data-grant>
+  <abstract id="abstract"><p id="p-0001">A method streams document items as they are parsed.</p></abstract>
+  <description id="description">
+    <heading id="h-0001" level="1">BACKGROUND</heading>
+    <p id="p-0002">Prior systems buffered the entire document before emitting it.</p>
+    <description-of-drawings>
+      <p id="p-0003">FIG. 1 is a block diagram of the pipeline.</p>
+    </description-of-drawings>
+    <heading id="h-0002" level="1">DETAILED DESCRIPTION</heading>
+    <p id="p-0004">The parser emits an event per completed element.</p>
+    <img id="img-0001" file="US11999999-20260210-D00001.TIF" wi="60" he="40"/>
+  </description>
+  <claims id="claims">
+    <claim id="CLM-00001" num="00001"><claim-text>1. A method comprising streaming items.</claim-text></claim>
+    <claim id="CLM-00002" num="00002"><claim-text>2. The method of claim 1, wherein items are ordered.</claim-text></claim>
+    <claim id="CLM-00003" num="00003"><claim-text>3. The method of claim 1, further comprising a trailer.</claim-text></claim>
+  </claims>
+</us-patent-grant>

@@ -38,6 +38,20 @@ grpcurl -plaintext localhost:50066 ai.pipestream.xml.v1.XmlParseService/GetServi
 grpcurl -plaintext localhost:50066 grpc.health.v1.Health/Check
 ```
 
+## Web demo
+
+[`demos/node-client`](demos/node-client) is a dependency-light Node bridge and
+browser page that POSTs a document and reads the typed events off the same
+response as Server-Sent Events, so the live-stream property is visible:
+content items appear while the upload bar is still filling. It serves the
+test-suite fixtures from [`demos/sample-data`](demos/sample-data) and honours
+`UI_BASE` for the shared demo shell (tab `XML`, path `/ui/xml`).
+
+```bash
+cd demos/node-client && npm install
+npm start                    # http://127.0.0.1:8087 (XML_SERVER_ADDR, PORT, UI_BASE)
+```
+
 `protoc` is required to build (the build script invokes it through
 tonic-prost-build). `buf` is only needed to lint the contract.
 
@@ -280,6 +294,8 @@ tests/archives.rs                 the archive dialects, fixtures built in-test, 
 tests/document_fold.rs            the fold per dialect, and the wire event's placement
 tests/security.rs                 XXE, entity bombs, truncation, caps, refusals
 tests/live_stream.rs              the tests that fail if the stream becomes a batch
+demos/sample-data/                the test fixtures as files, for the demos
+demos/node-client/                Node bridge and browser page for watching a parse live
 ```
 
 ## Docs

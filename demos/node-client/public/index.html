@@ -1,0 +1,520 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>grpc-xml: watch XML stream</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfd;      --panel: #fff;    --ink: #16181d;   --dim: #6a7080;
+    --line: #e2e5ec;    --accent: #2f6df6; --live: #12a150; --warn: #d1442f;
+    --fact: #8b5cf6;    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0e1014;    --panel: #171a21; --ink: #e6e8ee;   --dim: #949bab;
+      --line: #262b36;  --accent: #6b9bff; --live: #37d67a; --warn: #ff7a63;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { padding: 24px 24px 8px; }
+  h1 { margin: 0; font-size: 20px; letter-spacing: -.01em; }
+  h1 code { font: 600 19px/1 var(--mono); color: var(--accent); }
+  .sub { margin: 6px 0 0; color: var(--dim); max-width: 62ch; }
+  main { padding: 16px 24px 40px; display: grid; gap: 16px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+  label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+  select {
+    font: 13px var(--mono); padding: 7px 9px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+  }
+  button {
+    font: 600 13px system-ui; padding: 8px 16px; border-radius: 7px; border: 0;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  .checks { display: flex; gap: 14px; padding-bottom: 6px; }
+  .checks label {
+    display: flex; gap: 5px; align-items: center; margin: 0;
+    font-size: 12.5px; color: var(--ink); cursor: pointer;
+  }
+  .throttle { display: flex; align-items: center; gap: 8px; }
+  .throttle input { width: 130px; }
+  .hint { font-size: 12px; color: var(--dim); }
+
+  /* Upload bar with a marker where the first content event landed. */
+  .track {
+    position: relative; height: 26px; border-radius: 6px;
+    background: var(--bg); border: 1px solid var(--line); overflow: hidden;
+  }
+  .fill { height: 100%; width: 0; background: var(--accent); opacity: .22; transition: width .08s linear; }
+  .mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--live); display: none; }
+  .track-label {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 10px;
+    font: 11px var(--mono); color: var(--dim);
+  }
+  .verdict { margin-top: 10px; font-size: 14px; }
+  .verdict strong { color: var(--live); }
+  .verdict.idle { color: var(--dim); }
+
+  .stats { display: flex; flex-wrap: wrap; gap: 22px; }
+  .stat b { display: block; font: 600 20px/1.2 var(--mono); }
+  .stat span { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+
+  .split { display: grid; grid-template-columns: minmax(0, 1fr) 230px; gap: 16px; }
+  @media (max-width: 820px) { .split { grid-template-columns: 1fr; } }
+
+  #feed { height: 46vh; min-height: 260px; overflow-y: auto; font: 12.5px/1.65 var(--mono); }
+  .ev { padding: 1px 0; border-bottom: 1px solid transparent; }
+  .ev.new { animation: flash .5s ease-out; }
+  @keyframes flash { from { background: color-mix(in srgb, var(--live) 26%, transparent); } }
+  .k { color: var(--dim); }
+  .lbl { color: var(--accent); font-weight: 600; }
+  .role { color: var(--dim); }
+  .pth { color: var(--dim); }
+  .txt { color: var(--live); }
+  .fct { color: var(--fact); font-weight: 600; }
+  .tbl { color: var(--accent); }
+  .err { color: var(--warn); font-weight: 600; }
+
+  table { width: 100%; border-collapse: collapse; font: 12.5px var(--mono); }
+  th { text-align: left; font-weight: 600; color: var(--dim); padding-bottom: 6px; }
+  td { padding: 2px 0; }
+  td.n { text-align: right; }
+  footer { padding: 0 24px 32px; color: var(--dim); font-size: 12.5px; max-width: 74ch; }
+  footer code { font-family: var(--mono); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Watching <code>grpc-xml</code> parse</h1>
+  <p class="sub">
+    One HTTP request carries the document up while typed document events come
+    back down, the same shape as the gRPC call underneath. Items are drawn the
+    moment the Rust server emits them, which is why they show up before the
+    upload bar fills. Slow the upload to watch it happen.
+  </p>
+</header>
+
+<main>
+  <div class="panel controls">
+    <div>
+      <label for="sample">Document</label>
+      <select id="sample"></select>
+    </div>
+    <div>
+      <label for="pick">…or a local file</label>
+      <input id="pick" type="file" accept=".xml,.nxml,.xbrl,.dclg,.dclx,.gz">
+    </div>
+    <div>
+      <label for="dialect">Dialect</label>
+      <select id="dialect">
+        <option value="" selected>sniff it</option>
+        <option value="XML_DIALECT_JATS">JATS</option>
+        <option value="XML_DIALECT_USPTO">USPTO</option>
+        <option value="XML_DIALECT_XBRL">XBRL</option>
+        <option value="XML_DIALECT_DOCLANG">DocLang</option>
+        <option value="XML_DIALECT_DCLX">DCLX archive</option>
+        <option value="XML_DIALECT_METS_GBS">METS-GBS</option>
+      </select>
+    </div>
+    <div class="checks">
+      <label><input id="islands" type="checkbox"> XHTML islands</label>
+      <label><input id="attributes" type="checkbox"> source attributes</label>
+      <label><input id="document" type="checkbox"> Document fold</label>
+    </div>
+    <div class="throttle">
+      <div>
+        <label for="delay">Upload throttle</label>
+        <input id="delay" type="range" min="0" max="120" step="10" value="40">
+      </div>
+      <span class="hint"><span id="delayLabel">40 ms / chunk</span><br><span id="chunkLabel"></span></span>
+    </div>
+    <button id="run">Stream it</button>
+  </div>
+
+  <div class="panel">
+    <div class="track">
+      <div class="fill" id="fill"></div>
+      <div class="mark" id="mark" title="first content event"></div>
+      <div class="track-label"><span id="fedLabel">idle</span><span id="sizeLabel"></span></div>
+    </div>
+    <p class="verdict idle" id="verdict">Pick a document and press stream.</p>
+  </div>
+
+  <div class="panel stats">
+    <div class="stat"><b id="sEvents">0</b><span>events</span></div>
+    <div class="stat"><b id="sTexts">0</b><span>text items</span></div>
+    <div class="stat"><b id="sFacts">0</b><span>facts</span></div>
+    <div class="stat"><b id="sRows">0</b><span>table rows</span></div>
+    <div class="stat"><b id="sMs">0</b><span>ms to first event</span></div>
+    <div class="stat"><b id="sDialect">&ndash;</b><span>dialect</span></div>
+  </div>
+
+  <div class="split">
+    <div class="panel">
+      <div id="feed"></div>
+    </div>
+    <div class="panel">
+      <table>
+        <thead><tr><th>Label</th><th class="n">Items</th></tr></thead>
+        <tbody id="counts"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<footer>
+  The throttle delays the <em>upload</em> only, to make streaming visible on a
+  file that would otherwise finish inside one animation frame. The parser never
+  waits for anything but bytes. Try <code>xbrl-instance.xbrl</code> to see
+  facts arrive with their contexts and units resolved inline, and
+  <code>jats-xhtml-island.xml</code> with <em>XHTML islands</em> on to see a
+  fragment handed off to the HTML collector instead of being flattened.
+</footer>
+
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const feed = $("feed");
+
+// The BFF injects this meta tag when it serves the page under a path prefix
+// (UI_BASE). Empty when the bridge runs at the root, so calls below are
+// unprefixed and nothing changes.
+const BASE = document.querySelector('meta[name="ui-base"]')?.content ?? "";
+
+/// Keep the DOM bounded. A real journal archive produces thousands of events
+/// and the browser is not the thing this demo is trying to stress.
+const MAX_ROWS = 600;
+
+let sizeBytes = 0;
+
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const clip = (s, n = 90) => (s.length > n ? s.slice(0, n) + "…" : s);
+const num = (n) => n.toLocaleString("en-US");
+const kb = (n) =>
+  n < 1024 ? `${n} B`
+  : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KiB`
+  : `${(n / 1024 / 1024).toFixed(1)} MiB`;
+const short = (s, prefix) => String(s ?? "").replace(prefix, "");
+
+async function loadSamples() {
+  const { files } = await (await fetch(`${BASE}/api/samples`)).json();
+  $("sample").innerHTML = files
+    .map((f) => `<option value="${esc(f.name)}">${esc(f.name)} (${kb(f.size)})</option>`)
+    .join("");
+  if (files.some((f) => f.name === "jats-article.xml")) $("sample").value = "jats-article.xml";
+}
+
+// A locally picked file wins over the dropdown, so changing the dropdown
+// clears the picker and the two cannot disagree silently.
+$("sample").addEventListener("change", () => { $("pick").value = ""; });
+$("delay").addEventListener("input", (e) => {
+  $("delayLabel").textContent = `${e.target.value} ms / chunk`;
+});
+
+// ---------------------------------------------------------------------------
+// Rendering, batched
+// ---------------------------------------------------------------------------
+//
+// Rows are queued and written on an animation frame rather than as they
+// arrive. One append plus a scrollTop read per event forces a layout per
+// event, which on a large document makes the browser the bottleneck and hides
+// the thing being demonstrated. Only the tail of a batch can ever be visible,
+// so the rest is dropped without touching the DOM at all.
+
+let pending = [];
+let scheduled = false;
+let onFlush = null;
+
+function schedule() {
+  if (!scheduled) {
+    scheduled = true;
+    requestAnimationFrame(flush);
+  }
+}
+
+function row(html) {
+  pending.push(html);
+  schedule();
+}
+
+function flush() {
+  scheduled = false;
+  if (onFlush) onFlush();
+  if (pending.length === 0) return;
+
+  const tail = pending.slice(-MAX_ROWS);
+  pending = [];
+
+  const batch = document.createDocumentFragment();
+  for (const html of tail) {
+    const div = document.createElement("div");
+    div.className = "ev new";
+    div.innerHTML = html;
+    batch.append(div);
+  }
+  feed.append(batch);
+  while (feed.childElementCount > MAX_ROWS) feed.firstElementChild.remove();
+  feed.scrollTop = feed.scrollHeight;
+}
+
+/** Render one event as a feed row, or null to skip it. */
+function render(kind, d) {
+  switch (kind) {
+    case "info": {
+      const title = d.title ? ` title=<span class="txt">"${esc(clip(d.title, 50))}"</span>` : "";
+      return `<span class="k">info</span> dialect=<b>${esc(short(d.dialect, "XML_DIALECT_"))}</b>`
+        + ` evidence=${esc(short(d.evidence, "DIALECT_EVIDENCE_"))}`
+        + ` root=&lt;${esc(d.rootLocalName)}&gt;${title}`;
+    }
+    case "textItem": {
+      const role = d.role ? ` <span class="role">${esc(d.role)}</span>` : "";
+      const level = d.level ? ` <span class="k">L${d.level}</span>` : "";
+      const ord = d.ordinal ? ` <span class="k">#${d.ordinal}</span>` : "";
+      const attrs = (d.attributes ?? []).length
+        ? ` <span class="k">${(d.attributes ?? []).map((a) => `${esc(a.name)}="${esc(clip(a.value, 24))}"`).join(" ")}</span>`
+        : "";
+      return `<span class="lbl">${esc(short(d.label, "XML_ITEM_LABEL_"))}</span>${role}${level}${ord}`
+        + ` <span class="txt">${esc(clip(d.text))}</span>${attrs}`
+        + ` <span class="pth">${esc(clip(d.path, 60))}</span>`;
+    }
+    case "tableStart":
+      return `<span class="tbl">table open</span> ${esc(d.tableRef)}`
+        + (d.caption ? ` <span class="txt">${esc(clip(d.caption, 60))}</span>` : "")
+        + ` <span class="pth">${esc(clip(d.path, 60))}</span>`;
+    case "tableRow": {
+      const cells = (d.cells ?? [])
+        .map((c) => (c.isHeader ? `<b>${esc(clip(c.text, 24))}</b>` : esc(clip(c.text, 24))))
+        .join(" | ");
+      return `<span class="tbl">row ${d.rowIndex}</span> ${cells}`;
+    }
+    case "tableEnd":
+      return `<span class="tbl">table close</span> ${esc(d.tableRef)}`
+        + ` <span class="k">${d.rowCount} rows × ${d.columnCount} cols</span>`;
+    case "fact": {
+      const concept = d.conceptPrefix ? `${d.conceptPrefix}:${d.conceptLocalName}` : d.conceptLocalName;
+      const value = d.isNil ? "<i>nil</i>" : `<span class="txt">${esc(clip(d.value, 40))}</span>`;
+      const unit = d.unitRef ? ` <span class="k">${esc(d.unitRef)}</span>` : "";
+      const dec = d.decimals ? ` <span class="k">dec ${esc(d.decimals)}</span>` : "";
+      return `<span class="fct">fact</span> ${esc(concept)} = ${value}${unit}${dec}`
+        + ` <span class="pth">${esc(clip(d.path, 60))}</span>`;
+    }
+    case "htmlIsland":
+      return `<span class="k">island</span> <span class="txt">${esc(clip(d.html ?? "", 110))}</span>`
+        + ` <span class="pth">${esc(clip(d.path, 50))}</span>`;
+    case "document":
+      return `<span class="k">document</span> name="${esc(clip(d.name ?? "", 50))}"`
+        + ` <span class="k">${(d.texts ?? []).length} texts, ${(d.tables ?? []).length} tables (folded projection)</span>`;
+    case "status": {
+      const c = d.counts ?? {};
+      const warnings = (d.warnings ?? [])
+        .map((w) => `${short(w.code, "WARNING_CODE_")}×${w.count}`)
+        .join(", ");
+      return `<span class="k">status</span> ${num(d.bytesConsumed)} bytes in ${d.elapsedMillis} ms`
+        + ` <span class="k">${c.textItems} texts, ${c.tables} tables, ${c.facts} facts, ${c.elementsVisited} elements</span>`
+        + (warnings ? ` <span class="err">${esc(warnings)}</span>` : "");
+    }
+    case "grpc-error":
+      return `<span class="err">rpc failed</span> ${esc(d.message)}`;
+    default:
+      return null; // an arm this page has no name for; the contract says ignore it
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The run
+// ---------------------------------------------------------------------------
+
+async function run() {
+  const button = $("run");
+  button.disabled = true;
+  feed.innerHTML = "";
+  pending = [];
+  $("counts").innerHTML = "";
+  $("mark").style.display = "none";
+  $("fill").style.width = "0";
+  $("verdict").className = "verdict idle";
+  $("verdict").textContent = "streaming…";
+  for (const id of ["sEvents", "sTexts", "sFacts", "sRows", "sMs"]) $(id).textContent = "0";
+  $("sDialect").textContent = "–";
+
+  try {
+    await stream();
+  } catch (err) {
+    row(`<span class="err">page error</span> ${esc(String(err))}`);
+    flush();
+  } finally {
+    onFlush = null;
+    button.disabled = false;
+  }
+}
+
+const CONTENT_KINDS = new Set(["textItem", "tableStart", "tableRow", "tableEnd", "fact", "htmlIsland"]);
+
+async function stream() {
+  const picked = $("pick").files[0];
+  const body = picked
+    ? await picked.arrayBuffer()
+    : await (await fetch(`${BASE}/api/samples/${$("sample").value}`)).arrayBuffer();
+  sizeBytes = body.byteLength;
+  $("sizeLabel").textContent = kb(sizeBytes);
+
+  const params = new URLSearchParams();
+  if ($("dialect").value) params.set("dialect", $("dialect").value);
+  if ($("islands").checked) params.set("islands", "1");
+  if ($("attributes").checked) params.set("attributes", "1");
+  if ($("document").checked) params.set("document", "1");
+  params.set("delayMs", $("delay").value);
+
+  // Aim for roughly 40 upload steps whatever the document size, so a 2 KiB
+  // fixture and a multi-megabyte export both show the same thing. Chunk size
+  // changes nothing about the events, only how finely you get to watch them
+  // arrive.
+  const chunkBytes = Math.min(1 << 20, Math.max(16, Math.ceil(sizeBytes / 40)));
+  params.set("chunkBytes", chunkBytes);
+  $("chunkLabel").textContent = `${kb(chunkBytes)} chunks`;
+
+  const started = performance.now();
+  let events = 0, texts = 0, facts = 0, rows = 0, fed = 0, firstEventAt = null;
+  const counts = new Map();
+
+  // Counters are read on the animation frame, never written per event.
+  onFlush = () => {
+    $("sEvents").textContent = num(events);
+    $("sTexts").textContent = num(texts);
+    $("sFacts").textContent = num(facts);
+    $("sRows").textContent = num(rows);
+    $("counts").innerHTML = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([id, n]) => `<tr><td>${esc(clip(id, 22))}</td><td class="n">${num(n)}</td></tr>`)
+      .join("");
+  };
+
+  const res = await fetch(`${BASE}/api/parse?${params}`, { method: "POST", body });
+  if (!res.ok) {
+    const problem = await res.json();
+    row(`<span class="err">${esc(problem.error)}</span>`);
+    flush();
+    return;
+  }
+
+  // SSE over a POST response, so it is parsed by hand: EventSource only does
+  // GET, and the whole point is that the upload and the event stream are one
+  // request. Frames are split on offsets rather than by slicing the buffer or
+  // running a regex per frame.
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let at = 0;
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let split;
+    while ((split = buffer.indexOf("\n\n", at)) !== -1) {
+      const raw = buffer.slice(at, split);
+      at = split + 2;
+
+      const nl = raw.indexOf("\n");
+      if (nl < 0 || !raw.startsWith("event: ")) continue;
+      const kind = raw.slice(7, nl);
+      const rest = raw.slice(nl + 1);
+      if (!rest.startsWith("data: ")) continue;
+      const data = JSON.parse(rest.slice(6));
+
+      if (kind === "fed") {
+        fed = data.bytes;
+        $("fill").style.width = `${(fed / sizeBytes) * 100}%`;
+        $("fedLabel").textContent = `${kb(fed)} fed to the parser`;
+        continue;
+      }
+      if (kind === "done") continue;
+
+      events++;
+      if (kind === "info") $("sDialect").textContent = short(data.dialect, "XML_DIALECT_");
+      if (kind === "textItem") {
+        texts++;
+        const label = data.role
+          ? `${short(data.label, "XML_ITEM_LABEL_")}·${data.role}`
+          : short(data.label, "XML_ITEM_LABEL_");
+        counts.set(label, (counts.get(label) ?? 0) + 1);
+      }
+      if (kind === "fact") facts++;
+      if (kind === "tableRow") rows++;
+      if (CONTENT_KINDS.has(kind) && firstEventAt === null) {
+        firstEventAt = markFirstEvent(fed, started);
+      }
+
+      // Only the last MAX_ROWS of a batch can ever be seen, so once that many
+      // are queued there is no reason to format any more of them.
+      if (pending.length < MAX_ROWS) {
+        const html = render(kind, data);
+        if (html) row(html);
+      } else {
+        schedule();
+      }
+    }
+
+    // Compact once per read rather than once per frame. Re-slicing the whole
+    // buffer for every frame is quadratic, and a big document delivers
+    // thousands of frames per read.
+    if (at > 0) {
+      buffer = buffer.slice(at);
+      at = 0;
+    }
+  }
+
+  flush();
+  finish(events, firstEventAt, performance.now() - started);
+}
+
+/** Place the marker and say how far in the first content event landed. */
+function markFirstEvent(fed, started) {
+  const pct = (fed / sizeBytes) * 100;
+  $("mark").style.left = `${pct}%`;
+  $("mark").style.display = "block";
+  $("sMs").textContent = Math.round(performance.now() - started);
+  $("verdict").className = "verdict";
+  $("verdict").innerHTML = `First content event after <strong>${kb(fed)} of ${kb(sizeBytes)}</strong>`
+    + ` (${pct.toFixed(0)}% uploaded). The rest of the document had not been sent yet.`;
+  return fed;
+}
+
+function finish(events, firstEventAt, wallMs) {
+  if (firstEventAt === null) {
+    $("verdict").className = "verdict idle";
+    $("verdict").textContent = events > 0
+      ? "The stream carried no content events."
+      : "No events. The server refused the document; see the feed.";
+    return;
+  }
+  const mib = sizeBytes / 1024 / 1024;
+  const rate = mib / (wallMs / 1000);
+  // Deliberately not labelled as the service's throughput. This is the browser
+  // clock, so it includes the throttle, the SSE bridge, JSON parsing and
+  // rendering.
+  $("verdict").innerHTML +=
+    `<br><span class="hint">${num(events)} events, ${kb(sizeBytes)} in `
+    + `${Math.round(wallMs)} ms of browser time (${rate.toFixed(0)} MiB/s including `
+    + `the throttle, this page and the SSE bridge, so not the service's own speed).</span>`;
+}
+
+$("run").addEventListener("click", run);
+await loadSamples();
+</script>
+</body>
+</html>

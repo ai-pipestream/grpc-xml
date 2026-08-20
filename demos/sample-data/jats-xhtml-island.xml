@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/"
+         xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <front><article-meta><title-group><article-title>Islands</article-title></title-group></article-meta></front>
+  <body>
+    <sec id="s1">
+      <title>Embedded markup</title>
+      <p>Text before the island.</p>
+      <xhtml:div id="widget" class="callout">
+        <xhtml:p>Rendered by the <xhtml:em>HTML</xhtml:em> collector.</xhtml:p>
+      </xhtml:div>
+      <p>Text after the island.</p>
+    </sec>
+  </body>
+</article>

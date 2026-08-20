@@ -2,3 +2,8 @@
 **/*.rs.bk
 .idea/
 gen/
+
+# Node demo: installed dependencies and the drop-in directory for large
+# documents that do not belong in the repository.
+demos/node-client/node_modules/
+demos/sample-data/large/

@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/"
+         xmlns:xlink="http://www.w3.org/1999/xlink"
+         article-type="research-article">
+  <front>
+    <journal-meta>
+      <journal-title>Journal of Streaming Parsers</journal-title>
+    </journal-meta>
+    <article-meta>
+      <article-id pub-id-type="doi">10.1234/jsp.2026.001</article-id>
+      <title-group>
+        <article-title>Streaming XML Without a DOM</article-title>
+      </title-group>
+      <contrib-group>
+        <contrib contrib-type="author">
+          <name><surname>Rivera</surname><given-names>Ana</given-names></name>
+        </contrib>
+        <contrib contrib-type="author">
+          <name><surname>Okafor</surname><given-names>Chidi</given-names></name>
+        </contrib>
+      </contrib-group>
+      <aff>Institute for Pull Parsing</aff>
+      <abstract>
+        <p>A collector need not build a tree to produce a document.</p>
+      </abstract>
+      <kwd-group><kwd>streaming</kwd><kwd>xml</kwd></kwd-group>
+      <pub-date pub-type="epub"><year>2026</year><month>02</month></pub-date>
+    </article-meta>
+  </front>
+  <body>
+    <sec id="intro">
+      <title>Introduction</title>
+      <p>A pull parser yields events in document order.</p>
+      <p>Each item is forwarded as soon as its end tag is read.</p>
+      <sec id="scope">
+        <title>Scope</title>
+        <p>Four dialects are in scope.</p>
+      </sec>
+    </sec>
+    <sec id="results">
+      <title>Results</title>
+      <table-wrap id="t1">
+        <label>Table 1</label>
+        <caption><p>Throughput by dialect.</p></caption>
+        <table>
+          <thead><tr><th>Dialect</th><th>MB/s</th></tr></thead>
+          <tbody>
+            <tr><td>JATS</td><td>180</td></tr>
+            <tr><td>XBRL</td><td>240</td></tr>
+          </tbody>
+        </table>
+      </table-wrap>
+      <fig id="f1">
+        <caption><p>The event pipeline.</p></caption>
+        <graphic xlink:href="pipeline.png"/>
+      </fig>
+      <p>Throughput scales with the number of <italic>concurrent</italic> streams.</p>
+    </sec>
+  </body>
+  <back>
+    <ref-list>
+      <ref id="b1"><mixed-citation>Rivera A. Parsers. 2025.</mixed-citation></ref>
+      <ref id="b2"><mixed-citation>Okafor C. Streams. 2026.</mixed-citation></ref>
+    </ref-list>
+  </back>
+</article>
