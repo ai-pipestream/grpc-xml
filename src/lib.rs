@@ -81,7 +81,7 @@ pub use service::XmlGrpc;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Name of the XML parser this build links, reported by `GetServiceInfo`.
-pub const PARSER: &str = "quick-xml 0.41";
+pub const PARSER: &str = "quick-xml 0.42";
 
 /// Value of `CollectorSource.collector` on every item this service produces.
 pub const COLLECTOR: &str = "xml";

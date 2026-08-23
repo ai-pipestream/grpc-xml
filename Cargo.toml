@@ -16,7 +16,11 @@ publish = false
 # Streaming pull parser. No DTD processing, no entity expansion, no network:
 # general entity references surface as `Event::GeneralRef` and are never
 # resolved, which is the property the XXE and billion-laughs tests assert.
-quick-xml = { version = "0.41.0", features = ["encoding"] }
+quick-xml = { version = "0.42.0", features = ["encoding"] }
+# Pre-scanning the XML declaration for its encoding label, so the stream
+# decoder is switched before any byte is decoded under the wrong assumption;
+# already in the tree through quick-xml's `encoding` feature.
+encoding_rs = "0.8"
 prost = "0.14.4"
 # `google.protobuf.Value`, which the vendored document schema uses for the
 # `BaseMeta.custom_fields` escape hatch the Document fold writes into.

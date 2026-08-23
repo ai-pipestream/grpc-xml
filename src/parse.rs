@@ -21,11 +21,12 @@ use std::io::{self, BufRead, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use quick_xml::Writer;
+use quick_xml::encoding::DecodingReader;
 use quick_xml::events::attributes::Attribute as XmlAttribute;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
-use quick_xml::{Decoder, Writer};
 
 use crate::dialect::{
     self, Action, Attrs, CELL_ELEMENTS, ElementCtx, HEADER_CELL_ELEMENTS, HEADER_SECTION_ELEMENTS,
@@ -166,7 +167,7 @@ pub fn parse<R: BufRead>(
     emit: EmitFn<'_>,
 ) -> Result<Dialect, ParseError> {
     let mut reader = reader;
-    let head = peek_head(&mut reader, input)?;
+    let head = peek_bytes(&mut reader, input, 4)?;
     let magic = crate::archive::sniff_magic(&head);
     let reader = io::Cursor::new(head).chain(reader);
     match magic {
@@ -194,13 +195,17 @@ pub fn parse<R: BufRead>(
     }
 }
 
-/// Read up to four bytes from the front of the stream, for magic sniffing.
+/// Read up to `want` bytes from the front of the stream, for sniffing.
 ///
-/// Fewer than four come back only when the stream itself is shorter; the
-/// caller chains what was taken back in front of the reader, so the parse
-/// still sees every byte.
-fn peek_head<R: BufRead>(reader: &mut R, input: &InputStats) -> Result<Vec<u8>, ParseError> {
-    let mut head = [0u8; 4];
+/// Fewer come back only when the stream itself is shorter; the caller
+/// chains what was taken back in front of the reader, so the parse still
+/// sees every byte.
+fn peek_bytes<R: BufRead>(
+    reader: &mut R,
+    input: &InputStats,
+    want: usize,
+) -> Result<Vec<u8>, ParseError> {
+    let mut head = vec![0u8; want];
     let mut filled = 0;
     while filled < head.len() {
         match reader.read(&mut head[filled..]) {
@@ -217,7 +222,8 @@ fn peek_head<R: BufRead>(reader: &mut R, input: &InputStats) -> Result<Vec<u8>, 
             }
         }
     }
-    Ok(head[..filled].to_vec())
+    head.truncate(filled);
+    Ok(head)
 }
 
 /// Parse one XML document with the streaming driver.
@@ -233,7 +239,7 @@ pub(crate) fn parse_xml<R: BufRead>(
     forced: Option<(Dialect, sniff::Evidence)>,
 ) -> Result<Dialect, ParseError> {
     let started = std::time::Instant::now();
-    let mut xml = NsReader::from_reader(reader);
+    let mut xml = NsReader::from_reader(decoding_reader(reader, input)?);
     // Empty elements are expanded into a Start/End pair so the driver has one
     // shape to reason about; every depth comparison in it depends on that.
     xml.config_mut().expand_empty_elements = true;
@@ -1352,10 +1358,6 @@ impl<R: BufRead> Driver<'_, R> {
 
     /// Read one XML event and copy it into owned data.
     fn next_step(&mut self) -> Result<Step, ParseError> {
-        // Re-read every time: with the `encoding` feature the decoder is
-        // decided by the XML declaration, so it is not stable until the
-        // prolog has been read.
-        let decoder = self.xml.decoder();
         self.buf.clear();
         let (resolved, event) = self
             .xml
@@ -1363,17 +1365,17 @@ impl<R: BufRead> Driver<'_, R> {
             .map_err(|e| convert_error(&e, self.input))?;
         let step = match event {
             Event::Start(start) => {
-                let qname = decode(start.name().as_ref(), decoder);
-                let local = decode(start.local_name().as_ref(), decoder);
+                let qname = start.name().as_ref().to_owned();
+                let local = start.local_name().as_ref().to_owned();
                 let namespace = match resolved {
-                    ResolveResult::Bound(ns) => decode(ns.as_ref(), decoder),
+                    ResolveResult::Bound(ns) => ns.as_ref().to_owned(),
                     ResolveResult::Unbound | ResolveResult::Unknown(_) => String::new(),
                 };
                 let mut attrs = Vec::new();
                 for attribute in start.attributes() {
                     let attribute = attribute.map_err(|e| ParseError::Malformed(e.to_string()))?;
-                    let key = decode(attribute.key.as_ref(), decoder);
-                    let value = attribute_value(&attribute, decoder);
+                    let key = attribute.key.as_ref().to_owned();
+                    let value = attribute_value(&attribute);
                     attrs.push((key, value));
                 }
                 Step::Start {
@@ -1387,42 +1389,22 @@ impl<R: BufRead> Driver<'_, R> {
             // Empty event never reaches here.
             Event::Empty(_) => unreachable!("empty elements are expanded"),
             Event::End(_) => Step::End,
-            Event::Text(text) => Step::Text(
-                text.xml10_content()
-                    .map_err(|e| ParseError::Malformed(e.to_string()))?
-                    .into_owned(),
-            ),
-            Event::CData(cdata) => Step::Text(
-                cdata
-                    .decode()
-                    .map_err(|e| ParseError::Malformed(e.to_string()))?
-                    .into_owned(),
-            ),
+            Event::Text(text) => Step::Text(text.xml10_content().into_owned()),
+            Event::CData(cdata) => Step::Text(cdata.into_inner().into_owned()),
             Event::GeneralRef(reference) => {
-                let name = reference
-                    .decode()
-                    .map_err(|e| ParseError::Malformed(e.to_string()))?
-                    .into_owned();
+                let name = reference.into_inner().into_owned();
                 let resolved = resolve_reference(&name);
                 Step::GeneralRef { name, resolved }
             }
             Event::Decl(decl) => {
-                let version = decl
-                    .version()
-                    .ok()
-                    .map(|v| String::from_utf8_lossy(&v).into_owned());
+                let version = decl.version().ok().map(std::borrow::Cow::into_owned);
                 let encoding = decl
                     .encoding()
                     .and_then(Result::ok)
-                    .map(|v| String::from_utf8_lossy(&v).into_owned());
+                    .map(std::borrow::Cow::into_owned);
                 Step::Declaration { version, encoding }
             }
-            Event::DocType(doctype) => Step::DocType(
-                doctype
-                    .decode()
-                    .map_err(|e| ParseError::Malformed(e.to_string()))?
-                    .into_owned(),
-            ),
+            Event::DocType(doctype) => Step::DocType(doctype.into_inner().into_owned()),
             Event::Comment(_) | Event::PI(_) => Step::Ignorable,
             Event::Eof => Step::Eof,
         };
@@ -1606,7 +1588,7 @@ fn convert_error(error: &quick_xml::Error, input: &InputStats) -> ParseError {
 /// `None` and the caller preserves the reference verbatim.
 pub(crate) fn resolve_reference(name: &str) -> Option<String> {
     if name.starts_with('#') {
-        return quick_xml::events::BytesRef::new(name.to_owned())
+        return quick_xml::events::BytesRef::new(name)
             .resolve_char_ref()
             .ok()
             .flatten()
@@ -1615,27 +1597,82 @@ pub(crate) fn resolve_reference(name: &str) -> Option<String> {
     quick_xml::escape::resolve_predefined_entity(name).map(str::to_owned)
 }
 
-/// Decode raw bytes with the reader's encoding, replacing what will not
-/// decode rather than failing the parse over one bad byte.
-fn decode(bytes: &[u8], decoder: Decoder) -> String {
-    decoder.decode(bytes).map_or_else(
-        |_| String::from_utf8_lossy(bytes).into_owned(),
-        std::borrow::Cow::into_owned,
-    )
-}
-
 /// Attribute value with predefined and character references resolved.
 ///
 /// A value naming an undeclared entity does not fail: normalization errors
 /// out on it, and the raw text is kept instead, matching what happens to an
 /// unexpandable reference in content.
-fn attribute_value(attribute: &XmlAttribute<'_>, decoder: Decoder) -> String {
+fn attribute_value(attribute: &XmlAttribute<'_>) -> String {
     attribute
-        .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, decoder)
+        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
         .map_or_else(
-            |_| decode(&attribute.value, decoder),
+            |_| attribute.value.as_ref().to_owned(),
             std::borrow::Cow::into_owned,
         )
+}
+
+/// The byte source every XML parse runs over: the scanned head chained back
+/// in front of the rest of the stream, transcoded to UTF-8.
+pub(crate) type TranscodedReader<R> = DecodingReader<io::Chain<io::Cursor<Vec<u8>>, R>>;
+
+/// Bytes of the stream head scanned for the declaration's encoding label.
+///
+/// This equals the detection prefix [`DecodingReader`] itself buffers before
+/// serving a byte, so scanning it introduces no blocking the reader would
+/// not: both wait for this many bytes (or EOF) before the first event.
+const ENCODING_SCAN_BYTES: usize = 64;
+
+/// Build the transcoding reader for one XML byte stream, with the declared
+/// encoding already applied.
+///
+/// quick-xml reads through [`DecodingReader`], which converts the input to
+/// UTF-8 and detects UTF-16 on its own from BOMs and byte patterns. An
+/// ASCII-compatible encoding, though, is only knowable from the XML
+/// declaration, and waiting for the parser to yield that declaration is too
+/// late: the reader will already have decoded — or refused — non-ASCII
+/// bytes near the head under its provisional UTF-8. So the declaration's
+/// label is scanned here, bytewise, before any decoding starts, and the
+/// decoder is switched up front. A label `encoding_rs` does not know keeps
+/// UTF-8, exactly as quick-xml 0.41 kept its current decoder; a declaration
+/// stretching past [`ENCODING_SCAN_BYTES`] keeps UTF-8 too, and a document
+/// that then fails to decode is reported malformed.
+pub(crate) fn decoding_reader<R: BufRead>(
+    mut reader: R,
+    input: &InputStats,
+) -> Result<TranscodedReader<R>, ParseError> {
+    let head = peek_bytes(&mut reader, input, ENCODING_SCAN_BYTES)?;
+    let label = declared_encoding_label(&head);
+    let mut decoding = DecodingReader::new(io::Cursor::new(head).chain(reader));
+    if let Some(encoding) = label
+        .as_deref()
+        .and_then(|l| encoding_rs::Encoding::for_label(l.as_bytes()))
+    {
+        decoding.set_encoding(encoding);
+    }
+    Ok(decoding)
+}
+
+/// The encoding label of an XML declaration at the head of `head`, if one
+/// can be read bytewise.
+///
+/// Only an ASCII-shaped head can match: a UTF-16 stream interleaves zero
+/// bytes through `<?xml` and correctly falls through to the reader's own
+/// byte-pattern detection. The label search is the same pseudo-attribute
+/// scan the parser will repeat on the declaration event; disagreement is
+/// impossible because both read the same bytes.
+fn declared_encoding_label(head: &[u8]) -> Option<String> {
+    let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    let decl = head.strip_prefix(b"<?xml")?;
+    let end = decl
+        .windows(2)
+        .position(|w| w == b"?>")
+        .unwrap_or(decl.len());
+    let decl = String::from_utf8_lossy(&decl[..end]);
+    let after = decl.split_once("encoding")?.1.trim_start();
+    let after = after.strip_prefix('=')?.trim_start();
+    let quote = after.chars().next().filter(|q| *q == '"' || *q == '\'')?;
+    let value = &after[1..];
+    Some(value[..value.find(quote)?].to_owned())
 }
 
 /// Collapse XML whitespace: every run becomes one space, ends are trimmed.

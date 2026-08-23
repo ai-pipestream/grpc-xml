@@ -30,6 +30,7 @@
 //! never trusted — and the first byte past the cap ends the parse with the
 //! same `RESOURCE_EXHAUSTED` an oversized plain document gets.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Read};
 
@@ -452,18 +453,22 @@ fn find_mets_manifest(members: &BTreeMap<String, Vec<u8>>) -> Option<(&str, &[u8
 /// True when the document's root element is a METS `mets` with
 /// `PROFILE="gbs"`. Reads only as far as the root start tag.
 fn is_gbs_mets(bytes: &[u8]) -> bool {
-    let mut xml = NsReader::from_reader(bytes);
+    let Ok(decoding) = parse::decoding_reader(bytes, &InputStats::default()) else {
+        return false;
+    };
+    let mut xml = NsReader::from_reader(decoding);
     xml.config_mut().expand_empty_elements = true;
     let mut buf = Vec::new();
     loop {
         match xml.read_resolved_event_into(&mut buf) {
             Ok((resolved, Event::Start(start))) => {
-                let ns_matches = matches!(&resolved, ResolveResult::Bound(ns) if ns.as_ref() == NS_METS.as_bytes());
-                let local_matches = start.local_name().as_ref() == b"mets";
+                let ns_matches =
+                    matches!(&resolved, ResolveResult::Bound(ns) if ns.as_ref() == NS_METS);
+                let local_matches = start.local_name().as_ref() == "mets";
                 let profile = start.try_get_attribute("PROFILE").ok().flatten();
                 return ns_matches
                     && local_matches
-                    && profile.is_some_and(|a| a.value.as_ref() == b"gbs");
+                    && profile.is_some_and(|a| a.value.as_ref() == "gbs");
             }
             Ok((
                 _,
@@ -517,7 +522,7 @@ impl ManifestWalk {
     fn on_start(&mut self, start: &quick_xml::events::BytesStart<'_>, manifest: &mut Manifest) {
         self.depth += 1;
         manifest.elements_visited += 1;
-        let local = String::from_utf8_lossy(start.local_name().as_ref()).into_owned();
+        let local = start.local_name().as_ref().to_owned();
         if manifest.root_local_name.is_empty() {
             manifest.root_local_name.clone_from(&local);
             NS_METS.clone_into(&mut manifest.root_namespace);
@@ -570,10 +575,10 @@ impl ManifestWalk {
     }
 
     fn on_end(&mut self, end: &quick_xml::events::BytesEnd<'_>) {
-        if end.local_name().as_ref() == b"fileGrp" {
+        if end.local_name().as_ref() == "fileGrp" {
             self.grp_uses.pop();
         }
-        if end.local_name().as_ref() == b"file" {
+        if end.local_name().as_ref() == "file" {
             self.open_file = None;
         }
         if let Some((page_depth, _)) = self.open_page
@@ -686,7 +691,7 @@ impl MetsDriver<'_> {
     fn read_manifest(&mut self, name: &str, bytes: &[u8]) -> Result<Manifest, ParseError> {
         let mut manifest = Manifest::default();
         let mut walk = ManifestWalk::default();
-        let mut xml = NsReader::from_reader(bytes);
+        let mut xml = NsReader::from_reader(parse::decoding_reader(bytes, self.input)?);
         xml.config_mut().expand_empty_elements = true;
         let mut buf = Vec::new();
         loop {
@@ -697,14 +702,8 @@ impl MetsDriver<'_> {
                 Event::Start(start) => walk.on_start(&start, &mut manifest),
                 Event::End(end) => walk.on_end(&end),
                 Event::Decl(decl) => {
-                    manifest.xml_version = decl
-                        .version()
-                        .ok()
-                        .map(|v| String::from_utf8_lossy(&v).into_owned());
-                    manifest.encoding = decl
-                        .encoding()
-                        .and_then(Result::ok)
-                        .map(|v| String::from_utf8_lossy(&v).into_owned());
+                    manifest.xml_version = decl.version().ok().map(Cow::into_owned);
+                    manifest.encoding = decl.encoding().and_then(Result::ok).map(Cow::into_owned);
                 }
                 Event::DocType(doctype) => self.check_doctype(&doctype, name)?,
                 Event::Eof => break,
@@ -753,7 +752,7 @@ impl MetsDriver<'_> {
     /// tracked at all, so an HTML void element that never closes cannot
     /// derail the line capture the way it would derail a depth count.
     fn read_hocr(&mut self, member: &str, bytes: &[u8]) -> Result<Vec<OcrLine>, ParseError> {
-        let mut xml = NsReader::from_reader(bytes);
+        let mut xml = NsReader::from_reader(parse::decoding_reader(bytes, self.input)?);
         xml.config_mut().expand_empty_elements = true;
         xml.config_mut().check_end_names = false;
         xml.config_mut().allow_unmatched_ends = true;
@@ -768,7 +767,7 @@ impl MetsDriver<'_> {
             match event {
                 Event::Start(start) => {
                     self.counts.elements_visited += 1;
-                    if start.local_name().as_ref() != b"span" {
+                    if start.local_name().as_ref() != "span" {
                         buf.clear();
                         continue;
                     }
@@ -794,7 +793,7 @@ impl MetsDriver<'_> {
                     }
                 }
                 Event::End(end) => {
-                    if end.local_name().as_ref() != b"span" {
+                    if end.local_name().as_ref() != "span" {
                         buf.clear();
                         continue;
                     }
@@ -816,25 +815,16 @@ impl MetsDriver<'_> {
                 }
                 Event::Text(text) => {
                     if let Some(capture) = capture.as_mut() {
-                        let content = text.xml10_content().map_err(|e| {
-                            ParseError::Malformed(format!("hOCR member {member}: {e}"))
-                        })?;
-                        capture.text.push_str(&content);
+                        capture.text.push_str(&text.xml10_content());
                     }
                 }
                 Event::CData(cdata) => {
                     if let Some(capture) = capture.as_mut() {
-                        let content = cdata.decode().map_err(|e| {
-                            ParseError::Malformed(format!("hOCR member {member}: {e}"))
-                        })?;
-                        capture.text.push_str(&content);
+                        capture.text.push_str(&cdata);
                     }
                 }
                 Event::GeneralRef(reference) => {
-                    let name = reference
-                        .decode()
-                        .map_err(|e| ParseError::Malformed(format!("hOCR member {member}: {e}")))?
-                        .into_owned();
+                    let name = reference.into_inner().into_owned();
                     self.push_reference(capture.as_mut(), &name);
                 }
                 Event::DocType(doctype) => self.check_doctype(&doctype, member)?,
@@ -879,10 +869,7 @@ impl MetsDriver<'_> {
         doctype: &quick_xml::events::BytesText<'_>,
         member: &str,
     ) -> Result<(), ParseError> {
-        let body = doctype
-            .decode()
-            .map_err(|e| ParseError::Malformed(format!("archive member {member}: {e}")))?;
-        let parsed = security::parse_doctype(&body);
+        let parsed = security::parse_doctype(doctype);
         security::check_doctype(&parsed).map_err(|refusal| {
             ParseError::Refused(format!("archive member {member}: {refusal}"))
         })?;
@@ -958,13 +945,13 @@ fn member_by_href<'a>(members: &'a BTreeMap<String, Vec<u8>>, href: &str) -> Opt
         .map(|(_, bytes)| bytes.as_slice())
 }
 
-/// An attribute's value by local name, decoded lossily. hOCR and METS both
+/// An attribute's value by local name, as written. hOCR and METS both
 /// prefix attributes (`xlink:href`), and the prefix never matters here.
 fn attr(start: &quick_xml::events::BytesStart<'_>, local: &str) -> Option<String> {
     start.attributes().filter_map(Result::ok).find_map(|a| {
         let key = a.key.as_ref();
-        let key_local = key.rsplit(|&b| b == b':').next().unwrap_or(key);
-        (key_local == local.as_bytes()).then(|| String::from_utf8_lossy(&a.value).into_owned())
+        let key_local = key.rsplit(':').next().unwrap_or(key);
+        (key_local == local).then(|| a.value.as_ref().to_owned())
     })
 }
 
@@ -977,11 +964,11 @@ fn attributes_except(
         .attributes()
         .filter_map(Result::ok)
         .filter_map(|a| {
-            let name = String::from_utf8_lossy(a.key.as_ref()).into_owned();
+            let name = a.key.as_ref().to_owned();
             (!consumed.contains(&name.as_str()) && name != "xmlns" && !name.starts_with("xmlns:"))
                 .then(|| pb::Attribute {
                     name,
-                    value: String::from_utf8_lossy(&a.value).into_owned(),
+                    value: a.value.as_ref().to_owned(),
                 })
         })
         .collect()
