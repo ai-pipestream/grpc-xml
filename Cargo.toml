@@ -8,8 +8,9 @@ repository = "https://git.rokkon.com/ai-pipestream/grpc-xml"
 keywords = ["xml", "jats", "xbrl", "grpc", "streaming"]
 categories = ["parsing", "network-programming"]
 edition = "2024"
-# Edition 2024 needs 1.85; quick-xml 0.41 needs 1.79.
-rust-version = "1.85"
+# The floor is set by the dependencies: tonic 0.14 needs 1.88, quick-xml
+# 0.42 needs 1.86, edition 2024 itself needs 1.85.
+rust-version = "1.88"
 publish = false
 
 [dependencies]
