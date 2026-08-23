@@ -1,0 +1,65 @@
+name: Publish Images
+
+# Builds the service and viewer images and pushes them to
+# docker.io/pipestreamai. Every push to main republishes :latest; a manual
+# dispatch with a version input also tags that version. Docker Hub
+# credentials come from the DOCKER_USER / DOCKER_TOKEN org secrets.
+#
+# Multi-arch (amd64 + arm64): the runtime base (dhi.io/debian-base) and the
+# viewer base (dhi.io/node) are both published for the two platforms, and
+# the Rust build runs under QEMU for the arm64 leg.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Extra version tag (for example 0.1.0); optional'
+        required: false
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Docker Hub (docker.io)
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Compute tags
+        id: tags
+        run: |
+          svc="docker.io/pipestreamai/grpc-xml:latest"
+          ui="docker.io/pipestreamai/grpc-xml-ui:latest"
+          if [ -n "${{ inputs.version }}" ]; then
+            svc="$svc,docker.io/pipestreamai/grpc-xml:${{ inputs.version }}"
+            ui="$ui,docker.io/pipestreamai/grpc-xml-ui:${{ inputs.version }}"
+          fi
+          echo "svc=$svc" >> "$GITHUB_OUTPUT"
+          echo "ui=$ui" >> "$GITHUB_OUTPUT"
+      - name: Build and push the service image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.tags.outputs.svc }}
+      - name: Build and push the viewer image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: demos/node-client/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.tags.outputs.ui }}
