@@ -5,11 +5,11 @@
 //! Every archive is constructed in the test with the same crates the server
 //! reads them with, so no binary fixture is committed and each fixture is
 //! readable next to its assertions. The `.dclx` fixtures follow the OPC
-//! layout docling-core's `save_as_doclang_archive` writes — `document.xml`
-//! at the root, `assets/`, `[Content_Types].xml`, `_rels/.rels` — and the
-//! METS fixtures follow the manifest shape docling's `MetsGbsDocumentBackend`
-//! reads: `PROFILE="gbs"`, `fileGrp USE` naming the per-page files,
-//! `div TYPE="page" ORDER` sequencing them.
+//! layout of the format — `document.xml` at the root, `assets/`,
+//! `[Content_Types].xml`, `_rels/.rels` — and the METS fixtures follow the
+//! manifest shape of a Google Books export: `PROFILE="gbs"`,
+//! `fileGrp USE` naming the per-page files, `div TYPE="page" ORDER`
+//! sequencing them.
 
 mod common;
 

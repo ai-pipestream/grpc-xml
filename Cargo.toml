@@ -32,8 +32,8 @@ tonic = { version = "0.14.6", features = ["gzip", "zstd"] }
 tonic-health = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-reflection = "0.14.6"
-# DocLang archives (.dclx) are OPC zips; only deflate is needed to read the
-# ones docling-core writes, and the tests build theirs with the same crate.
+# DocLang archives (.dclx) are OPC zips; deflate is the only compression
+# the format uses, and the tests build their fixtures with the same crate.
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 # Google Books METS exports are gzipped tars; the archive driver streams the
 # gzip through the tar reader and counts every inflated byte against the cap.

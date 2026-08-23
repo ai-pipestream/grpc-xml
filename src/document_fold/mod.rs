@@ -21,14 +21,12 @@
 //!   `children`, so the coordinator's additive merge can renumber the whole
 //!   fragment mechanically. [`integrity_errors`] is the check for that, and the
 //!   tests assert it is empty.
-//! - **Docling's heading-as-parent nesting.** A section header of level N is
-//!   parented to the nearest open header of a lower level, and the content
-//!   after it hangs off that header rather than off the body. This is the idiom
-//!   upstream docling's JATS and USPTO backends use — `add_heading` returns the
-//!   item that the following content names as its parent — and it is why this
-//!   fold builds no section `GroupItem`s: upstream uses those only as filler
-//!   for heading levels an HTML document skipped, and our levels come straight
-//!   from the parser.
+//! - **Heading-as-parent nesting.** A section header of level N is parented
+//!   to the nearest open header of a lower level, and the content after it
+//!   hangs off that header rather than off the body. That heading ladder is
+//!   the whole nesting model, and it is why this fold builds no section
+//!   `GroupItem`s: filler groups exist to patch skipped heading levels, and
+//!   our levels come straight from the parser.
 //! - **Provenance honesty.** XML has no pages and no boxes, so no item carries
 //!   `prov`. Source locators — the positional path, the element id, the
 //!   source's own role vocabulary — go in per-item `meta.custom_fields` under
@@ -46,16 +44,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use prost_types::Value;
 use prost_types::value::Kind;
 
+mod integrity;
+
+pub use integrity::integrity_errors;
+
 use crate::document::v1 as doc;
 use crate::proto::v1 as pb;
 use crate::{COLLECTOR, VERSION};
 
-/// Value of `Document.schema_name`: the upstream docling schema this plane
-/// tracks.
+/// Value of `Document.schema_name`: the schema version identifier of the
+/// Document plane.
 pub const SCHEMA_NAME: &str = "docling_document_v2";
 
 /// Value of `DocumentOrigin.mimetype` for the single-document dialects. The
-/// archive dialects override it in [`mimetype`] with the type of the archive
+/// archive dialects override it in `mimetype` with the type of the archive
 /// itself; the dialect is on the body meta and on every item's
 /// `CollectorSource.model` either way.
 pub const MIMETYPE: &str = "application/xml";
@@ -291,8 +293,8 @@ impl DocumentFold {
                 pb::XmlItemLabel::SectionHeader => {
                     doc::base_text_item::Item::SectionHeader(doc::SectionHeaderItem {
                         base: Some(base),
-                        // Redundant with the nesting, and kept anyway: docling
-                        // populates both.
+                        // Redundant with the nesting, and kept anyway: the
+                        // schema carries both.
                         level: int(level),
                     })
                 }
@@ -334,13 +336,10 @@ impl DocumentFold {
 
     /// Append one picture as a placeholder `PictureItem`.
     ///
-    /// `image` is left unset: an XML picture is a filename or an `xlink:href`,
-    /// never pixels, and this is exactly what docling does with one — JATS
-    /// calls `add_picture` without ever reading the graphic's href, and the
-    /// HTML backend has an explicit "do not fetch the image, just add a
-    /// placeholder" path. A picture whose reference is all we have is still a
-    /// picture, and the arena is where a downstream stage that can resolve it
-    /// will look.
+    /// `image` is left unset: an XML picture is a filename or an
+    /// `xlink:href`, never pixels, and this collector fetches nothing. A
+    /// picture whose reference is all we have is still a picture, and the
+    /// arena is where a downstream stage that can resolve it will look.
     ///
     /// `captions` stays empty. The text a PICTURE event carries is not prose:
     /// every dialect lifts it from an attribute (the JATS `xlink:href`, the
@@ -727,8 +726,7 @@ const fn model_name(dialect: pb::XmlDialect) -> &'static str {
 }
 
 /// The origin mimetype, which describes the payload the caller uploaded: the
-/// archive for an archive dialect, XML for everything else. The names for the
-/// archives are the ones docling registers for the same formats.
+/// archive for an archive dialect, XML for everything else.
 const fn mimetype(dialect: pb::XmlDialect) -> &'static str {
     match dialect {
         pb::XmlDialect::Dclx => "application/zip",
@@ -848,207 +846,6 @@ fn int(value: u32) -> i32 {
 /// A count as the schema's `int32`, saturating rather than wrapping.
 fn int_from_usize(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
-}
-
-/// Everything wrong with a folded fragment, as messages, empty when it is
-/// sound.
-///
-/// This is the merge contract stated as a check, ported from
-/// `docling_integrity_errors` in gRParse: the coordinator merges fragments
-/// additively by renumbering refs, which only works if every ref is dense,
-/// unique and reciprocated. Every fold test asserts this is empty, because a
-/// fragment that fails it corrupts a document the fold never sees.
-#[must_use]
-pub fn integrity_errors(document: &doc::Document) -> Vec<String> {
-    let mut walk = Walk::default();
-    walk.roots(document);
-    walk.arenas(document);
-    walk.finish(document)
-}
-
-/// One pass over a document's refs, gathering what the three checks need:
-/// which refs exist, who lists whom as a child, and who claims whom as a
-/// parent.
-#[derive(Default)]
-struct Walk {
-    refs: BTreeSet<String>,
-    children: BTreeMap<String, BTreeSet<String>>,
-    parents: Vec<(String, String)>,
-    errors: Vec<String>,
-}
-
-impl Walk {
-    /// The two groups that exist before any item does.
-    fn roots(&mut self, document: &doc::Document) {
-        for (name, root) in [
-            (BODY_REF, document.body.as_ref()),
-            (FURNITURE_REF, document.furniture.as_ref()),
-        ] {
-            self.refs.insert(name.to_owned());
-            let entry = self.children.entry(name.to_owned()).or_default();
-            if let Some(root) = root {
-                for child in &root.children {
-                    entry.insert(child.r#ref.clone());
-                }
-            }
-        }
-    }
-
-    /// Every arena, in the order the refs number them.
-    fn arenas(&mut self, document: &doc::Document) {
-        for (index, group) in document.groups.iter().enumerate() {
-            let expected = format!("#/groups/{index}");
-            self.item(
-                &group.self_ref,
-                &expected,
-                &group.children,
-                group.parent.as_ref(),
-            );
-        }
-        for (index, item) in document.texts.iter().enumerate() {
-            let expected = format!("#/texts/{index}");
-            match item.item.as_ref() {
-                // CodeItem inlines its base fields, so it is walked directly
-                // rather than through `text_base`.
-                Some(doc::base_text_item::Item::Code(code)) => {
-                    self.item(
-                        &code.self_ref,
-                        &expected,
-                        &code.children,
-                        code.parent.as_ref(),
-                    );
-                }
-                Some(other) => match text_base(other) {
-                    Some(base) => {
-                        self.item(
-                            &base.self_ref,
-                            &expected,
-                            &base.children,
-                            base.parent.as_ref(),
-                        );
-                    }
-                    None => self
-                        .errors
-                        .push(format!("text item {expected} has no base")),
-                },
-                None => self
-                    .errors
-                    .push(format!("text item {expected} has no variant set")),
-            }
-        }
-        for (index, picture) in document.pictures.iter().enumerate() {
-            let expected = format!("#/pictures/{index}");
-            self.item(
-                &picture.self_ref,
-                &expected,
-                &picture.children,
-                picture.parent.as_ref(),
-            );
-        }
-        for (index, table) in document.tables.iter().enumerate() {
-            let expected = format!("#/tables/{index}");
-            self.item(
-                &table.self_ref,
-                &expected,
-                &table.children,
-                table.parent.as_ref(),
-            );
-        }
-    }
-
-    /// One item: its ref must be present, unique and exactly its position.
-    fn item(
-        &mut self,
-        self_ref: &str,
-        expected: &str,
-        children: &[doc::RefItem],
-        parent: Option<&doc::RefItem>,
-    ) {
-        if self_ref.is_empty() {
-            self.errors
-                .push(format!("item at {expected} has an empty self_ref"));
-            return;
-        }
-        if self_ref != expected {
-            self.errors.push(format!(
-                "self_ref {self_ref} does not match its arena position {expected}"
-            ));
-        }
-        if !self.refs.insert(self_ref.to_owned()) {
-            self.errors.push(format!("duplicate self_ref {self_ref}"));
-        }
-        let entry = self.children.entry(self_ref.to_owned()).or_default();
-        for child in children {
-            entry.insert(child.r#ref.clone());
-        }
-        if let Some(parent) = parent {
-            self.parents
-                .push((self_ref.to_owned(), parent.r#ref.clone()));
-        }
-    }
-
-    /// Resolve every ref gathered, and every caption a table points at.
-    fn finish(mut self, document: &doc::Document) -> Vec<String> {
-        for (parent, listed) in &self.children {
-            for child in listed {
-                if !self.refs.contains(child) {
-                    self.errors
-                        .push(format!("child {child} of {parent} does not resolve"));
-                }
-            }
-        }
-        for (child, parent) in &self.parents {
-            if !self.refs.contains(parent) {
-                self.errors
-                    .push(format!("parent {parent} of {child} does not resolve"));
-                continue;
-            }
-            if !self
-                .children
-                .get(parent)
-                .is_some_and(|listed| listed.contains(child))
-            {
-                self.errors
-                    .push(format!("parent {parent} does not list {child} as a child"));
-            }
-        }
-        let captions = document
-            .tables
-            .iter()
-            .map(|table| (table.self_ref.as_str(), table.captions.as_slice()))
-            .chain(
-                document
-                    .pictures
-                    .iter()
-                    .map(|picture| (picture.self_ref.as_str(), picture.captions.as_slice())),
-            );
-        for (owner, listed) in captions {
-            for caption in listed {
-                if !self.refs.contains(&caption.r#ref) {
-                    self.errors.push(format!(
-                        "caption {} of {owner} does not resolve",
-                        caption.r#ref
-                    ));
-                }
-            }
-        }
-        self.errors
-    }
-}
-
-/// The shared base of every text variant that has one. `CodeItem` has none:
-/// its base fields are inlined.
-fn text_base(item: &doc::base_text_item::Item) -> Option<&doc::TextItemBase> {
-    match item {
-        doc::base_text_item::Item::Title(i) => i.base.as_ref(),
-        doc::base_text_item::Item::SectionHeader(i) => i.base.as_ref(),
-        doc::base_text_item::Item::ListItem(i) => i.base.as_ref(),
-        doc::base_text_item::Item::Formula(i) => i.base.as_ref(),
-        doc::base_text_item::Item::Text(i) => i.base.as_ref(),
-        doc::base_text_item::Item::FieldHeading(i) => i.base.as_ref(),
-        doc::base_text_item::Item::FieldValue(i) => i.base.as_ref(),
-        doc::base_text_item::Item::Code(_) => None,
-    }
 }
 
 #[cfg(test)]

@@ -1,289 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The archive drivers: `DocLang` archives (`.dclx`) and Google Books METS
-//! exports (`.tar.gz`).
-//!
-//! Neither payload is XML at byte 0, so [`crate::parse`] routes here on the
-//! archive's magic bytes before the XML sniff ever runs. Each driver unpacks
-//! in memory, never on disk, and then hands the XML it finds to the same
-//! machinery the plain dialects use: a `DocLang` archive's `document.xml`
-//! goes through the streaming XML driver with the `DocLang` mapping, and a
-//! METS export's manifest and hOCR pages are walked with the same pull
-//! parser and the same security policy.
-//!
-//! **Member layouts are mirrored from docling, not invented.** A `.dclx` is
-//! the OPC ZIP that docling-core's `save_as_doclang_archive` writes: the
-//! document is the root member named exactly `document.xml`, images live
-//! under `assets/` and `pages/`, and `[Content_Types].xml` / `_rels/.rels`
-//! carry the OPC furniture; `load_from_doclang_archive` reads `document.xml`
-//! back by that name and fails when it is missing, and so does this driver.
-//! A METS export is what docling's `MetsGbsDocumentBackend` reads: a gzipped
-//! tar holding one `mets` manifest with `PROFILE="gbs"`, whose `fileGrp`
-//! elements (`USE` of `image`, `OCR`, `coordOCR`) name the per-page files and
-//! whose `div TYPE="page" ORDER="N"` elements order them. Text comes from the
-//! `coordOCR` hOCR files, one item per `ocr_line` span, in page order.
-//!
-//! **The byte cap counts inflated bytes.** A compressed archive is small by
-//! construction, so the request cap on uploaded bytes is no bomb guard at
-//! all. Every byte inflated out of an archive is counted against the same
-//! cap while it is being inflated — the sizes a member header claims are
-//! never trusted — and the first byte past the cap ends the parse with the
-//! same `RESOURCE_EXHAUSTED` an oversized plain document gets.
+//! The Google Books METS export driver: inflate the tar under the budget,
+//! find the `PROFILE="gbs"` manifest, walk it into a page map, then walk
+//! each page's `coordOCR` hOCR member and emit one text item per
+//! `ocr_line` span, in manifest order. Events stream per line as each page
+//! is walked — nothing waits for the last page.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead};
 
 use flate2::read::GzDecoder;
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
 
+use super::{NS_METS, budget_for, read_inflated, stream_error};
 use crate::parse::{self, EmitFn, InputStats, ParseConfig, ParseError, collapse};
 use crate::proto::v1 as pb;
 use crate::security;
 use crate::sniff::{Dialect, Evidence};
 use crate::{COLLECTOR, VERSION};
 
-/// Magic bytes of a ZIP local file header, the shape every `.dclx` starts
-/// with.
-pub const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
-
-/// Magic bytes of a gzip stream, the shape every `.tar.gz` starts with.
-pub const GZIP_MAGIC: &[u8] = &[0x1f, 0x8b];
-
-/// Namespace URI of the METS schema, the manifest vocabulary of a Google
-/// Books export.
-pub const NS_METS: &str = "http://www.loc.gov/METS/";
-
-/// Upper bound on archive members processed in one parse, mirroring the
-/// member-count limit docling's METS backend enforces. A tar minting members
-/// costs the server work per member even when every one is empty.
+/// Upper bound on archive members processed in one parse. A tar minting
+/// members costs the server work per member even when every one is empty,
+/// so a real export's page count fits and a member mill does not.
 const MAX_ARCHIVE_MEMBERS: usize = 1000;
 
-/// The archive family a payload's magic bytes name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArchiveKind {
-    /// ZIP: a `DocLang` archive.
-    Zip,
-    /// gzip: a Google Books METS export.
-    Gzip,
-}
-
-impl ArchiveKind {
-    /// The dialect this archive family carries.
-    #[must_use]
-    pub const fn dialect(self) -> Dialect {
-        match self {
-            Self::Zip => Dialect::Dclx,
-            Self::Gzip => Dialect::MetsGbs,
-        }
-    }
-
-    /// The magic's name, for error messages.
-    #[must_use]
-    pub const fn magic_name(self) -> &'static str {
-        match self {
-            Self::Zip => "ZIP archive",
-            Self::Gzip => "gzip",
-        }
-    }
-}
-
-/// Match the payload's first bytes against the archive magics.
-#[must_use]
-pub fn sniff_magic(head: &[u8]) -> Option<ArchiveKind> {
-    if head.starts_with(ZIP_MAGIC) {
-        return Some(ArchiveKind::Zip);
-    }
-    if head.starts_with(GZIP_MAGIC) {
-        return Some(ArchiveKind::Gzip);
-    }
-    None
-}
-
-/// Parse one archive payload, emitting events as they are produced.
-///
-/// `requested` records whether the caller stated the dialect: content that
-/// contradicts a stated dialect is the caller's error (`INVALID_ARGUMENT`),
-/// while a sniffed archive that turns out to be some other kind of ZIP or
-/// tar is merely unsupported (`UNIMPLEMENTED`), matching how an unrecognized
-/// XML root is refused.
-///
-/// # Errors
-///
-/// Any [`ParseError`], under the same contract as [`crate::parse::parse`].
-pub fn parse<R: BufRead>(
-    kind: ArchiveKind,
-    reader: R,
-    config: &ParseConfig,
-    input: &InputStats,
-    emit: EmitFn<'_>,
-    requested: bool,
-) -> Result<Dialect, ParseError> {
-    let evidence = if requested {
-        Evidence::Requested
-    } else {
-        Evidence::ArchiveMagic
-    };
-    match kind {
-        ArchiveKind::Zip => dclx(reader, config, input, emit, evidence, requested),
-        ArchiveKind::Gzip => mets_gbs(reader, config, input, emit, evidence, requested),
-    }
-}
-
-// ------------------------------------------------------------------- budget
-
-/// The decompressed-byte budget of one parse.
-///
-/// A zero request limit means no cap was configured — the service always
-/// configures one, so this arises only when the driver is called directly —
-/// and disables the budget rather than refusing every archive.
-fn budget_for(input: &InputStats) -> u64 {
-    if input.limit_bytes == 0 {
-        u64::MAX
-    } else {
-        input.limit_bytes
-    }
-}
-
-/// Read a stream to its end, charging every byte against `budget` as it
-/// arrives.
-///
-/// This is the whole zip-bomb guard: the size a member header claims is
-/// never consulted, only the bytes that actually inflate, and the byte that
-/// crosses the budget ends the parse before the next one is produced. When
-/// `keep` is false the bytes are counted and dropped, so an unmapped member
-/// still spends the budget its inflation cost.
-fn read_inflated<R: Read>(
-    mut reader: R,
-    budget: &mut u64,
-    input: &InputStats,
-    keep: bool,
-) -> Result<Vec<u8>, ParseError> {
-    let mut out = Vec::new();
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        let n = match reader.read(&mut buf) {
-            Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(stream_error(&e, input)),
-        };
-        if n == 0 {
-            return Ok(out);
-        }
-        let n64 = n as u64;
-        if n64 > *budget {
-            return Err(ParseError::TooLarge {
-                limit_bytes: input.limit_bytes,
-            });
-        }
-        *budget -= n64;
-        if keep {
-            out.extend_from_slice(&buf[..n]);
-        }
-    }
-}
-
-/// Turn an I/O failure from an archive read into the fleet taxonomy.
-///
-/// The request-stream reader signals a tripped byte cap through an
-/// `io::Error`, and that must stay `RESOURCE_EXHAUSTED` even when it
-/// surfaces through a decompressor; everything else at this layer is the
-/// archive's bytes being wrong.
-fn stream_error(error: &io::Error, input: &InputStats) -> ParseError {
-    if input.capped.load(std::sync::atomic::Ordering::Relaxed)
-        || error.to_string().contains(parse::CAP_MARKER)
-    {
-        return ParseError::TooLarge {
-            limit_bytes: input.limit_bytes,
-        };
-    }
-    ParseError::Malformed(format!("archive data cannot be read: {error}"))
-}
-
-/// Render a zip error with the wording zip 7.x used.
-///
-/// zip 8.x moved the unsupported-compression case out of
-/// `UnsupportedArchive` into its own `CompressionMethodNotSupported(u16)`
-/// variant with a new display string. The message leaks to the wire through
-/// `INVALID_ARGUMENT`, so the 7.x phrasing is pinned here; every other
-/// variant kept its wording across the major bump.
-fn zip_error_message(error: &zip::result::ZipError) -> String {
-    match error {
-        zip::result::ZipError::CompressionMethodNotSupported(_) => {
-            "unsupported Zip archive: Compression method not supported".to_owned()
-        }
-        other => other.to_string(),
-    }
-}
-
-// --------------------------------------------------------------------- dclx
-
-/// Parse a `DocLang` archive: locate `document.xml`, inflate it under the
-/// budget, and run the streaming XML driver over it with the `DocLang`
-/// mapping and the resolution this module already made.
-///
-/// The other members — `assets/`, `pages/`, the OPC furniture — are left
-/// compressed and unread: the document references its images by relative
-/// `uri`, which the `DocLang` mapping already lifts into picture placeholder
-/// items, and this service never decodes pixels.
-fn dclx<R: BufRead>(
-    reader: R,
-    config: &ParseConfig,
-    input: &InputStats,
-    emit: EmitFn<'_>,
-    evidence: Evidence,
-    requested: bool,
-) -> Result<Dialect, ParseError> {
-    // ZIP needs random access to its central directory, so the compressed
-    // archive is buffered whole; the request cap on uploaded bytes bounds it.
-    let mut compressed = Vec::new();
-    if let Err(e) = { reader }.read_to_end(&mut compressed) {
-        return Err(stream_error(&e, input));
-    }
-    let mut budget = budget_for(input);
-    let mut archive = zip::ZipArchive::new(io::Cursor::new(compressed))
-        .map_err(|e| ParseError::Malformed(format!("not a readable ZIP archive: {e}")))?;
-    let member = match archive.by_name("document.xml") {
-        Ok(member) => member,
-        Err(zip::result::ZipError::FileNotFound) => {
-            return Err(if requested {
-                ParseError::Malformed(
-                    "the ZIP archive has no document.xml member; a DocLang archive (.dclx) \
-                     carries its document there"
-                        .to_owned(),
-                )
-            } else {
-                ParseError::Unsupported(
-                    "the ZIP archive has no document.xml member, so it is not a DocLang \
-                     archive (.dclx); this service does not map arbitrary archives"
-                        .to_owned(),
-                )
-            });
-        }
-        Err(e) => {
-            return Err(ParseError::Malformed(format!(
-                "unreadable ZIP archive: {}",
-                zip_error_message(&e)
-            )));
-        }
-    };
-    let document = read_inflated(member, &mut budget, input, true)?;
-    drop(archive);
-    parse::parse_xml(
-        io::Cursor::new(document),
-        config,
-        input,
-        emit,
-        Some((Dialect::Dclx, evidence)),
-    )
-}
-
-// ----------------------------------------------------------------- mets-gbs
-
-/// What a METS `fileGrp` uses its files for. Only the three uses docling's
-/// backend reads are modelled; a group with any other `USE` is ignored.
+/// What a METS `fileGrp` uses its files for. Only the three uses a Google
+/// Books export carries text in are modelled; a group with any other `USE`
+/// is ignored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileUse {
     /// `USE="image"`: the page scan. Never decoded here.
@@ -319,7 +65,7 @@ struct FileInfo {
 /// manifest builds the page map; then each page's hOCR is walked in manifest
 /// order. Events stream per line as each page is walked — nothing waits for
 /// the last page.
-fn mets_gbs<R: BufRead>(
+pub(super) fn parse<R: BufRead>(
     reader: R,
     config: &ParseConfig,
     input: &InputStats,
@@ -435,9 +181,9 @@ fn not_a_tar(error: &io::Error, input: &InputStats, requested: bool) -> ParseErr
     converted
 }
 
-/// Find the METS manifest among the kept members, exactly as docling does:
-/// try every `.xml` member and accept the first whose root element is
-/// `{{{NS_METS}}}mets` with `PROFILE="gbs"`.
+/// Find the METS manifest among the kept members: try every `.xml` member
+/// and accept the first whose root element is `{{{NS_METS}}}mets` with
+/// `PROFILE="gbs"`.
 fn find_mets_manifest(members: &BTreeMap<String, Vec<u8>>) -> Option<(&str, &[u8])> {
     members
         .iter()
@@ -685,7 +431,7 @@ impl MetsDriver<'_> {
     /// Walk the manifest into a page map.
     ///
     /// The walk accepts `fileGrp`, `file` and `FLocat` at any depth rather
-    /// than requiring docling's exact `XPath` shape, because the manifest is
+    /// than requiring one exact element nesting, because the manifest is
     /// already validated as a GBS METS and looser matching maps the same
     /// documents.
     fn read_manifest(&mut self, name: &str, bytes: &[u8]) -> Result<Manifest, ParseError> {
@@ -714,11 +460,10 @@ impl MetsDriver<'_> {
         Ok(manifest)
     }
 
-    /// Walk one hOCR page and emit a text item per `ocr_line` span, exactly
-    /// the spans docling reads. A line without a `bbox` in its `title` is
-    /// dropped as upstream drops it; the box itself is not carried — this
-    /// plane has no prov — but the `x_wconf` confidence is, on the item's
-    /// source.
+    /// Walk one hOCR page and emit a text item per `ocr_line` span. A line
+    /// without a `bbox` in its `title` carries no page geometry and is
+    /// dropped; the box itself is not carried — this plane has no prov —
+    /// but the `x_wconf` confidence is, on the item's source.
     fn emit_page(&mut self, order: u32, member: &str, bytes: &[u8]) -> Result<(), ParseError> {
         let lines = self.read_hocr(member, bytes)?;
         for (n, line) in lines.into_iter().enumerate() {
@@ -1011,17 +756,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn magic_bytes_route_and_short_heads_do_not() {
-        assert_eq!(sniff_magic(b"PK\x03\x04rest"), Some(ArchiveKind::Zip));
-        assert_eq!(sniff_magic(&[0x1f, 0x8b, 0x08]), Some(ArchiveKind::Gzip));
-        assert_eq!(sniff_magic(b"<?xm"), None);
-        assert_eq!(sniff_magic(b"P"), None);
-        assert_eq!(sniff_magic(&[0x1f]), None);
-        assert_eq!(sniff_magic(b""), None);
-    }
-
-    #[test]
-    fn hocr_title_clauses_parse_the_way_docling_reads_them() {
+    fn hocr_title_clauses_parse_as_the_format_defines_them() {
         assert!(has_bbox("bbox 279 177 306 214; x_wconf 97"));
         assert!(!has_bbox("x_wconf 97"));
         assert!(!has_bbox("bbox 1 2 3"));

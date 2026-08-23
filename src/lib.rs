@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! A gRPC collector that maps JATS, USPTO, XBRL and `DocLang` XML — plus the
-//! two docling archive formats that carry XML, `DocLang` archives (`.dclx`)
-//! and Google Books METS exports (`.tar.gz`) — into the gRParse Document
-//! plane, streaming items as the parser yields them.
+//! A gRPC collector that maps JATS, USPTO, XBRL and `DocLang` XML — plus
+//! the two archive formats that carry XML, `DocLang` archives (`.dclx`) and
+//! Google Books METS exports (`.tar.gz`) — into the gRParse Document plane,
+//! streaming items as the parser yields them.
 //!
 //! Design rules, in the order they constrain everything else:
 //!
