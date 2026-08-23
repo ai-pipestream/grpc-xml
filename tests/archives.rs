@@ -213,6 +213,64 @@ async fn a_zip_without_document_xml_is_not_a_doclang_archive() {
     );
 }
 
+#[tokio::test]
+async fn a_stored_member_maps_exactly_like_a_deflated_one() {
+    // The format does not require compression, and the reader must not: a
+    // stored `document.xml` goes through the same budget accounting and the
+    // same inner parse as a deflated one.
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file(
+            "document.xml",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .expect("start zip member");
+    writer
+        .write_all(DOCLANG.as_bytes())
+        .expect("write zip member");
+    let archive = writer.finish().expect("finish zip").into_inner();
+
+    let client = client().await;
+    let events = parse_bytes_ok(&client, &archive, options()).await;
+    assert_eq!(info(&events).dialect, pb::XmlDialect::Dclx as i32);
+    let titles: Vec<&pb::TextItem> = common::items_labelled(&events, pb::XmlItemLabel::Title);
+    assert_eq!(texts(&titles), ["Quarterly Operations Review"]);
+}
+
+#[tokio::test]
+async fn a_nested_document_xml_does_not_count_as_the_root_member() {
+    // The document lives at the archive root by definition; a member of the
+    // same name inside a directory is some other archive's layout.
+    let stray = zip_of(&[("inner/document.xml", DOCLANG.as_bytes())]);
+    let client = client().await;
+    let error = parse_bytes(&client, &stray, options())
+        .await
+        .expect_err("only a root document.xml names a DocLang archive");
+    assert_eq!(error.code(), Code::Unimplemented, "{error}");
+    assert!(
+        error.message().contains("document.xml"),
+        "{}",
+        error.message()
+    );
+}
+
+#[tokio::test]
+async fn a_truncated_zip_is_the_callers_error_with_stable_wording() {
+    let whole = dclx_of(DOCLANG);
+    let cut = &whole[..whole.len() / 2];
+    let client = client().await;
+    let error = parse_bytes(&client, cut, options())
+        .await
+        .expect_err("half a central directory is not a readable archive");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    assert!(
+        error.message().contains("not a readable ZIP archive"),
+        "{}",
+        error.message()
+    );
+}
+
 /// A single-member ZIP whose `document.xml` claims a compression method this
 /// build does not link, made by patching the method field of a stored
 /// archive. Everything else about the bytes is a valid ZIP, which is exactly
