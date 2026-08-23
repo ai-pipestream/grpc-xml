@@ -213,6 +213,62 @@ async fn a_zip_without_document_xml_is_not_a_doclang_archive() {
     );
 }
 
+/// A single-member ZIP whose `document.xml` claims a compression method this
+/// build does not link, made by patching the method field of a stored
+/// archive. Everything else about the bytes is a valid ZIP, which is exactly
+/// the shape the error path under test must classify.
+fn zip_with_unsupported_method(document: &[u8]) -> Vec<u8> {
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    writer
+        .start_file(
+            "document.xml",
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .expect("start zip member");
+    writer.write_all(document).expect("write zip member");
+    let mut bytes = writer.finish().expect("finish zip").into_inner();
+    // The 2-byte compression method sits 8 bytes after a local file header
+    // signature and 10 bytes after a central directory one. 12 is bzip2,
+    // which the deflate-only build cannot read.
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        match &bytes[i..i + 4] {
+            b"PK\x03\x04" => {
+                bytes[i + 8] = 12;
+                bytes[i + 9] = 0;
+                i += 4;
+            }
+            b"PK\x01\x02" => {
+                bytes[i + 10] = 12;
+                bytes[i + 11] = 0;
+                i += 4;
+            }
+            _ => i += 1,
+        }
+    }
+    bytes
+}
+
+#[tokio::test]
+async fn an_unsupported_compression_method_is_invalid_argument_with_stable_wording() {
+    let archive = zip_with_unsupported_method(DOCLANG.as_bytes());
+    let client = client().await;
+    let error = parse_bytes(&client, &archive, options())
+        .await
+        .expect_err("a member this build cannot decompress fails the parse");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    // The wording is pinned across zip crate upgrades: it reached the wire
+    // under zip 7.x and stays byte-identical under 8.x.
+    assert!(
+        error
+            .message()
+            .contains("unsupported Zip archive: Compression method not supported"),
+        "{}",
+        error.message()
+    );
+}
+
 #[tokio::test]
 async fn an_explicit_dclx_request_on_xml_bytes_fails_cleanly() {
     // The precedence doctrine: the explicit request wins and selects the

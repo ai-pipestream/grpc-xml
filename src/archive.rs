@@ -201,6 +201,22 @@ fn stream_error(error: &io::Error, input: &InputStats) -> ParseError {
     ParseError::Malformed(format!("archive data cannot be read: {error}"))
 }
 
+/// Render a zip error with the wording zip 7.x used.
+///
+/// zip 8.x moved the unsupported-compression case out of
+/// `UnsupportedArchive` into its own `CompressionMethodNotSupported(u16)`
+/// variant with a new display string. The message leaks to the wire through
+/// `INVALID_ARGUMENT`, so the 7.x phrasing is pinned here; every other
+/// variant kept its wording across the major bump.
+fn zip_error_message(error: &zip::result::ZipError) -> String {
+    match error {
+        zip::result::ZipError::CompressionMethodNotSupported(_) => {
+            "unsupported Zip archive: Compression method not supported".to_owned()
+        }
+        other => other.to_string(),
+    }
+}
+
 // --------------------------------------------------------------------- dclx
 
 /// Parse a `DocLang` archive: locate `document.xml`, inflate it under the
@@ -247,11 +263,13 @@ fn dclx<R: BufRead>(
         }
         Err(e) => {
             return Err(ParseError::Malformed(format!(
-                "unreadable ZIP archive: {e}"
+                "unreadable ZIP archive: {}",
+                zip_error_message(&e)
             )));
         }
     };
     let document = read_inflated(member, &mut budget, input, true)?;
+    drop(archive);
     parse::parse_xml(
         io::Cursor::new(document),
         config,
