@@ -91,6 +91,15 @@ the nesting now says the same thing. Content that arrives before the first
 heading sits on `#/body`. **No section `GroupItem`s**: the levels come from
 the parser rather than from tag names, so there is nothing to fill.
 
+**Pages and provenance.** A `page` event becomes a `PageItem` in
+`Document.pages`, keyed by the manifest `ORDER`, with the extent the hOCR
+states and `unit = "px"`. A `TextItem` that carries a `bbox` and a `page_no`
+gets one `ProvenanceItem` with that box, `COORD_ORIGIN_TOPLEFT` (which is
+how hOCR writes coordinates) and a `charspan` covering the whole item, since
+a line's box bounds the line rather than any part of it. The
+single-document dialects still carry no `prov`: they have no geometry, and
+an invented coordinate would be worse than none.
+
 **Structured metadata** (`emit_source_metadata`). A `meta_item` event folds
 into whatever the Document schema has a field for: a publication date
 becomes `source_meta.created` and a revision date `source_meta.modified`,

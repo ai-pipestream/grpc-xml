@@ -374,6 +374,54 @@ message InlineSpan {
   repeated Attribute attributes = 8;
 }
 
+// BoundingBox is a rectangle in the source's own page coordinates.
+//
+// The origin is the top left corner and `bottom` is the larger of the two
+// vertical values, which is how hOCR writes a `bbox` clause. Units are the
+// page's own; `Page.unit` names them.
+message BoundingBox {
+  // Distance from the left edge to the box's left side.
+  double left = 1;
+
+  // Distance from the top edge to the box's top side.
+  double top = 2;
+
+  // Distance from the left edge to the box's right side.
+  double right = 3;
+
+  // Distance from the top edge to the box's bottom side.
+  double bottom = 4;
+}
+
+// Page announces one page of an archive dialect, before the items on it.
+//
+// Only the archive dialects have pages: a single XML document has none, and
+// this event is not sent for one. It carries no stream index, because the
+// index series counts content items and a page is a container.
+message Page {
+  // Page number, 1-based. For a Google Books export this is the manifest
+  // `ORDER` attribute, which is why it is the source's number rather than a
+  // running count.
+  uint32 page_no = 1;
+
+  // Page width in `unit`, when the source states the page's extent.
+  optional double width = 2;
+
+  // Page height in `unit`.
+  optional double height = 3;
+
+  // Unit the page's extent and every box on it is measured in. `px` for
+  // hOCR, which counts image pixels.
+  string unit = 4;
+
+  // Archive member the page was read from, for tracing a box back to the
+  // file that stated it.
+  optional string member = 5;
+
+  // Provenance, always set.
+  CollectorSource source = 6;
+}
+
 // TextItem is one streamed unit of text, in document order.
 //
 // This is the workhorse event: titles, headings, paragraphs, list items,
@@ -426,6 +474,15 @@ message TextItem {
   // cross-references that flattening would otherwise destroy. Only
   // populated when `ParseOptions.emit_inline_spans` is set.
   repeated InlineSpan spans = 11;
+
+  // Where the item sits on its page, in the coordinates the preceding
+  // `Page` event names. Set only by the dialects that have real
+  // coordinates, which today means the hOCR pages of a Google Books
+  // export; a single XML document has no geometry and claims none.
+  optional BoundingBox bbox = 12;
+
+  // Page the item is on, matching a `Page.page_no`. Set with `bbox`.
+  optional uint32 page_no = 13;
 }
 
 // TableStart opens a streamed table. Rows follow, then `TableEnd`.

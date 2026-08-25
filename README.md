@@ -110,6 +110,7 @@ exactly one `status` last.
 | `fact` | One XBRL fact with its context and unit resolved inline |
 | `html_island` | An XHTML fragment, re-serialized, for the HTML collector |
 | `meta_item` | One decoded metadata record: a date, an identifier, a classification code, licence terms, a funding award, a cited reference. Only when `emit_source_metadata` was set |
+| `page` | One page of an archive dialect opens: its number, its extent and the unit they are measured in. Archive dialects only |
 | `document` | The whole parse folded into one `Document`. Only when `emit_document` was set, exactly once, immediately before `status` |
 | `status` | `ParseStatus`: dialect, counts, aggregated warnings, bytes consumed, elapsed |
 
@@ -271,9 +272,11 @@ CALS `namest`/`nameend` column spans are not expanded through `colspec`;
 `colspan`, `rowspan` and `morerows` are. Nested tables are flattened into
 the outer table's cell text.
 
-METS-GBS maps text only: scans are never decoded and no geometry is carried
-(this plane has no `prov`), so the hOCR boxes reduce to reading order plus a
-per-line source confidence, and word-level spans are read past, not emitted.
+METS-GBS maps text and line geometry: scans are never decoded, but each page
+arrives as a `page` event with its extent in pixels and each OCR line carries
+its `bbox` and `page_no`, which fold into `Document.pages` and a per-item
+`ProvenanceItem`. Word-level `ocrx_word` spans and their own confidences are
+still read past, not emitted.
 
 DCLX images stay in the archive: `assets/` and `pages/` members are never
 inflated, and pictures land as the same placeholder items the plain

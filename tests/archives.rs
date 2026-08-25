@@ -467,6 +467,73 @@ async fn mets_gbs_sniffs_from_gzip_magic_and_streams_pages_in_manifest_order() {
 }
 
 #[tokio::test]
+async fn mets_gbs_carries_the_page_geometry_the_hocr_states() {
+    let client = client().await;
+    let events = parse_bytes_ok(&client, &gbs_export(), options()).await;
+
+    let pages: Vec<&pb::Page> = events
+        .iter()
+        .filter_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::Page(page)) => Some(page),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pages.len(), 2, "one page event per manifest page");
+    assert_eq!(pages[0].page_no, 1);
+    assert_eq!(pages[1].page_no, 2);
+    assert_eq!(pages[0].unit, "px", "hOCR counts image pixels");
+    assert_eq!(pages[0].width, Some(1000.0));
+    assert_eq!(pages[0].height, Some(1500.0));
+    assert_eq!(pages[0].member.as_deref(), Some("00000001.html"));
+    // The page opens before the lines on it.
+    let first_page = events
+        .iter()
+        .position(|e| matches!(e.event, Some(pb::parse_xml_response::Event::Page(_))))
+        .expect("a page event");
+    let first_line = events
+        .iter()
+        .position(|e| matches!(e.event, Some(pb::parse_xml_response::Event::TextItem(_))))
+        .expect("a line");
+    assert!(first_page < first_line);
+
+    let lines = items_with_role(&events, "ocr-line");
+    for (n, line) in lines.iter().enumerate() {
+        let bbox = line
+            .bbox
+            .as_ref()
+            .expect("every line the parser kept had a bbox to keep it for");
+        assert_eq!(line.page_no, Some(if n < 2 { 1 } else { 2 }));
+        assert!((bbox.left - 100.0).abs() < f64::EPSILON, "{bbox:?}");
+        assert!((bbox.right - 900.0).abs() < f64::EPSILON, "{bbox:?}");
+        assert!(bbox.bottom > bbox.top, "the box is not inverted: {bbox:?}");
+    }
+    // Line 2 of a page sits below line 1: the boxes are the source's, not
+    // a running count dressed up as geometry.
+    let first = lines[0].bbox.as_ref().unwrap();
+    let second = lines[1].bbox.as_ref().unwrap();
+    assert!(second.top > first.top);
+}
+
+#[tokio::test]
+async fn a_line_without_a_box_is_still_dropped() {
+    // The box is now carried rather than only validated, and the rule that
+    // a line without one is not a mapped line is unchanged.
+    let page = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+        <html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\n\
+        <div class=\"ocr_page\" id=\"page_1\" title=\"bbox 0 0 640 480\">\n\
+        <span class=\"ocr_line\" id=\"a\" title=\"x_wconf 90\">No box here.</span>\n\
+        <span class=\"ocr_line\" id=\"b\" title=\"bbox 10 20 30 40\">Boxed.</span>\n\
+        </div></body></html>\n";
+    let archive = targz_of(&[
+        ("UOM_39015012345678.mets.xml", GBS_METS.as_bytes()),
+        ("00000001.html", page.as_bytes()),
+    ]);
+    let client = client().await;
+    let events = parse_bytes_ok(&client, &archive, options()).await;
+    assert_eq!(texts(&items_with_role(&events, "ocr-line")), ["Boxed."]);
+}
+
+#[tokio::test]
 async fn an_explicit_mets_gbs_request_is_obeyed_and_reported_as_requested() {
     let client = client().await;
     let events = parse_bytes_ok(
@@ -537,6 +604,61 @@ async fn mets_inflation_over_the_cap_is_resource_exhausted() {
     .expect_err("the inflated archive exceeds the cap");
     assert_eq!(error.code(), Code::ResourceExhausted, "{error}");
     assert!(error.message().contains("byte cap"), "{}", error.message());
+}
+
+#[tokio::test]
+async fn the_gbs_document_carries_pages_and_per_line_provenance() {
+    let client = client().await;
+    let events = parse_bytes_ok(
+        &client,
+        &gbs_export(),
+        pb::ParseOptions {
+            emit_document: true,
+            ..options()
+        },
+    )
+    .await;
+    let document = events
+        .iter()
+        .find_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::Document(d)) => Some(d),
+            _ => None,
+        })
+        .expect("emit_document produces a document event");
+
+    assert_eq!(
+        document.pages.len(),
+        2,
+        "Document.pages had no writer in this crate before this run"
+    );
+    let page = document.pages.get(&1).expect("page 1");
+    assert_eq!(page.page_no, 1);
+    assert_eq!(page.unit.as_deref(), Some("px"));
+    let size = page.size.as_ref().expect("the hOCR states the extent");
+    assert!((size.width - 1000.0).abs() < f64::EPSILON);
+    assert!((size.height - 1500.0).abs() < f64::EPSILON);
+
+    let first = document.texts.first().expect("the first OCR line");
+    let base = match first.item.as_ref().expect("a variant") {
+        grpc_xml::document::v1::base_text_item::Item::Text(item) => {
+            item.base.as_ref().expect("a base")
+        }
+        _ => panic!("an OCR line folds as a text item"),
+    };
+    let prov = base
+        .prov
+        .first()
+        .expect("a line with a box has provenance to state");
+    assert_eq!(prov.page_no, 1);
+    let bbox = prov.bbox.as_ref().expect("the box");
+    assert!((bbox.l - 100.0).abs() < f64::EPSILON);
+    assert!(bbox.b > bbox.t, "top-left origin, bottom below top");
+    let charspan = prov.charspan.as_ref().expect("the span the box bounds");
+    assert_eq!(charspan.start, 0);
+    assert_eq!(
+        usize::try_from(charspan.end).expect("a span does not run backwards"),
+        base.text.chars().count()
+    );
 }
 
 #[tokio::test]

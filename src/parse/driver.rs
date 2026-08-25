@@ -579,6 +579,10 @@ impl<R: BufRead> Driver<'_, R> {
             element_id: capture.element_id,
             attributes: capture.attributes,
             source: Some(self.source.clone()),
+            // A single XML document has no pages and no boxes; the archive
+            // driver is the only one in this service with geometry to state.
+            bbox: None,
+            page_no: None,
             spans,
         };
         self.counts.text_items += 1;
@@ -600,6 +604,10 @@ impl<R: BufRead> Driver<'_, R> {
             element_id: pending.element_id,
             attributes: Vec::new(),
             source: Some(self.source.clone()),
+            // A single XML document has no pages and no boxes; the archive
+            // driver is the only one in this service with geometry to state.
+            bbox: None,
+            page_no: None,
             spans: pending.spans,
         };
         self.counts.text_items += 1;
@@ -795,6 +803,8 @@ impl<R: BufRead> Driver<'_, R> {
             element_id: attrs.get("id").map(str::to_owned),
             attributes: self.reportable_attributes(attrs),
             source: Some(self.source.clone()),
+            bbox: None,
+            page_no: None,
             // An item whose text came from an attribute has no inline
             // markup by construction: there is no element content to mark.
             spans: Vec::new(),

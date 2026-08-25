@@ -159,6 +159,9 @@ message ParseXmlResponse {
     // `ParseOptions.emit_source_metadata` is set.
     MetaItem meta_item = 10;
 
+    // A page of an archive dialect opens. The items on it follow.
+    Page page = 11;
+
     // Parse trailer. Always the last event of a successful parse, sent once.
     ParseStatus status = 8;
 

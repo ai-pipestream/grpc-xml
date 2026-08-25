@@ -27,10 +27,13 @@
 //!   the whole nesting model, and it is why this fold builds no section
 //!   `GroupItem`s: filler groups exist to patch skipped heading levels, and
 //!   our levels come straight from the parser.
-//! - **Provenance honesty.** XML has no pages and no boxes, so no item carries
-//!   `prov`. Source locators — the positional path, the element id, the
-//!   source's own role vocabulary — go in per-item `meta.custom_fields` under
-//!   `xml.` keys, where they are data rather than a fabricated coordinate.
+//! - **Provenance honesty.** An item carries `prov` when the source states
+//!   coordinates, which among these dialects means the hOCR pages of a
+//!   Google Books export and nothing else. The single-document dialects have
+//!   no pages and no boxes, so their items carry none. Source locators — the
+//!   positional path, the element id, the source's own role vocabulary — go
+//!   in per-item `meta.custom_fields` under `xml.` keys, where they are data
+//!   rather than a fabricated coordinate.
 //!
 //! What is deliberately not mapped: `html_island` events (an XHTML fragment is
 //! the HTML collector's job, and re-parsing it here would produce a worse
@@ -181,6 +184,7 @@ impl DocumentFold {
             Some(Event::TableEnd(end)) => self.on_table_end(end),
             Some(Event::Fact(fact)) => self.on_fact(fact),
             Some(Event::MetaItem(item)) => self.on_meta_item(item),
+            Some(Event::Page(page)) => self.on_page(page),
             Some(Event::HtmlIsland(_)) => self.islands_skipped += 1,
             // The trailer is counts and warnings, both of which describe the
             // typed stream rather than the document; the fold sees it only so
@@ -414,6 +418,30 @@ impl DocumentFold {
         }
     }
 
+    // ------------------------------------------------------------------ pages
+
+    /// Register one page of an archive dialect.
+    ///
+    /// `Document.pages` had no writer in this crate, and neither did
+    /// `ProvenanceItem`, even though a Google Books export is the one input
+    /// here with real coordinates. A page is registered even when the source
+    /// states no extent, because the page exists and the items on it name it.
+    fn on_page(&mut self, page: &pb::Page) {
+        let size = match (page.width, page.height) {
+            (Some(width), Some(height)) => Some(doc::Size { width, height }),
+            _ => None,
+        };
+        self.document.pages.insert(
+            int(page.page_no),
+            doc::PageItem {
+                size,
+                image: None,
+                page_no: int(page.page_no),
+                unit: (!page.unit.is_empty()).then(|| page.unit.clone()),
+            },
+        );
+    }
+
     // ------------------------------------------------------------------ text
 
     /// Append one text item and return its self ref.
@@ -460,8 +488,10 @@ impl DocumentFold {
                     ..doc::BaseMeta::default()
                 }),
                 label: doc_label(label) as i32,
-                // No prov: these dialects have no pages and no boxes, and an
-                // invented one would outlive the honesty of this comment.
+                // Provenance only where the source has coordinates. The
+                // single-document dialects have no pages and no boxes, and
+                // an invented one would outlive the honesty of this comment.
+                prov: provenance(item),
                 orig: item.text.clone(),
                 text: item.text.clone(),
                 source: vec![source],
@@ -861,6 +891,34 @@ impl DocumentFold {
             source: Some(doc::source_type::Source::Collector(collector)),
         }
     }
+}
+
+/// Where the item sits in the source, when the source says.
+///
+/// hOCR states the box in image pixels with the origin at the top left,
+/// which is what `COORD_ORIGIN_TOPLEFT` means; the unit is on the page.
+/// The character span covers the whole item, because a line's box bounds
+/// the line rather than any part of it.
+fn provenance(item: &pb::TextItem) -> Vec<doc::ProvenanceItem> {
+    let (Some(bbox), Some(page_no)) = (item.bbox.as_ref(), item.page_no) else {
+        return Vec::new();
+    };
+    vec![doc::ProvenanceItem {
+        page_no: int(page_no),
+        bbox: Some(doc::BoundingBox {
+            l: bbox.left,
+            t: bbox.top,
+            r: bbox.right,
+            b: bbox.bottom,
+            coord_origin: Some(doc::CoordOrigin::Topleft as i32),
+            coord_origin_raw: None,
+        }),
+        charspan: Some(doc::IntSpan {
+            start: 0,
+            end: int_from_usize(item.text.chars().count()),
+        }),
+        ..doc::ProvenanceItem::default()
+    }]
 }
 
 /// A date as far as the source stated it, in ISO 8601: the whole date when

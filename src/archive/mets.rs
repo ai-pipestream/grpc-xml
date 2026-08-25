@@ -28,6 +28,10 @@ use crate::{COLLECTOR, VERSION};
 /// so a real export's page count fits and a member mill does not.
 const MAX_ARCHIVE_MEMBERS: usize = 1000;
 
+/// The unit hOCR measures in. The format counts pixels of the page image,
+/// so every box and every page extent is in image pixels.
+const HOCR_UNIT: &str = "px";
+
 /// What a METS `fileGrp` uses its files for. Only the three uses a Google
 /// Books export carries text in are modelled; a group with any other `USE`
 /// is ignored.
@@ -353,6 +357,9 @@ struct OcrLine {
     text: String,
     element_id: Option<String>,
     confidence: f64,
+    /// The line's box, in the page's pixel coordinates. A line without one
+    /// is dropped, so this is always set on a line that reaches the wire.
+    bbox: pb::BoundingBox,
     attributes: Vec<pb::Attribute>,
 }
 
@@ -363,8 +370,15 @@ struct OcrCapture {
     span_depth: usize,
     element_id: Option<String>,
     confidence: f64,
-    has_bbox: bool,
+    bbox: Option<pb::BoundingBox>,
     attributes: Vec<pb::Attribute>,
+}
+
+/// One hOCR page: its lines and, when the `ocr_page` element states it, the
+/// page's own extent.
+struct HocrPage {
+    lines: Vec<OcrLine>,
+    bbox: Option<pb::BoundingBox>,
 }
 
 /// The METS driver: the same emit machinery [`crate::parse`]'s driver has,
@@ -476,13 +490,28 @@ impl MetsDriver<'_> {
         Ok(manifest)
     }
 
-    /// Walk one hOCR page and emit a text item per `ocr_line` span. A line
-    /// without a `bbox` in its `title` carries no page geometry and is
-    /// dropped; the box itself is not carried — this plane has no prov —
-    /// but the `x_wconf` confidence is, on the item's source.
+    /// Walk one hOCR page, announce the page, and emit a text item per
+    /// `ocr_line` span.
+    ///
+    /// A line without a `bbox` in its `title` is dropped, as it always was.
+    /// The box itself is now carried: `METS_GBS` is the one dialect in this
+    /// service with real page coordinates, and parsing all four integers
+    /// only to decide whether to keep the line threw away the single most
+    /// valuable thing the format states.
     fn emit_page(&mut self, order: u32, member: &str, bytes: &[u8]) -> Result<(), ParseError> {
-        let lines = self.read_hocr(member, bytes)?;
-        for (n, line) in lines.into_iter().enumerate() {
+        let page = self.read_hocr(member, bytes)?;
+        let extent = page.bbox.as_ref();
+        self.send(pb::parse_xml_response::Event::Page(pb::Page {
+            page_no: order,
+            // The page box starts at the origin in every hOCR file, so its
+            // far corner is the extent.
+            width: extent.map(|b| b.right),
+            height: extent.map(|b| b.bottom),
+            unit: HOCR_UNIT.to_owned(),
+            member: Some(member.to_owned()),
+            source: Some(self.source.clone()),
+        }))?;
+        for (n, line) in page.lines.into_iter().enumerate() {
             let mut source = self.source.clone();
             source.confidence = Some(line.confidence);
             let item = pb::TextItem {
@@ -502,6 +531,8 @@ impl MetsDriver<'_> {
                 // hOCR marks words and their boxes, not emphasis: an OCR
                 // line has no inline markup to record.
                 spans: Vec::new(),
+                bbox: Some(line.bbox),
+                page_no: Some(order),
             };
             self.counts.text_items += 1;
             self.send(pb::parse_xml_response::Event::TextItem(item))?;
@@ -515,13 +546,16 @@ impl MetsDriver<'_> {
     /// but drops end-name checking, and elements other than `span` are not
     /// tracked at all, so an HTML void element that never closes cannot
     /// derail the line capture the way it would derail a depth count.
-    fn read_hocr(&mut self, member: &str, bytes: &[u8]) -> Result<Vec<OcrLine>, ParseError> {
+    fn read_hocr(&mut self, member: &str, bytes: &[u8]) -> Result<HocrPage, ParseError> {
         let mut xml = NsReader::from_reader(parse::decoding_reader(bytes, self.input)?);
         xml.config_mut().expand_empty_elements = true;
         xml.config_mut().check_end_names = false;
         xml.config_mut().allow_unmatched_ends = true;
 
-        let mut lines = Vec::new();
+        let mut page = HocrPage {
+            lines: Vec::new(),
+            bbox: None,
+        };
         let mut capture: Option<OcrCapture> = None;
         let mut buf = Vec::new();
         loop {
@@ -531,15 +565,18 @@ impl MetsDriver<'_> {
             match event {
                 Event::Start(start) => {
                     self.counts.elements_visited += 1;
+                    if has_class(&start, "ocr_page") && page.bbox.is_none() {
+                        // The page element states the image's extent, which
+                        // is the frame every line box on it is measured in.
+                        page.bbox = parse_bbox(&attr(&start, "title").unwrap_or_default());
+                    }
                     if start.local_name().as_ref() != "span" {
                         buf.clear();
                         continue;
                     }
                     if let Some(capture) = capture.as_mut() {
                         capture.span_depth += 1;
-                    } else if attr(&start, "class")
-                        .is_some_and(|c| c.split_whitespace().any(|t| t == "ocr_line"))
-                    {
+                    } else if has_class(&start, "ocr_line") {
                         let title = attr(&start, "title").unwrap_or_default();
                         let attributes = if self.config.include_attributes {
                             attributes_except(&start, &["class", "title", "id"])
@@ -551,7 +588,7 @@ impl MetsDriver<'_> {
                             span_depth: 0,
                             element_id: attr(&start, "id"),
                             confidence: extract_confidence(&title),
-                            has_bbox: has_bbox(&title),
+                            bbox: parse_bbox(&title),
                             attributes,
                         });
                     }
@@ -566,11 +603,12 @@ impl MetsDriver<'_> {
                             open.span_depth -= 1;
                         } else if let Some(done) = capture.take() {
                             let text = collapse(&done.text);
-                            if done.has_bbox && !text.is_empty() {
-                                lines.push(OcrLine {
+                            if let Some(bbox) = done.bbox.filter(|_| !text.is_empty()) {
+                                page.lines.push(OcrLine {
                                     text,
                                     element_id: done.element_id,
                                     confidence: done.confidence,
+                                    bbox,
                                     attributes: done.attributes,
                                 });
                             }
@@ -597,7 +635,7 @@ impl MetsDriver<'_> {
             }
             buf.clear();
         }
-        Ok(lines)
+        Ok(page)
     }
 
     /// Fold one general entity reference into the open capture, resolving
@@ -749,19 +787,36 @@ fn attributes_except(
         .collect()
 }
 
-/// True when an hOCR `title` attribute carries a `bbox` clause.
-fn has_bbox(title: &str) -> bool {
-    title.split(';').any(|part| {
-        let part = part.trim();
-        part.strip_prefix("bbox ").is_some_and(|coords| {
-            let mut n = 0;
-            for token in coords.split_whitespace() {
-                if token.parse::<i64>().is_err() {
-                    return false;
-                }
-                n += 1;
-            }
-            n == 4
+/// True when a start tag's `class` attribute names this hOCR class.
+fn has_class(start: &quick_xml::events::BytesStart<'_>, class: &str) -> bool {
+    attr(start, "class").is_some_and(|c| c.split_whitespace().any(|token| token == class))
+}
+
+/// The `bbox` clause of an hOCR `title` attribute.
+///
+/// The format writes four integers in image pixels, left top right bottom.
+/// A clause with any other shape is not a box, and a line that states no
+/// box carries no geometry: both return `None`, which is what drops the
+/// line.
+fn parse_bbox(title: &str) -> Option<pb::BoundingBox> {
+    title.split(';').find_map(|part| {
+        let coords = part.trim().strip_prefix("bbox ")?;
+        let mut values = [0i64; 4];
+        let mut seen = 0usize;
+        for token in coords.split_whitespace() {
+            let value = token.parse::<i64>().ok()?;
+            *values.get_mut(seen)? = value;
+            seen += 1;
+        }
+        (seen == 4).then(|| pb::BoundingBox {
+            #[allow(clippy::cast_precision_loss)]
+            left: values[0] as f64,
+            #[allow(clippy::cast_precision_loss)]
+            top: values[1] as f64,
+            #[allow(clippy::cast_precision_loss)]
+            right: values[2] as f64,
+            #[allow(clippy::cast_precision_loss)]
+            bottom: values[3] as f64,
         })
     })
 }
@@ -787,10 +842,15 @@ mod tests {
 
     #[test]
     fn hocr_title_clauses_parse_as_the_format_defines_them() {
-        assert!(has_bbox("bbox 279 177 306 214; x_wconf 97"));
-        assert!(!has_bbox("x_wconf 97"));
-        assert!(!has_bbox("bbox 1 2 3"));
-        assert!(!has_bbox("bbox one two three four"));
+        let bbox = parse_bbox("bbox 279 177 306 214; x_wconf 97").expect("four integers is a box");
+        assert!((bbox.left - 279.0).abs() < f64::EPSILON);
+        assert!((bbox.top - 177.0).abs() < f64::EPSILON);
+        assert!((bbox.right - 306.0).abs() < f64::EPSILON);
+        assert!((bbox.bottom - 214.0).abs() < f64::EPSILON);
+        assert!(parse_bbox("x_wconf 97").is_none());
+        assert!(parse_bbox("bbox 1 2 3").is_none());
+        assert!(parse_bbox("bbox 1 2 3 4 5").is_none(), "five is not a box");
+        assert!(parse_bbox("bbox one two three four").is_none());
         let confidence = extract_confidence("bbox 1 2 3 4; x_wconf 97");
         assert!((confidence - 0.97).abs() < f64::EPSILON);
         let confidence = extract_confidence("bbox 1 2 3 4");
