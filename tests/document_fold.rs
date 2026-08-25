@@ -112,6 +112,9 @@ fn collector(source: &[doc::SourceType]) -> &doc::CollectorSource {
     match source[0].source.as_ref().expect("a source is set") {
         doc::source_type::Source::Collector(collector) => collector,
         doc::source_type::Source::Track(_) => panic!("this collector emits no track sources"),
+        doc::source_type::Source::Generation(_) => {
+            panic!("this collector generates nothing; it maps what the document says")
+        }
     }
 }
 

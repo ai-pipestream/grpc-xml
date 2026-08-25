@@ -11,9 +11,21 @@ option java_package = "ai.pipestream.document.v1";
 // Pipestream document structure.
 //
 // This proto defines the complete structure of a parsed document. The schema
-// tracks field-for-field parity with the docling-core v2 JSON schema so that
-// documents interoperate with that ecosystem; parity is maintained by review,
-// and "upstream" in comments below refers to that schema.
+// is the upstream document v2 JSON schema mirrored field for field, plus the
+// documented extensions this repo adds on top of it; every extension is
+// called out at its own field and is additive, so removing them all yields a
+// document the upstream dialect can express. The mirror is maintained by
+// review, and "upstream" in comments below refers to that schema.
+//
+// Field-number policy:
+// - `custom_fields` is pinned at 100 in every message that carries one, so
+//   the escape hatch sits at the same number wherever a reader looks for it.
+// - Extension fields are appended after the numbers the upstream mirror
+//   occupies, never interleaved with them, so an upstream addition lands on
+//   the number upstream chose.
+// - Numbers are never reused. No field in this file has ever been removed,
+//   which is why there are no `reserved` ranges to guard; the day one is,
+//   its number and name go into a `reserved` statement in the same change.
 //
 // Document Structure Overview:
 // ===========================
@@ -29,7 +41,10 @@ option java_package = "ai.pipestream.document.v1";
 
 // Document is the root message representing a complete parsed document.
 message Document {
-  // Schema identifier for versioning (e.g., "docling_document_v2", kept for upstream interop)
+  // Schema identifier for versioning (e.g., "docling_document_v2"). Producers
+  // stamp it, but upstream interop does not run through this field: the
+  // canonical renderer emits the upstream identity from its own constant and
+  // ignores whatever a producer put here.
   optional string schema_name = 1;
 
   // Version number of the upstream schema used
@@ -75,6 +90,37 @@ message Document {
 
   // Map of page numbers to page metadata.
   map<int32, PageItem> pages = 12;
+
+  // Fields 16 and up extend the model beyond the upstream dialect; the
+  // renderers that produce that dialect ignore them.
+
+  // Source-declared document metadata (title, authors, dates, language).
+  optional DocumentMeta source_meta = 16;
+
+  // Nested payloads the source carries (mail parts, embedded files, page
+  // attachments), addressable for fan-out parsing.
+  repeated SubDocumentRef attachments = 17;
+
+  // The source's own table of contents, when it declares one.
+  repeated OutlineEntry outline = 18;
+
+  // Page-level meta tags for web sources (name/content pairs).
+  repeated MetaTag meta_tags = 19;
+
+  // Machine-readable structured data blocks embedded in the source
+  // (JSON-LD, microdata, OpenGraph), verbatim.
+  repeated StructuredData structured_data = 20;
+
+  // Media stream metadata for audio and video sources.
+  optional MediaMeta media = 21;
+
+  // Tracked changes the source records (insertions, deletions, format
+  // edits), each anchored to the content it touches.
+  repeated ChangeRecord changes = 22;
+
+  // Named anchors the source declares (bookmarks, reference marks), the
+  // targets its own cross-references point at.
+  repeated NamedAnchor anchors = 23;
 }
 
 // DocumentOrigin contains metadata about the source document file.
@@ -90,6 +136,10 @@ message DocumentOrigin {
 
   // Optional URI/URL where the document was retrieved from
   optional string uri = 4;
+
+  // Web retrieval provenance for crawled sources (extension beyond the
+  // upstream dialect).
+  optional WebMeta web = 5;
 }
 
 // ContentLayer defines the semantic layer where content appears in the document.
@@ -127,6 +177,8 @@ message GroupItem {
   optional BaseMeta meta = 5;
   optional string name = 6;
   GroupLabel label = 7;
+  // Raw label fallback for forward-compatibility with newer label vocabularies.
+  optional string label_raw = 8;
 }
 
 // RefItem is a JSON Pointer reference to another item in the document.
@@ -175,7 +227,7 @@ message TrackSource {
 }
 
 // CollectorSource attributes an item to the parser collector that produced
-// it. This is a pipestream extension over the upstream docling schema:
+// it. This is a pipestream extension over the upstream schema:
 // upstream SourceType carries only media-track cues, while the
 // scatter-gather pipeline needs every collector's output attributable so
 // additive merges never collide silently. Sources never overwrite each
@@ -199,6 +251,9 @@ message SourceType {
   oneof source {
     TrackSource track = 1;
     CollectorSource collector = 2;
+    // Model-generated content names its generation (extension beyond the
+    // upstream dialect).
+    GenerationSource generation = 3;
   }
 }
 
@@ -614,6 +669,21 @@ message TextItemBase {
   optional string hyperlink = 11;
   repeated SourceType source = 12;
   repeated FineRef comments = 13;
+
+  // Character-level formatting and link runs inside `text` (extension
+  // beyond the upstream dialect, which styles whole items only).
+  repeated InlineSpan spans = 14;
+
+  // Admonition kind for callout blocks (info, warning, note, tip), when the
+  // source marks one (extension beyond the upstream dialect).
+  optional string admonition_kind = 15;
+
+  // Raw label fallback for forward-compatibility with newer label vocabularies.
+  optional string label_raw = 16;
+
+  // The source's own named style for the item (a word processor's
+  // paragraph style), verbatim; extension beyond the upstream dialect.
+  optional string style_name = 17;
 }
 
 // TitleItem represents a document title or major heading.
@@ -677,6 +747,8 @@ message CodeItem {
   optional CodeLanguageLabel code_language = 18;
   // Raw language string (fallback for unknown enum values).
   optional string code_language_raw = 19;
+  // Raw label fallback for forward-compatibility with newer label vocabularies.
+  optional string label_raw = 20;
 }
 
 // FormulaItem represents a mathematical formula or equation.
@@ -690,10 +762,27 @@ message TextItem {
 }
 
 // ProvenanceItem tracks the precise location of content in the source document.
+// Fields 4 and up extend the model beyond the upstream dialect: a source is
+// located in whatever space it actually has - a page and box, a time range,
+// a byte range, a spreadsheet cell - and an item may carry several.
 message ProvenanceItem {
   int32 page_no = 1;
   BoundingBox bbox = 2;
   IntSpan charspan = 3;
+
+  // Where the content sits in a media timeline (audio, video).
+  optional TimeSpan time = 4;
+
+  // Where the content sits in the source byte stream (fixed-length records,
+  // archive members).
+  optional ByteSpan byte_range = 5;
+
+  // Where the content sits in a sheet grid.
+  optional GridCell grid = 6;
+
+  // The exact quadrilateral for rotated or skewed text; bbox stays the
+  // axis-aligned hull.
+  repeated Point polygon = 7;
 }
 
 // BoundingBox defines a rectangular region in page coordinates.
@@ -841,6 +930,12 @@ message PictureScatterChartData {
 }
 
 // PictureAnnotation is a union of all annotation types that can appear on a picture.
+//
+// PLACEMENT RULE: item `meta` is the export contract; the canonical dialect
+// reads meta and ignores this list entirely (upstream deprecates it in favor
+// of meta). Producers that want their data visible in dialect exports MUST
+// write it into meta (a first-class slot or a namespaced custom field) and
+// may additionally mirror it here for wire consumers.
 message PictureAnnotation {
   oneof annotation {
     DescriptionAnnotation description = 1;
@@ -853,6 +948,10 @@ message PictureAnnotation {
     PictureStackedBarChartData stacked_bar_chart = 8;
     PicturePieChartData pie_chart = 9;
     PictureScatterChartData scatter_chart = 10;
+    // Decoded machine-readable code payloads (extension beyond the upstream
+    // dialect; the misc-annotation convention stays emitted alongside for
+    // one release).
+    BarcodeAnnotation barcode = 11;
   }
 }
 
@@ -994,6 +1093,12 @@ message TableData {
   Orientation orientation = 5;
   // Raw orientation fallback for forward-compatibility with newer rotation values.
   optional string orientation_raw = 6;
+  // Column declarations when the source has a schema (spreadsheet types,
+  // fixed-record layouts); extension beyond the upstream dialect.
+  repeated TableColumnSchema columns = 7;
+  // Per-row provenance for record-oriented sources (byte ranges, grid
+  // rows); extension beyond the upstream dialect.
+  repeated ProvenanceItem row_prov = 8;
 }
 
 // TableRow represents a single row in the table.
@@ -1016,6 +1121,14 @@ message TableCell {
   bool row_section = 11;
   bool fillable = 12;
   optional RefItem ref = 13;
+
+  // The cell's typed value when the source has one; `text` stays the
+  // display string (extension beyond the upstream dialect).
+  optional CellValue value = 14;
+
+  // Character-level formatting and link runs inside `text` (extension
+  // beyond the upstream dialect).
+  repeated InlineSpan spans = 15;
 }
 
 // KeyValueItem represents a key-value pair extracted from forms.
@@ -1129,4 +1242,229 @@ message PageItem {
   Size size = 1;
   optional ImageRef image = 2;
   int32 page_no = 3;
+  // The coordinate unit this page's size and its items' boxes are measured
+  // in (px, pt, twip); unset keeps the producer's historical space.
+  // Extension beyond the upstream dialect.
+  optional string unit = 4;
+}
+
+// ============================================================================
+// Model extensions
+//
+// Everything below extends the model beyond the upstream dialect. The
+// renderers that produce that dialect ignore these shapes; every other
+// consumer may rely on them. All extensions are additive: removing them
+// yields a document the upstream dialect can express.
+// ============================================================================
+
+// TimeSpan locates content in a media timeline.
+message TimeSpan {
+  double start_ms = 1;
+  double end_ms = 2;
+  // Which stream the span belongs to, for multi-track sources.
+  optional int32 track = 3;
+  // Speaker or voice attribution for the span.
+  optional string speaker = 4;
+}
+
+// ByteSpan locates content in the source byte stream.
+message ByteSpan {
+  uint64 start = 1;
+  uint64 end = 2;
+}
+
+// GridCell locates content in a sheet grid (zero-based).
+message GridCell {
+  int32 row = 1;
+  int32 col = 2;
+  optional string sheet = 3;
+}
+
+// Point is one vertex of a provenance polygon, in the same coordinate space
+// as the owning bounding box.
+message Point {
+  double x = 1;
+  double y = 2;
+}
+
+// InlineSpan is one formatting or link run inside an item's text. Ranges are
+// code points into `text`, half-open, and may overlap (bold and linked at
+// once arrives as two spans or one span carrying both).
+message InlineSpan {
+  IntSpan range = 1;
+  optional Formatting formatting = 2;
+  optional string hyperlink = 3;
+  // Internal cross-reference target (footnote, citation, section).
+  optional FineRef target = 4;
+  // Character-run attributes beyond the boolean set: the source's font
+  // family and size (points), text color as #rrggbb, and the run's own
+  // language tag when it differs from the item's.
+  optional string font_family = 5;
+  optional double font_size_pt = 6;
+  optional string color = 7;
+  optional string language = 8;
+  // The source field code a generated run came from (a page number, a
+  // date, a cross-reference), so resolved field text stays distinguishable
+  // from authored text.
+  optional string field_code = 9;
+}
+
+// DocumentMeta carries the metadata the source declares about itself.
+message DocumentMeta {
+  optional string title = 1;
+  repeated string authors = 2;
+  // ISO 8601 timestamps, verbatim from the source.
+  optional string created = 3;
+  optional string modified = 4;
+  // BCP 47 language tag.
+  optional string language = 5;
+  // The software that produced the source file.
+  optional string generator = 6;
+  repeated string keywords = 7;
+  // Source metadata with no first-class slot, keyed by a producer-scoped
+  // name.
+  map<string, string> extra = 100;
+}
+
+// CellValue is a table cell's typed value; the cell's `text` stays the
+// display string.
+message CellValue {
+  oneof kind {
+    double number = 1;
+    bool boolean = 2;
+    // ISO 8601 date or datetime, verbatim.
+    string datetime = 3;
+    // The source formula, in the source's own syntax.
+    string formula = 4;
+    // The source's error literal (a spreadsheet #DIV/0!, a conversion
+    // failure marker).
+    string error = 5;
+  }
+  // The source's display format string for the value.
+  optional string number_format = 10;
+}
+
+// TableColumnSchema declares one column of a schema-carrying table
+// (spreadsheet types, fixed-record layouts).
+message TableColumnSchema {
+  string name = 1;
+  // The source's own type name (copybook usage, cell type, SQL type).
+  optional string declared_type = 2;
+  // Copybook picture clause, when the source is a fixed-record layout.
+  optional string picture = 3;
+  optional uint64 byte_offset = 4;
+  optional uint64 byte_size = 5;
+  // Copybook level number.
+  optional int32 level = 6;
+  // One-based occurrence for a column inside an OCCURS group; unset for
+  // columns that occur once.
+  optional int32 occurs_index = 7;
+  // The column's display width in the page unit, when the source declares
+  // one.
+  optional double width = 9;
+  // Named value conditions declared on the column (copybook level-88),
+  // each rendered as its literal or "low THRU high" range.
+  repeated string conditions = 8;
+}
+
+// SubDocumentRef registers one nested payload the source carries (a mail
+// part, an embedded file, a page attachment) so a downstream parser can fan
+// out on it. The id is the stable pointer other conventions in the fleet
+// already embed in item text (for example part:<part_id>).
+message SubDocumentRef {
+  string id = 1;
+  string name = 2;
+  string media_type = 3;
+  uint64 size_bytes = 4;
+  // The item that mentions or anchors the payload, when one does.
+  optional string item_ref = 5;
+}
+
+// WebMeta carries retrieval provenance for crawled sources.
+message WebMeta {
+  // The URI the content was actually fetched from.
+  optional string target_uri = 1;
+  // The page's self-declared canonical URI.
+  optional string canonical_uri = 2;
+  // ISO 8601 capture time.
+  optional string crawl_time = 3;
+  optional int32 http_status = 4;
+  optional string content_language = 5;
+  // Selected response headers, lower-cased names.
+  map<string, string> headers = 6;
+}
+
+// MetaTag is one page-level name/content meta pair.
+message MetaTag {
+  string name = 1;
+  string content = 2;
+}
+
+// StructuredData is one machine-readable data block embedded in the source,
+// verbatim.
+message StructuredData {
+  // The block's dialect: json-ld, microdata, opengraph, rdfa.
+  string kind = 1;
+  string json = 2;
+}
+
+// MediaMeta describes the media stream a transcript came from.
+message MediaMeta {
+  optional double duration_ms = 1;
+  // Distinct speaker labels, in first-appearance order.
+  repeated string speakers = 2;
+  optional string codec = 3;
+}
+
+// GenerationSource attributes model-generated content to its generation.
+message GenerationSource {
+  string model = 1;
+  optional string endpoint = 2;
+  // The provider's stop reason, verbatim; a length stop means the content
+  // is truncated.
+  optional string finish_reason = 3;
+  optional uint64 prompt_tokens = 4;
+  optional uint64 completion_tokens = 5;
+  optional double temperature = 6;
+}
+
+// OutlineEntry is one row of the source's own table of contents.
+message OutlineEntry {
+  string title = 1;
+  int32 level = 2;
+  optional int32 page_no = 3;
+  // The item or destination the entry points at, when resolvable.
+  optional FineRef target = 4;
+}
+
+// ChangeRecord is one tracked change the source records.
+message ChangeRecord {
+  // Stable id within the document, as the source names it.
+  string id = 1;
+  // The change kind in the source's own vocabulary (insert, delete,
+  // format), lower-cased.
+  string kind = 2;
+  string author = 3;
+  // ISO 8601, verbatim from the source.
+  optional string timestamp = 4;
+  // The item and span the change touches.
+  optional FineRef target = 5;
+  // The text the change removed or replaced, when the source keeps it.
+  optional string content = 6;
+}
+
+// NamedAnchor is one named position the source declares.
+message NamedAnchor {
+  string name = 1;
+  FineRef target = 2;
+}
+
+// BarcodeAnnotation is one decoded machine-readable code payload.
+message BarcodeAnnotation {
+  // The symbology name as the decoder reports it (QRCode, Code128).
+  string format = 1;
+  // The decoded content.
+  string value = 2;
+  // The decoding engine.
+  string provenance = 3;
 }
