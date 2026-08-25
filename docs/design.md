@@ -91,6 +91,18 @@ the nesting now says the same thing. Content that arrives before the first
 heading sits on `#/body`. **No section `GroupItem`s**: the levels come from
 the parser rather than from tag names, so there is nothing to fill.
 
+**Structured metadata** (`emit_source_metadata`). A `meta_item` event folds
+into whatever the Document schema has a field for: a publication date
+becomes `source_meta.created` and a revision date `source_meta.modified`,
+written as far as the source states them (a `pub-date` with only a year
+yields `2026`, not a fabricated first of January); a cited-reference entry
+becomes a `REFERENCE` item like any other bibliography entry.
+Identifiers, classification codes, licence terms and funding awards have no
+field in this schema and stay on the typed wire, decoded rather than lost.
+They are deliberately **not** stuffed into `custom_fields`: a CPC code is
+not a string, and a map entry would make the gap invisible instead of
+recorded here.
+
 **Source metadata.** `Document.source_meta` carries what the document
 declares about itself in typed slots: `title` from the `TITLE` item,
 `language` from the root `xml:lang`, `keywords` from `role = "keyword"`

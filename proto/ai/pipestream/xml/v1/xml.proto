@@ -625,6 +625,150 @@ message Fact {
   CollectorSource source = 16;
 }
 
+// MetaDate is one date the document declares about itself.
+//
+// The parts are kept as the source wrote them, because a JATS `pub-date`
+// with only a year is a real and common thing to say and rendering it as
+// `2026-01-01` would invent two fields the document does not have.
+message MetaDate {
+  // The source's own name for the date, lower-cased: `epub`, `ppub`,
+  // `collection` from a JATS `pub-date/@pub-type`, `received` or
+  // `accepted` from a `history/date/@date-type`.
+  string kind = 1;
+
+  // Calendar year.
+  optional uint32 year = 2;
+
+  // Month, 1 to 12.
+  optional uint32 month = 3;
+
+  // Day of month, 1 to 31.
+  optional uint32 day = 4;
+
+  // The date as an ISO 8601 calendar date, set only when the source states
+  // all three parts or writes the date out itself (`@iso-8601-date`).
+  optional string iso_date = 5;
+}
+
+// MetaIdentifier is one identifier of the document or of the work that
+// contains it.
+message MetaIdentifier {
+  // The identifier scheme, as the source names it: `doi`, `pmid`, `issn`,
+  // `publisher-id`, `nlm-ta`.
+  string kind = 1;
+
+  // The identifier itself.
+  string value = 2;
+
+  // What the identifier identifies, when the source distinguishes: `ppub`
+  // or `epub` for an ISSN, `journal` for a journal identifier.
+  optional string scope = 3;
+}
+
+// MetaClassification is one classification code assigned to the document.
+message MetaClassification {
+  // The classification system: `cpc`, `ipcr`, `national`, or
+  // `jats-subject` for a JATS subject term.
+  string scheme = 1;
+
+  // The code as the source writes it, joined from its parts for the
+  // patent schemes that spell a code out across child elements.
+  string code = 2;
+
+  // Edition or version of the scheme, when stated.
+  optional string edition = 3;
+
+  // Issuing office or authority, when stated.
+  optional string office = 4;
+}
+
+// MetaLicense is what the document says about reuse of itself.
+message MetaLicense {
+  // URI naming the licence, from a JATS `license/@xlink:href`.
+  optional string type_uri = 1;
+
+  // The licence text as written.
+  optional string statement = 2;
+
+  // The copyright line as written.
+  optional string copyright_statement = 3;
+
+  // Copyright year, as written.
+  optional string copyright_year = 4;
+
+  // Copyright holder, as written.
+  optional string copyright_holder = 5;
+}
+
+// MetaFunding is one funding award or funding statement.
+message MetaFunding {
+  // Name of the funding source.
+  optional string funder = 1;
+
+  // Award, grant or contract identifier.
+  optional string award_id = 2;
+
+  // The funding statement as written, when the source gives prose instead
+  // of, or as well as, the structured parts.
+  optional string statement = 3;
+}
+
+// MetaCitation is one entry of a cited-reference list that is metadata
+// rather than body content: a patent's references-cited block.
+//
+// A JATS reference list is body content and arrives as `TextItem` with
+// `XML_ITEM_LABEL_REFERENCE` instead; this is for the lists a document
+// carries in its bibliographic header.
+message MetaCitation {
+  // The entry's own identifier, when it has one.
+  optional string element_id = 1;
+
+  // Position in the list when the source numbers it.
+  optional uint64 ordinal = 2;
+
+  // The entry, flattened.
+  string text = 3;
+}
+
+// MetaItem is one piece of the document's declaration about itself,
+// recovered from a subtree the item mapping does not walk.
+//
+// These subtrees flatten into meaningless prose, which is why they are
+// skipped by default; decoded into these shapes they are among the most
+// valuable fields a journal article or a patent carries. Only sent when
+// `ParseOptions.emit_source_metadata` is set.
+//
+// A `MetaItem` carries no stream index: the index series counts content
+// items, and a publication date is not content.
+message MetaItem {
+  // Positional path of the source element.
+  string path = 1;
+
+  // Exactly one shape is set.
+  oneof value {
+    // A date the document declares.
+    MetaDate date = 2;
+
+    // An identifier of the document or its container.
+    MetaIdentifier identifier = 3;
+
+    // A classification code assigned to the document.
+    MetaClassification classification = 4;
+
+    // Licence and copyright terms.
+    MetaLicense license = 5;
+
+    // A funding award or statement.
+    MetaFunding funding = 6;
+
+    // One entry of a cited-reference block.
+    MetaCitation citation = 7;
+  }
+
+  // Provenance, always set.
+  CollectorSource source = 8;
+}
+
 // HtmlIsland is an XHTML fragment handed off rather than mapped.
 //
 // JATS bodies and XBRL footnotes and labels may embed XHTML. Re-parsing it
@@ -734,6 +878,9 @@ message ParseCounts {
   // Pages mapped from an archive manifest. Zero for the single-document
   // dialects, which have no page structure to count.
   uint64 pages = 9;
+
+  // `MetaItem` events sent.
+  uint64 meta_items = 10;
 }
 
 // ParseStatus is the trailer of a successful parse: the last event of the

@@ -104,6 +104,15 @@ message ParseOptions {
   // The flat `text` is byte-identical with the flag on, so a consumer that
   // ignores `spans` sees no difference.
   bool emit_inline_spans = 7;
+
+  // Decode the structured metadata subtrees the item mapping skips, and
+  // report them as `meta_item` events. Default false, which skips them and
+  // says so with a `WARNING_CODE_UNMAPPED_ELEMENT` on the trailer.
+  //
+  // These are publication dates, licence terms, funding, classification
+  // codes and cited-reference blocks: high-value fields that flatten into
+  // meaningless prose, which is why they are not simply captured as text.
+  bool emit_source_metadata = 8;
 }
 
 // ParseXmlRequest is one frame of the upload.
@@ -145,6 +154,10 @@ message ParseXmlResponse {
     // An XHTML fragment for the HTML collector. Only sent when
     // `ParseOptions.emit_html_islands` is set.
     HtmlIsland html_island = 7;
+
+    // One piece of the document's declaration about itself. Only sent when
+    // `ParseOptions.emit_source_metadata` is set.
+    MetaItem meta_item = 10;
 
     // Parse trailer. Always the last event of a successful parse, sent once.
     ParseStatus status = 8;

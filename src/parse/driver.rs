@@ -261,9 +261,16 @@ impl<R: BufRead> Driver<'_, R> {
         };
         match dialect::action(self.dialect, &ctx) {
             Action::Descend => self.push_frame(local, qname),
-            Action::Skip => {
-                self.count_child(local, qname);
-                self.consume_subtree()?;
+            Action::Skip => self.skip_subtree(local, qname)?,
+            Action::Meta(shape) => {
+                if self.config.emit_source_metadata {
+                    self.push_frame(local, qname);
+                    let result = self.emit_meta(&shape, attrs);
+                    self.stack.pop();
+                    result?;
+                } else {
+                    self.skip_subtree(local, qname)?;
+                }
             }
             Action::Table => {
                 self.push_frame(local, qname);
@@ -600,6 +607,22 @@ impl<R: BufRead> Driver<'_, R> {
     }
 
     // -------------------------------------------------------------- machinery
+
+    /// Drop an element and everything under it, and say so on the trailer.
+    ///
+    /// `WARNING_CODE_UNMAPPED_ELEMENT` is documented as meaning exactly
+    /// this, and the skip used to be silent: publication dates, licence
+    /// terms, funding, classification codes and cited-reference lists left
+    /// no trace at all. The message names the element so the trailer says
+    /// which mapping is missing rather than only that one is.
+    fn skip_subtree(&mut self, local: &str, qname: &str) -> Result<(), ParseError> {
+        self.count_child(local, qname);
+        self.warn(
+            pb::WarningCode::UnmappedElement,
+            &format!("<{qname}> has no mapping and its subtree was skipped"),
+        );
+        self.consume_subtree()
+    }
 
     /// Consume the current element's subtree, from just after its start tag
     /// through its matching end tag.

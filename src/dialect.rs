@@ -77,6 +77,33 @@ pub enum Action {
     /// Open a table: emit `TableStart`, then a `TableRow` per source row,
     /// then `TableEnd`.
     Table,
+    /// Read this element's subtree as one structured metadata record and
+    /// emit it as a `MetaItem`. Skipped, with a warning, unless the caller
+    /// set `ParseOptions.emit_source_metadata`.
+    Meta(MetaShape),
+}
+
+/// Which metadata shape a subtree decodes into.
+///
+/// The rule names the shape; the decoder in [`crate::parse`] knows how each
+/// dialect spells it. A shape covers one leaf record — one date, one code,
+/// one award — rather than a whole metadata block, so every subtree read is
+/// bounded by the record and the decoders stay flat.
+#[derive(Debug, Clone, Copy)]
+pub enum MetaShape {
+    /// A publication or history date.
+    Date,
+    /// An identifier of the document or its container. The string is the
+    /// scheme to fall back on when the source does not name one.
+    Identifier(&'static str),
+    /// A classification code. The string names the scheme.
+    Classification(&'static str),
+    /// Licence and copyright terms.
+    License,
+    /// A funding award or statement.
+    Funding,
+    /// One entry of a cited-reference block.
+    Citation,
 }
 
 /// A text capture and the labelling to apply when it closes.
@@ -416,11 +443,25 @@ fn jats(ctx: &ElementCtx<'_>) -> Action {
             ))
         }
         "kwd" => Action::Capture(Capture::new(pb::XmlItemLabel::Text, "keyword")),
-        // Dates, counts, permissions and funding are structured metadata that
-        // flattens into meaningless text; the Document plane has no home for
-        // them in v1, so they are skipped rather than emitted as noise.
-        "pub-date" | "history" | "counts" | "permissions" | "funding-group" | "author-notes"
-        | "article-categories" | "issn" | "journal-id" => Action::Skip,
+        // Structured metadata: a record whose meaning is in its element
+        // names, which flattening into text destroys. Each of these decodes
+        // into a typed `MetaItem`; the containers around them are walked
+        // through so the records inside are reached one at a time.
+        "pub-date" => Action::Meta(MetaShape::Date),
+        "date" if ctx.inside("history") => Action::Meta(MetaShape::Date),
+        "permissions" => Action::Meta(MetaShape::License),
+        "award-group" | "funding-statement" => Action::Meta(MetaShape::Funding),
+        "subject" if ctx.inside("article-categories") => {
+            Action::Meta(MetaShape::Classification("jats-subject"))
+        }
+        "issn" => Action::Meta(MetaShape::Identifier("issn")),
+        "journal-id" => Action::Meta(MetaShape::Identifier("journal-id")),
+        // `history`, `funding-group` and `article-categories` are the
+        // containers around those records; they fall through to `Descend`
+        // below, so each record inside is reached on its own.
+        // Element tallies and author notes are about the file rather than
+        // about the work, and neither has a shape worth decoding.
+        "counts" | "author-notes" => Action::Skip,
 
         // ---- body ---------------------------------------------------------
         "title" if ctx.parent() == "sec" => {
@@ -484,20 +525,26 @@ fn uspto(ctx: &ElementCtx<'_>) -> Action {
             };
             Action::Capture(Capture::new(pb::XmlItemLabel::Text, role))
         }
-        // Correspondence blocks are addresses, and dates, country codes,
-        // kind codes and the classification blocks are codes rather than
-        // prose; all of them flatten into digit soup.
+        // Classification codes and the references-cited block are among the
+        // most valuable fields a patent carries, and each is a record whose
+        // meaning is in its element names.
+        "classification-cpc" => Action::Meta(MetaShape::Classification("cpc")),
+        "classification-ipcr" => Action::Meta(MetaShape::Classification("ipcr")),
+        "classification-national" => Action::Meta(MetaShape::Classification("national")),
+        "citation" if ctx.inside("us-references-cited") => Action::Meta(MetaShape::Citation),
+        // The blocks around those records (`classifications-cpc`,
+        // `classifications-ipcr`, `us-references-cited`) fall through to
+        // `Descend` below, so each record inside is reached on its own.
+        // Correspondence blocks are addresses, and dates, country codes and
+        // kind codes are codes rather than prose; all of them flatten into
+        // digit soup and none has a record shape of its own.
         "agent"
         | "correspondence-address"
         | "date"
         | "country"
         | "kind"
-        | "classification-national"
-        | "classifications-cpc"
-        | "classifications-ipcr"
         | "us-related-documents"
         | "us-field-of-classification-search"
-        | "us-references-cited"
         | "citation" => Action::Skip,
 
         "claim" | "Claim" => Action::Capture(

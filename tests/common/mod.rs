@@ -356,6 +356,17 @@ pub fn span_text(item: &pb::TextItem, span: &pb::InlineSpan) -> String {
         .collect()
 }
 
+/// Every `MetaItem` in a stream.
+pub fn meta_items(events: &[pb::ParseXmlResponse]) -> Vec<&pb::MetaItem> {
+    events
+        .iter()
+        .filter_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::MetaItem(item)) => Some(item),
+            _ => None,
+        })
+        .collect()
+}
+
 /// True when the trailer carries at least one warning of this code.
 pub fn warned(events: &[pb::ParseXmlResponse], code: pb::WarningCode) -> bool {
     status(events)
@@ -379,6 +390,8 @@ pub const JATS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   <front>
     <journal-meta>
       <journal-title>Journal of Streaming Parsers</journal-title>
+      <journal-id journal-id-type="nlm-ta">J Stream Parse</journal-id>
+      <issn pub-type="epub">1234-5678</issn>
     </journal-meta>
     <article-meta>
       <article-id pub-id-type="doi">10.1234/jsp.2026.001</article-id>
@@ -399,6 +412,23 @@ pub const JATS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
       </abstract>
       <kwd-group><kwd>streaming</kwd><kwd>xml</kwd></kwd-group>
       <pub-date pub-type="epub"><year>2026</year><month>02</month></pub-date>
+      <history><date date-type="revised"><day>04</day><month>03</month><year>2026</year></date></history>
+      <permissions>
+        <copyright-statement>(c) 2026 The Authors</copyright-statement>
+        <copyright-year>2026</copyright-year>
+        <license xlink:href="https://creativecommons.org/licenses/by/4.0/">
+          <license-p>Distributed under CC BY 4.0.</license-p>
+        </license>
+      </permissions>
+      <funding-group>
+        <award-group>
+          <funding-source><institution>National Science Foundation</institution></funding-source>
+          <award-id>NSF-1234567</award-id>
+        </award-group>
+      </funding-group>
+      <article-categories>
+        <subj-group subj-group-type="heading"><subject>Research Article</subject></subj-group>
+      </article-categories>
     </article-meta>
   </front>
   <body>
@@ -468,7 +498,20 @@ pub const USPTO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
         <assignee><orgname>Acme Streaming Corp</orgname></assignee>
       </assignees>
     </us-parties>
-    <classifications-cpc><main-cpc><classification-cpc><section>G</section></classification-cpc></main-cpc></classifications-cpc>
+    <classifications-cpc>
+      <main-cpc>
+        <classification-cpc>
+          <cpc-version-indicator><date>20260101</date></cpc-version-indicator>
+          <section>G</section><class>06</class><subclass>F</subclass>
+          <main-group>16</main-group><subgroup>93</subgroup>
+        </classification-cpc>
+      </main-cpc>
+    </classifications-cpc>
+    <us-references-cited>
+      <citation id="cit-0001">
+        <patcit num="00001"><document-id><country>US</country><doc-number>9876543</doc-number></document-id></patcit>
+      </citation>
+    </us-references-cited>
   </us-bibliographic-data-grant>
   <abstract id="abstract"><p id="p-0001">A method streams document items as they are parsed.</p></abstract>
   <description id="description">

@@ -180,6 +180,7 @@ impl DocumentFold {
             Some(Event::TableRow(row)) => self.on_table_row(row),
             Some(Event::TableEnd(end)) => self.on_table_end(end),
             Some(Event::Fact(fact)) => self.on_fact(fact),
+            Some(Event::MetaItem(item)) => self.on_meta_item(item),
             Some(Event::HtmlIsland(_)) => self.islands_skipped += 1,
             // The trailer is counts and warnings, both of which describe the
             // typed stream rather than the document; the fold sees it only so
@@ -245,6 +246,64 @@ impl DocumentFold {
                 created_by: Some(SUMMARY_CREATED_BY.to_owned()),
                 ..doc::SummaryMetaField::default()
             });
+        }
+    }
+
+    /// Fold one decoded metadata record.
+    ///
+    /// Two of the six shapes have a typed home in the Document schema: a
+    /// publication date is the document's `created` or `modified`, and a
+    /// cited-reference entry is a `REFERENCE` item like any other
+    /// bibliography entry. Identifiers, classification codes, licence terms
+    /// and funding awards have no field in this schema; they stay on the
+    /// typed wire, where they are decoded rather than lost, and
+    /// `docs/design.md` says so rather than leaving the gap silent.
+    fn on_meta_item(&mut self, item: &pb::MetaItem) {
+        match item.value.as_ref() {
+            Some(pb::meta_item::Value::Date(date)) => self.on_meta_date(date),
+            Some(pb::meta_item::Value::Citation(citation)) => {
+                if citation.text.is_empty() {
+                    return;
+                }
+                self.push_text(&pb::TextItem {
+                    label: pb::XmlItemLabel::Reference as i32,
+                    text: citation.text.clone(),
+                    ordinal: citation.ordinal,
+                    element_id: citation.element_id.clone(),
+                    path: item.path.clone(),
+                    source: item.source.clone(),
+                    ..pb::TextItem::default()
+                });
+            }
+            Some(
+                pb::meta_item::Value::Identifier(_)
+                | pb::meta_item::Value::Classification(_)
+                | pb::meta_item::Value::License(_)
+                | pb::meta_item::Value::Funding(_),
+            )
+            | None => {}
+        }
+    }
+
+    /// A publication date becomes `created`, a revision date `modified`.
+    ///
+    /// The value is written as far as the source states it: a `pub-date`
+    /// with only a year yields `2026`, which is a valid ISO 8601 date and
+    /// is what the document said, rather than a fabricated first of January.
+    fn on_meta_date(&mut self, date: &pb::MetaDate) {
+        let Some(written) = iso_date(date) else {
+            return;
+        };
+        match date.kind.as_str() {
+            "" | "pub" | "epub" | "ppub" | "collection" | "epub-ppub" => {
+                if self.source_meta.created.is_none() {
+                    self.source_meta.created = Some(written);
+                }
+            }
+            "rev-recd" | "revised" | "corrected" | "updated" => {
+                self.source_meta.modified = Some(written);
+            }
+            _ => {}
         }
     }
 
@@ -802,6 +861,20 @@ impl DocumentFold {
             source: Some(doc::source_type::Source::Collector(collector)),
         }
     }
+}
+
+/// A date as far as the source stated it, in ISO 8601: the whole date when
+/// it has one, otherwise the year and month or the year alone. `None` when
+/// the source stated no part of it.
+fn iso_date(date: &pb::MetaDate) -> Option<String> {
+    if let Some(iso) = date.iso_date.as_ref().filter(|iso| !iso.is_empty()) {
+        return Some(iso.clone());
+    }
+    let year = date.year?;
+    Some(match date.month {
+        Some(month) => format!("{year:04}-{month:02}"),
+        None => format!("{year:04}"),
+    })
 }
 
 /// The `TextItemBase` of an arena item, for the variants that carry one.

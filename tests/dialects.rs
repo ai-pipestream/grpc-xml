@@ -23,6 +23,14 @@ fn with_spans() -> pb::ParseOptions {
     }
 }
 
+/// Default options plus the structured-metadata switch.
+fn with_metadata() -> pb::ParseOptions {
+    pb::ParseOptions {
+        emit_source_metadata: true,
+        ..options()
+    }
+}
+
 // ------------------------------------------------------------------- JATS
 
 #[tokio::test]
@@ -432,6 +440,161 @@ async fn a_malformed_schema_location_drops_the_unpaired_tail() {
         .map(|l| (l.namespace.as_str(), l.location.as_str()))
         .collect();
     assert_eq!(locations, [("urn:a", "a.xsd")]);
+}
+
+// ------------------------------------------------------- structured metadata
+
+#[tokio::test]
+async fn a_skipped_subtree_says_so_on_the_trailer() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, options()).await;
+    assert!(
+        warned(&events, pb::WarningCode::UnmappedElement),
+        "the code is documented as meaning exactly this; the skip used to be silent"
+    );
+    let skipped: Vec<&str> = status(&events)
+        .warnings
+        .iter()
+        .filter(|w| w.code == pb::WarningCode::UnmappedElement as i32)
+        .map(|w| w.message.as_str())
+        .collect();
+    assert!(
+        skipped.iter().any(|m| m.contains("<pub-date>")),
+        "the warning names the element so the trailer says which mapping is missing: {skipped:?}"
+    );
+}
+
+#[tokio::test]
+async fn jats_dates_licences_and_funding_are_decoded_rather_than_dropped() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, with_metadata()).await;
+    let items = common::meta_items(&events);
+    assert!(!items.is_empty());
+
+    let dates: Vec<&pb::MetaDate> = items
+        .iter()
+        .filter_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::Date(date)) => Some(date),
+            _ => None,
+        })
+        .collect();
+    let published = dates.iter().find(|d| d.kind == "epub").expect("a pub-date");
+    assert_eq!((published.year, published.month), (Some(2026), Some(2)));
+    assert_eq!(
+        published.iso_date, None,
+        "a pub-date with no day states no day; a fabricated first of the month would be a lie"
+    );
+    let revised = dates
+        .iter()
+        .find(|d| d.kind == "revised")
+        .expect("a history date");
+    assert_eq!(revised.iso_date.as_deref(), Some("2026-03-04"));
+
+    let license = items
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::License(license)) => Some(license),
+            _ => None,
+        })
+        .expect("the permissions block");
+    assert_eq!(
+        license.type_uri.as_deref(),
+        Some("https://creativecommons.org/licenses/by/4.0/")
+    );
+    assert_eq!(license.copyright_year.as_deref(), Some("2026"));
+    assert_eq!(
+        license.statement.as_deref(),
+        Some("Distributed under CC BY 4.0.")
+    );
+
+    let funding = items
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::Funding(funding)) => Some(funding),
+            _ => None,
+        })
+        .expect("the funding group");
+    assert_eq!(
+        funding.funder.as_deref(),
+        Some("National Science Foundation")
+    );
+    assert_eq!(funding.award_id.as_deref(), Some("NSF-1234567"));
+
+    let identifiers: Vec<(&str, &str)> = items
+        .iter()
+        .filter_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::Identifier(id)) => {
+                Some((id.kind.as_str(), id.value.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        identifiers.contains(&("issn", "1234-5678")),
+        "{identifiers:?}"
+    );
+    assert!(
+        identifiers.contains(&("nlm-ta", "J Stream Parse")),
+        "the source names the scheme in journal-id-type: {identifiers:?}"
+    );
+
+    let subject = items
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::Classification(c)) => Some(c),
+            _ => None,
+        })
+        .expect("the article category");
+    assert_eq!(subject.scheme, "jats-subject");
+    assert_eq!(subject.code, "Research Article");
+}
+
+#[tokio::test]
+async fn uspto_classification_codes_and_cited_references_are_decoded() {
+    let client = client().await;
+    let events = parse_ok(&client, USPTO, with_metadata()).await;
+    let items = common::meta_items(&events);
+
+    let cpc = items
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::Classification(c)) if c.scheme == "cpc" => Some(c),
+            _ => None,
+        })
+        .expect("the CPC classification");
+    assert_eq!(
+        cpc.code, "G06F16/93",
+        "the code is joined in its own notation, not left as digit soup"
+    );
+
+    let citation = items
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::Citation(c)) => Some(c),
+            _ => None,
+        })
+        .expect("the references-cited entry");
+    assert_eq!(citation.element_id.as_deref(), Some("cit-0001"));
+    assert!(citation.text.contains("9876543"), "{}", citation.text);
+}
+
+#[tokio::test]
+async fn source_metadata_is_off_by_default_and_counted_when_on() {
+    let client = client().await;
+    let off = parse_ok(&client, JATS, options()).await;
+    assert!(common::meta_items(&off).is_empty(), "metadata is opt-in");
+    assert_eq!(status(&off).counts.unwrap().meta_items, 0);
+
+    let on = parse_ok(&client, JATS, with_metadata()).await;
+    let counted = status(&on).counts.unwrap().meta_items;
+    assert_eq!(
+        counted,
+        common::meta_items(&on).len() as u64,
+        "the trailer counts what the stream carried"
+    );
+    assert!(counted > 0);
+    // Metadata is not content: the item stream is the same either way.
+    assert_eq!(texts(&text_items(&off)), texts(&text_items(&on)));
 }
 
 // ------------------------------------------------------------------ USPTO

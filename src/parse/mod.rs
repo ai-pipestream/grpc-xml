@@ -31,6 +31,7 @@ use crate::sniff::{self, Dialect};
 mod driver;
 mod encoding;
 mod island;
+mod meta;
 mod table;
 mod xbrl;
 
@@ -77,6 +78,8 @@ pub struct ParseConfig {
     pub emit_html_islands: bool,
     /// Record the inline markup inside captured elements as spans.
     pub emit_inline_spans: bool,
+    /// Decode the structured metadata subtrees the item mapping skips.
+    pub emit_source_metadata: bool,
     /// Attach unconsumed source attributes to every item.
     pub include_attributes: bool,
     /// True when the caller sent taxonomy bytes, which v1 does not use.

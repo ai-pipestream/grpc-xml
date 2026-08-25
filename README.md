@@ -96,6 +96,7 @@ sequenceDiagram
 | `emit_html_islands` | Hand XHTML subtrees to the HTML collector instead of flattening them |
 | `include_attributes` | Attach unconsumed source attributes to every item |
 | `emit_inline_spans` | Report the inline markup inside captured elements as `TextItem.spans`: emphasis, hyperlinks, cross-references. The flat `text` is unchanged |
+| `emit_source_metadata` | Decode the structured metadata subtrees the item mapping skips (dates, licences, funding, classification codes, cited references) as `meta_item` events |
 | `emit_document` | Also fold the parse into one `ai.pipestream.document.v1.Document`, sent just before the trailer (see below) |
 
 **Response.** Exactly one `info` first, content events in document order,
@@ -108,6 +109,7 @@ exactly one `status` last.
 | `table_start` / `table_row` / `table_end` | A table, streamed a row at a time as each row's end tag is read |
 | `fact` | One XBRL fact with its context and unit resolved inline |
 | `html_island` | An XHTML fragment, re-serialized, for the HTML collector |
+| `meta_item` | One decoded metadata record: a date, an identifier, a classification code, licence terms, a funding award, a cited reference. Only when `emit_source_metadata` was set |
 | `document` | The whole parse folded into one `Document`. Only when `emit_document` was set, exactly once, immediately before `status` |
 | `status` | `ParseStatus`: dialect, counts, aggregated warnings, bytes consumed, elapsed |
 

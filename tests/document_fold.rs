@@ -1141,3 +1141,59 @@ fn a_document_that_declares_nothing_about_itself_carries_no_metadata() {
         "an absent declaration is not an empty one"
     );
 }
+
+#[test]
+fn a_publication_date_becomes_the_documents_created_date() {
+    let (_, document) = fold(
+        JATS,
+        &ParseConfig {
+            emit_source_metadata: true,
+            ..ParseConfig::default()
+        },
+    );
+    let meta = document.source_meta.as_ref().expect("declared metadata");
+    assert_eq!(
+        meta.created.as_deref(),
+        Some("2026-02"),
+        "the source states a year and a month, so the document says a year and a month"
+    );
+    assert_eq!(meta.modified.as_deref(), Some("2026-03-04"));
+}
+
+#[test]
+fn a_cited_reference_block_folds_as_reference_items() {
+    let (_, document) = fold(
+        USPTO,
+        &ParseConfig {
+            emit_source_metadata: true,
+            ..ParseConfig::default()
+        },
+    );
+    let references = texts_labelled(&document, doc::DocItemLabel::Reference);
+    assert_eq!(references.len(), 1, "{references:?}");
+    assert!(references[0].contains("9876543"), "{references:?}");
+    assert!(
+        document.anchors.iter().any(|a| a.name == "cit-0001"),
+        "a cited reference is addressable like any other item"
+    );
+}
+
+#[test]
+fn metadata_with_no_typed_home_does_not_reach_the_document() {
+    // Classification codes, licence terms, funding awards and identifiers
+    // have no field in the Document schema. They stay on the typed wire
+    // rather than being stuffed into a map; this test is the record of that
+    // gap, and it should fail the day the schema grows a home for them.
+    let (_, document) = fold(
+        USPTO,
+        &ParseConfig {
+            emit_source_metadata: true,
+            ..ParseConfig::default()
+        },
+    );
+    let rendered = format!("{document:?}");
+    assert!(
+        !rendered.contains("G06F16/93"),
+        "a classification code with no typed home must not be smuggled in as a string"
+    );
+}
