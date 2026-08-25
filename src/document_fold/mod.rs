@@ -170,6 +170,7 @@ impl DocumentFold {
                 model: None,
                 version: Some(VERSION.to_owned()),
                 confidence: None,
+                ..doc::CollectorSource::default()
             },
             table: None,
             facts_table: None,
@@ -317,14 +318,17 @@ impl DocumentFold {
         let Some(written) = iso_date(date) else {
             return;
         };
+        let instant = timestamp_of(date);
         match date.kind.as_str() {
             "" | "pub" | "epub" | "ppub" | "collection" | "epub-ppub" => {
-                if self.source_meta.created.is_none() {
-                    self.source_meta.created = Some(written);
+                if self.source_meta.created_raw.is_none() {
+                    self.source_meta.created_raw = Some(written);
+                    self.source_meta.created = instant;
                 }
             }
             "rev-recd" | "revised" | "corrected" | "updated" => {
-                self.source_meta.modified = Some(written);
+                self.source_meta.modified_raw = Some(written);
+                self.source_meta.modified = instant;
             }
             _ => {}
         }
@@ -421,6 +425,22 @@ impl DocumentFold {
         if let Some(language) = info.language.as_ref().filter(|l| !l.is_empty()) {
             self.source_meta.language = Some(language.clone());
         }
+        // The modern schema signal, as the root wrote it. The typed pairs
+        // stay on `XmlInfo`; this field holds one schemaLocation string, so
+        // it gets the source's own spelling rather than a re-rendering.
+        if let Some(location) = info
+            .root_attributes
+            .iter()
+            .find(|a| local_name(&a.name) == "schemaLocation")
+            .or_else(|| {
+                info.root_attributes
+                    .iter()
+                    .find(|a| local_name(&a.name) == "noNamespaceSchemaLocation")
+            })
+            .filter(|a| !a.value.is_empty())
+        {
+            self.source_meta.schema_location = Some(location.value.clone());
+        }
         let mut fields = BTreeMap::new();
         fields.insert("xml.dialect", string(model));
         if !info.root_namespace.is_empty() {
@@ -457,6 +477,9 @@ impl DocumentFold {
                 image: None,
                 page_no: int(page.page_no),
                 unit: (!page.unit.is_empty()).then(|| page.unit.clone()),
+                // Extraction diagnostics belong to a producer that measured
+                // them; this one reads what the OCR already decided.
+                quality: None,
             },
         );
     }
@@ -1016,8 +1039,11 @@ impl DocumentFold {
                 model: source.model.clone(),
                 version: source.version.clone(),
                 // Unset upstream and unset here: a declarative mapping is
-                // deterministic, so a confidence would be noise.
+                // deterministic, so a confidence would be noise. The one
+                // exception is hOCR, which reports its own, and it reports a
+                // calibrated confidence rather than a raw engine score.
                 confidence: source.confidence,
+                ..doc::CollectorSource::default()
             },
         );
         doc::SourceType {
@@ -1054,6 +1080,46 @@ fn provenance(item: &pb::TextItem) -> Vec<doc::ProvenanceItem> {
     }]
 }
 
+/// The local part of an attribute name, whatever prefix the document bound.
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
+}
+
+/// A date as an instant, and only when the source stated a whole calendar
+/// date.
+///
+/// A `pub-date` that names a year and a month is not an instant, and
+/// resolving it to the first of the month would invent two fields. Even a
+/// whole date has no time zone in the source; midnight UTC is the
+/// conventional reading and the `_raw` twin keeps what the source actually
+/// wrote, which is why both are set together.
+fn timestamp_of(date: &pb::MetaDate) -> Option<prost_types::Timestamp> {
+    let (year, month, day) = (date.year?, date.month?, date.day?);
+    let days = days_from_civil(i64::from(year), i64::from(month), i64::from(day))?;
+    Some(prost_types::Timestamp {
+        seconds: days * 86_400,
+        nanos: 0,
+    })
+}
+
+/// Days from the Unix epoch to a proleptic Gregorian calendar date.
+///
+/// Howard Hinnant's `days_from_civil`, shifted to the epoch. It is here
+/// rather than from a date crate because this is the only date arithmetic
+/// in the service and a dependency for one function is worse than ten lines
+/// with a test.
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
 /// A date as far as the source stated it, in ISO 8601: the whole date when
 /// it has one, otherwise the year and month or the year alone. `None` when
 /// the source stated no part of it.
@@ -1062,9 +1128,10 @@ fn iso_date(date: &pb::MetaDate) -> Option<String> {
         return Some(iso.clone());
     }
     let year = date.year?;
-    Some(match date.month {
-        Some(month) => format!("{year:04}-{month:02}"),
-        None => format!("{year:04}"),
+    Some(match (date.month, date.day) {
+        (Some(month), Some(day)) => format!("{year:04}-{month:02}-{day:02}"),
+        (Some(month), None) => format!("{year:04}-{month:02}"),
+        _ => format!("{year:04}"),
     })
 }
 
@@ -1567,6 +1634,49 @@ mod tests {
         fold.consume(&text(pb::XmlItemLabel::Paragraph, "one"));
         assert_eq!(fold.take().texts.len(), 1);
         assert_eq!(fold.take().texts.len(), 0);
+    }
+
+    #[test]
+    fn civil_dates_convert_at_the_epoch_and_across_leap_rules() {
+        // The epoch itself, a leap day, a century that is not a leap year
+        // and one that is, and the day before the epoch.
+        assert_eq!(days_from_civil(1970, 1, 1), Some(0));
+        assert_eq!(days_from_civil(1969, 12, 31), Some(-1));
+        assert_eq!(days_from_civil(2000, 3, 1), Some(11_017));
+        assert_eq!(days_from_civil(2026, 3, 4), Some(20_516));
+        // 1900 is not a leap year and 2000 is, which is the rule a naive
+        // conversion gets wrong.
+        assert_eq!(
+            days_from_civil(1900, 3, 1).unwrap() - days_from_civil(1900, 2, 28).unwrap(),
+            1
+        );
+        assert_eq!(
+            days_from_civil(2000, 3, 1).unwrap() - days_from_civil(2000, 2, 28).unwrap(),
+            2
+        );
+        assert_eq!(days_from_civil(2026, 13, 1), None);
+        assert_eq!(days_from_civil(2026, 1, 0), None);
+    }
+
+    #[test]
+    fn a_partial_date_has_a_spelling_but_no_instant() {
+        let partial = pb::MetaDate {
+            kind: "epub".to_owned(),
+            year: Some(2026),
+            month: Some(2),
+            day: None,
+            iso_date: None,
+        };
+        assert_eq!(iso_date(&partial).as_deref(), Some("2026-02"));
+        assert!(timestamp_of(&partial).is_none());
+
+        let whole = pb::MetaDate {
+            day: Some(4),
+            month: Some(3),
+            ..partial
+        };
+        assert_eq!(iso_date(&whole).as_deref(), Some("2026-03-04"));
+        assert_eq!(timestamp_of(&whole).map(|t| t.seconds), Some(1_772_582_400));
     }
 
     #[test]

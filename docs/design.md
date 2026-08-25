@@ -103,9 +103,11 @@ an invented coordinate would be worse than none.
 **Structured metadata** (`emit_source_metadata`). A `meta_item` event folds
 into whatever the Document schema has a field for: a publication date
 becomes `source_meta.created` and a revision date `source_meta.modified`,
-written as far as the source states them (a `pub-date` with only a year
-yields `2026`, not a fabricated first of January); a cited-reference entry
-becomes a `REFERENCE` item like any other bibliography entry.
+with the `_raw` twin holding the source's own spelling as far as it states
+it (a `pub-date` with only a year yields `2026`, not a fabricated first of
+January) and the `Timestamp` set only for a whole calendar date; a
+cited-reference entry becomes a `REFERENCE` item like any other bibliography
+entry.
 Identifiers, classification codes, licence terms and funding awards have no
 field in this schema and stay on the typed wire, decoded rather than lost.
 They are deliberately **not** stuffed into `custom_fields`: a CPC code is
@@ -119,8 +121,9 @@ items, `authors` from `role = "author" | "contributor" | "inventor"`. The
 abstract becomes `body.meta.summary`, quoted rather than generated. It is
 attached only when the source said something, because an all-default
 message would claim an empty declaration rather than an absent one. The
-root's `xsi:schemaLocation` pairs and its namespace bindings have no typed
-slot in this schema yet and stay on `XmlInfo`.
+root's `xsi:schemaLocation` goes to `source_meta.schema_location` in the
+source's own spelling; the decoded namespace-and-location pairs and the
+namespace bindings have no typed slot in this schema and stay on `XmlInfo`.
 
 **Identity.** `schema_name` is set from the `SCHEMA_NAME` constant in
 `src/document_fold.rs`, the upstream v2 document schema identifier this

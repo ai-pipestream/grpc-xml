@@ -1211,6 +1211,11 @@ fn the_document_metadata_lands_in_typed_slots() {
     );
     assert_eq!(meta.keywords, ["streaming", "xml"]);
     assert_eq!(meta.authors, ["Rivera Ana", "Okafor Chidi"]);
+    assert_eq!(
+        meta.schema_location.as_deref(),
+        Some("http://jats.nlm.nih.gov/ns/archiving/1.3/ JATS-archivearticle1.xsd"),
+        "the modern schema signal, as the root wrote it"
+    );
 }
 
 #[test]
@@ -1258,11 +1263,22 @@ fn a_publication_date_becomes_the_documents_created_date() {
     );
     let meta = document.source_meta.as_ref().expect("declared metadata");
     assert_eq!(
-        meta.created.as_deref(),
+        meta.created_raw.as_deref(),
         Some("2026-02"),
         "the source states a year and a month, so the document says a year and a month"
     );
-    assert_eq!(meta.modified.as_deref(), Some("2026-03-04"));
+    assert!(
+        meta.created.is_none(),
+        "a year and a month is not an instant, and inventing a day would be a lie"
+    );
+    assert_eq!(meta.modified_raw.as_deref(), Some("2026-03-04"));
+    let modified = meta
+        .modified
+        .as_ref()
+        .expect("a whole calendar date resolves to an instant");
+    // 2026-03-04T00:00:00Z.
+    assert_eq!(modified.seconds, 1_772_582_400);
+    assert_eq!(modified.nanos, 0);
 }
 
 #[test]
