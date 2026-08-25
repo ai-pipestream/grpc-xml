@@ -77,8 +77,26 @@ const FURNITURE_REF: &str = "#/furniture";
 /// Nothing here generates a summary; an abstract is quoted, not produced.
 const SUMMARY_CREATED_BY: &str = "source";
 
-/// Column headings of the XBRL fact table, in order.
-const FACT_COLUMNS: [&str; 6] = ["concept", "context", "period", "unit", "value", "decimals"];
+/// Columns of the XBRL fact table, in order: heading and the type the
+/// column's cells declare.
+///
+/// The wire model for an XBRL fact is the richest in this service, and the
+/// projection used to be six strings. The typed columns say what each one
+/// is, and the cells that have a machine value carry it in `CellValue`
+/// alongside the display text.
+const FACT_COLUMNS: [(&str, &str); 11] = [
+    ("concept", "qname"),
+    ("entity_scheme", "uri"),
+    ("entity", "identifier"),
+    ("context", "id"),
+    ("period", "period"),
+    ("unit", "unit"),
+    ("value", "decimal"),
+    ("decimals", "decimal"),
+    ("precision", "decimal"),
+    ("sign", "boolean"),
+    ("nil", "boolean"),
+];
 
 /// A fold of one parse's events into one Document.
 ///
@@ -185,6 +203,7 @@ impl DocumentFold {
             Some(Event::Fact(fact)) => self.on_fact(fact),
             Some(Event::MetaItem(item)) => self.on_meta_item(item),
             Some(Event::Page(page)) => self.on_page(page),
+            Some(Event::XbrlNote(note)) => self.on_xbrl_note(note),
             Some(Event::HtmlIsland(_)) => self.islands_skipped += 1,
             // The trailer is counts and warnings, both of which describe the
             // typed stream rather than the document; the fold sees it only so
@@ -750,13 +769,42 @@ impl DocumentFold {
         } else {
             self.open_facts_table(fact)
         };
-        let values = [
-            concept_name(fact),
-            fact.context_ref.clone(),
-            period_text(fact.context.as_ref()),
-            unit_text(fact),
-            fact.value.clone(),
-            fact.decimals.clone().unwrap_or_default(),
+        // A dimensioned fact and an undimensioned one used to be
+        // indistinguishable in the projection. The axes become a key-value
+        // graph of their own and the context cell points at it.
+        let dimensions = self.push_dimensions(fact);
+        let entity = fact.context.as_ref();
+        let values: [(String, Option<doc::CellValue>); 11] = [
+            (concept_name(fact), None),
+            (
+                entity
+                    .and_then(|c| c.entity_scheme.clone())
+                    .unwrap_or_default(),
+                None,
+            ),
+            (
+                entity
+                    .and_then(|c| c.entity_identifier.clone())
+                    .unwrap_or_default(),
+                None,
+            ),
+            (fact.context_ref.clone(), None),
+            (period_text(entity), None),
+            (unit_text(fact), None),
+            (fact.value.clone(), numeric_value(fact)),
+            (
+                fact.decimals.clone().unwrap_or_default(),
+                accuracy_value(fact.decimals.as_deref()),
+            ),
+            (
+                fact.precision.clone().unwrap_or_default(),
+                accuracy_value(fact.precision.as_deref()),
+            ),
+            (
+                fact.sign.clone().unwrap_or_default(),
+                Some(boolean(fact.sign.as_deref() == Some("-"))),
+            ),
+            (fact.is_nil.to_string(), Some(boolean(fact.is_nil))),
         ];
         let Some(data) = self
             .document
@@ -768,9 +816,10 @@ impl DocumentFold {
         };
         let row_index = int_from_usize(data.grid.len());
         let cells: Vec<doc::TableCell> = values
-            .iter()
+            .into_iter()
             .enumerate()
-            .map(|(column, text)| {
+            .map(|(column, (text, value))| {
+                let is_context = FACT_COLUMNS[column].0 == "context";
                 let column = int_from_usize(column);
                 doc::TableCell {
                     row_span: 1,
@@ -779,7 +828,11 @@ impl DocumentFold {
                     end_row_offset_idx: row_index + 1,
                     start_col_offset_idx: column,
                     end_col_offset_idx: column + 1,
-                    text: text.clone(),
+                    text,
+                    value,
+                    r#ref: is_context
+                        .then(|| dimensions.as_deref().map(reference))
+                        .flatten(),
                     ..doc::TableCell::default()
                 }
             })
@@ -787,6 +840,76 @@ impl DocumentFold {
         data.table_cells.extend(cells.iter().cloned());
         data.grid.push(doc::TableRow { cells });
         data.num_rows = int_from_usize(data.grid.len());
+    }
+
+    /// Fold a fact's segment and scenario axes into a key-value graph.
+    ///
+    /// `GraphData` models exactly this and had no writer here. Each axis is
+    /// a KEY cell linked to the VALUE cell holding its member, so a reader
+    /// gets the dimension pairs rather than a rendering of them. Returns the
+    /// item's self ref, for the fact row's context cell to point at.
+    fn push_dimensions(&mut self, fact: &pb::Fact) -> Option<String> {
+        let dimensions = fact.context.as_ref().map(|c| c.dimensions.as_slice())?;
+        if dimensions.is_empty() {
+            return None;
+        }
+        let self_ref = format!("#/key_value_items/{}", self.document.key_value_items.len());
+        let parent = self.current_parent();
+        let mut cells = Vec::with_capacity(dimensions.len() * 2);
+        let mut links = Vec::with_capacity(dimensions.len());
+        for (n, dimension) in dimensions.iter().enumerate() {
+            let key_id = int_from_usize(n * 2);
+            let value_id = key_id + 1;
+            let member = dimension
+                .member
+                .clone()
+                .or_else(|| dimension.typed_value.clone())
+                .unwrap_or_default();
+            cells.push(graph_cell(
+                doc::GraphCellLabel::Key,
+                key_id,
+                &dimension.dimension,
+            ));
+            cells.push(graph_cell(doc::GraphCellLabel::Value, value_id, &member));
+            links.push(doc::GraphLink {
+                label: doc::GraphLinkLabel::ToValue as i32,
+                source_cell_id: key_id,
+                target_cell_id: value_id,
+            });
+        }
+        self.document.key_value_items.push(doc::KeyValueItem {
+            self_ref: self_ref.clone(),
+            parent: Some(reference(&parent)),
+            content_layer: doc::ContentLayer::Body as i32,
+            label: doc::DocItemLabel::KeyValueRegion as i32,
+            graph: Some(doc::GraphData { cells, links }),
+            source: vec![self.source_of(fact.source.as_ref())],
+            ..doc::KeyValueItem::default()
+        });
+        self.link_child(&parent, &self_ref);
+        Some(self_ref)
+    }
+
+    /// Fold one XBRL footnote as a `FOOTNOTE` item.
+    ///
+    /// A footnote is the narrative a filer attached to a number, so it is
+    /// content and folds like any other footnote. A label is a name for a
+    /// concept in a schema this service never reads, so it has nothing in
+    /// the arena to attach to and stays on the typed wire.
+    fn on_xbrl_note(&mut self, note: &pb::XbrlNote) {
+        if pb::XbrlNoteKind::try_from(note.kind) != Ok(pb::XbrlNoteKind::Footnote)
+            || note.text.is_empty()
+        {
+            return;
+        }
+        self.push_text(&pb::TextItem {
+            label: pb::XmlItemLabel::Footnote as i32,
+            text: note.text.clone(),
+            path: note.path.clone(),
+            element_id: (!note.label.is_empty()).then(|| note.label.clone()),
+            source: note.source.clone(),
+            ..pb::TextItem::default()
+        });
     }
 
     /// Create the fact table with its header row and return its arena index.
@@ -800,7 +923,7 @@ impl DocumentFold {
             cells: FACT_COLUMNS
                 .iter()
                 .enumerate()
-                .map(|(column, name)| header_cell(int_from_usize(column), name))
+                .map(|(column, (name, _))| header_cell(int_from_usize(column), name))
                 .collect(),
         };
         self.document.tables.push(doc::TableItem {
@@ -817,6 +940,16 @@ impl DocumentFold {
                 num_rows: 1,
                 num_cols: int_from_usize(FACT_COLUMNS.len()),
                 grid: vec![header],
+                // The columns declare what each one holds, so a reader does
+                // not have to infer a fact's shape from its display text.
+                columns: FACT_COLUMNS
+                    .iter()
+                    .map(|(name, declared)| doc::TableColumnSchema {
+                        name: (*name).to_owned(),
+                        declared_type: Some((*declared).to_owned()),
+                        ..doc::TableColumnSchema::default()
+                    })
+                    .collect(),
                 ..doc::TableData::default()
             }),
             source: vec![self.source_of(fact.source.as_ref())],
@@ -1144,6 +1277,64 @@ fn unit_text(fact: &pb::Fact) -> String {
         );
     }
     unit.id.clone()
+}
+
+/// One cell of a key-value graph.
+fn graph_cell(label: doc::GraphCellLabel, cell_id: i32, text: &str) -> doc::GraphCell {
+    doc::GraphCell {
+        label: label as i32,
+        cell_id,
+        text: text.to_owned(),
+        orig: text.to_owned(),
+        prov: None,
+        item_ref: None,
+    }
+}
+
+/// A cell value holding a boolean.
+fn boolean(value: bool) -> doc::CellValue {
+    doc::CellValue {
+        kind: Some(doc::cell_value::Kind::Boolean(value)),
+        number_format: None,
+    }
+}
+
+/// A fact's value as a number, with the source's sign applied.
+///
+/// A nil fact has no value to type, and a value the source did not write as
+/// a number (a string-valued concept) has none either: both leave the cell's
+/// display text as the only thing said about it.
+fn numeric_value(fact: &pb::Fact) -> Option<doc::CellValue> {
+    if fact.is_nil {
+        return None;
+    }
+    let magnitude: f64 = fact.value.trim().parse().ok()?;
+    let number = if fact.sign.as_deref() == Some("-") {
+        -magnitude.abs()
+    } else {
+        magnitude
+    };
+    Some(doc::CellValue {
+        kind: Some(doc::cell_value::Kind::Number(number)),
+        number_format: None,
+    })
+}
+
+/// A `decimals` or `precision` attribute as a number.
+///
+/// XBRL writes unbounded accuracy as `INF`, which is the floating-point
+/// infinity and not a special case this fold has to invent a marker for.
+fn accuracy_value(raw: Option<&str>) -> Option<doc::CellValue> {
+    let raw = raw?.trim();
+    let number = if raw.eq_ignore_ascii_case("INF") {
+        f64::INFINITY
+    } else {
+        raw.parse().ok()?
+    };
+    Some(doc::CellValue {
+        kind: Some(doc::cell_value::Kind::Number(number)),
+        number_format: None,
+    })
 }
 
 /// One header cell of the fact table.

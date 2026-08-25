@@ -789,6 +789,32 @@ async fn xbrl_without_a_taxonomy_still_returns_facts_and_says_so_when_given_one(
 }
 
 #[tokio::test]
+async fn xbrl_footnotes_are_content_and_reach_the_wire_attached_to_their_fact() {
+    let client = client().await;
+    let events = parse_ok(&client, XBRL, options()).await;
+    let notes = common::xbrl_notes(&events);
+    assert_eq!(notes.len(), 1, "the footnote linkbase used to be consumed");
+    let note = notes[0];
+    assert_eq!(note.kind, pb::XbrlNoteKind::Footnote as i32);
+    assert_eq!(note.text, "Includes restricted cash of 12 million.");
+    assert_eq!(note.language.as_deref(), Some("en"));
+    assert_eq!(
+        note.role.as_deref(),
+        Some("http://www.xbrl.org/2003/role/footnote")
+    );
+    assert_eq!(
+        note.targets,
+        ["#f-assets"],
+        "the arc resolves the locator to the fact the footnote annotates"
+    );
+    assert_eq!(status(&events).counts.unwrap().xbrl_notes, 1);
+
+    // The fact carries the anchor the note points at.
+    let assets = facts(&events)[0];
+    assert_eq!(assets.element_id.as_deref(), Some("f-assets"));
+}
+
+#[tokio::test]
 async fn xbrl_records_the_schema_reference_without_fetching_it() {
     let client = client().await;
     let events = parse_ok(&client, XBRL, options()).await;

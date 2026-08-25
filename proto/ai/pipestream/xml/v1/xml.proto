@@ -680,6 +680,63 @@ message Fact {
 
   // Provenance, always set.
   CollectorSource source = 16;
+
+  // Value of the fact element's `id` attribute, when it has one. This is
+  // the anchor an `XbrlNote` points at, so a footnote can be attached to
+  // the fact it annotates.
+  optional string element_id = 17;
+}
+
+// XbrlNoteKind names which linkbase a note came from.
+enum XbrlNoteKind {
+  // Not stated.
+  XBRL_NOTE_KIND_UNSPECIFIED = 0;
+
+  // A `link:footnote` from a footnote linkbase inside the instance:
+  // narrative attached to one or more facts.
+  XBRL_NOTE_KIND_FOOTNOTE = 1;
+
+  // A `link:label` from a label linkbase inside the instance: a
+  // human-readable name for a concept.
+  XBRL_NOTE_KIND_LABEL = 2;
+}
+
+// XbrlNote is one footnote or label declared inside an XBRL instance.
+//
+// These live in `link:footnoteLink` and `link:labelLink` elements, which are
+// linkbase infrastructure by namespace and content by intent: a footnote is
+// the narrative a filer attached to a number. They were consumed silently
+// before, along with any XHTML they carry.
+//
+// A note carries no stream index: the index series counts content items.
+message XbrlNote {
+  // Which linkbase the note came from.
+  XbrlNoteKind kind = 1;
+
+  // The `xlink:label` the arcs address the note by, as written.
+  string label = 2;
+
+  // The `xlink:role` of the note, as written, naming what kind of footnote
+  // or label it is.
+  optional string role = 3;
+
+  // Language of the note, from `xml:lang`.
+  optional string language = 4;
+
+  // What the note is attached to: the `xlink:href` of every locator an arc
+  // connects to it. For a footnote these are fragment references to fact
+  // `id` attributes (`#f-01`); for a label they reference concepts in a
+  // schema. A note may annotate several targets, so this is a list.
+  repeated string targets = 5;
+
+  // The note's text, flattened and whitespace-collapsed.
+  string text = 6;
+
+  // Positional path of the note element.
+  string path = 7;
+
+  // Provenance, always set.
+  CollectorSource source = 8;
 }
 
 // MetaDate is one date the document declares about itself.
@@ -938,6 +995,9 @@ message ParseCounts {
 
   // `MetaItem` events sent.
   uint64 meta_items = 10;
+
+  // `XbrlNote` events sent.
+  uint64 xbrl_notes = 11;
 }
 
 // ParseStatus is the trailer of a successful parse: the last event of the

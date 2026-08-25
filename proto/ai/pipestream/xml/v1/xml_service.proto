@@ -162,6 +162,9 @@ message ParseXmlResponse {
     // A page of an archive dialect opens. The items on it follow.
     Page page = 11;
 
+    // One XBRL footnote or label declared inside the instance.
+    XbrlNote xbrl_note = 12;
+
     // Parse trailer. Always the last event of a successful parse, sent once.
     ParseStatus status = 8;
 

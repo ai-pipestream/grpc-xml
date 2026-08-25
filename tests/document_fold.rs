@@ -631,10 +631,15 @@ fn a_document_with_no_figures_has_an_empty_picture_arena() {
 fn xbrl_facts_fold_into_one_table_with_a_deterministic_row_per_fact() {
     let (events, document) = fold_default(XBRL);
     assert_attribution(&document, "xbrl");
-    assert!(
-        document.texts.is_empty(),
-        "an instance is facts, not prose: {:?}",
-        document.texts.len()
+    assert_eq!(
+        texts_labelled(&document, doc::DocItemLabel::Footnote),
+        ["Includes restricted cash of 12 million."],
+        "an instance is facts plus the narrative a filer attached to them"
+    );
+    assert_eq!(
+        document.texts.len(),
+        1,
+        "and nothing else: an instance is not prose"
     );
     assert_eq!(document.tables.len(), 1, "one fact table, created lazily");
 
@@ -642,7 +647,7 @@ fn xbrl_facts_fold_into_one_table_with_a_deterministic_row_per_fact() {
     let fields = &table.meta.as_ref().expect("table meta").custom_fields;
     assert_eq!(field(fields, "xml.table"), Some("facts"));
     let data = table.data.as_ref().expect("table data");
-    assert_eq!(data.num_cols, 6);
+    assert_eq!(data.num_cols, 11);
     assert_eq!(
         usize::try_from(data.num_rows).expect("a row count is not negative"),
         common::facts(&events).len() + 1,
@@ -651,7 +656,19 @@ fn xbrl_facts_fold_into_one_table_with_a_deterministic_row_per_fact() {
     let header: Vec<&str> = data.grid[0].cells.iter().map(|c| c.text.as_str()).collect();
     assert_eq!(
         header,
-        ["concept", "context", "period", "unit", "value", "decimals"]
+        [
+            "concept",
+            "entity_scheme",
+            "entity",
+            "context",
+            "period",
+            "unit",
+            "value",
+            "decimals",
+            "precision",
+            "sign",
+            "nil"
+        ]
     );
     assert!(data.grid[0].cells.iter().all(|cell| cell.column_header));
 
@@ -660,19 +677,107 @@ fn xbrl_facts_fold_into_one_table_with_a_deterministic_row_per_fact() {
         row,
         [
             "us-gaap:Assets",
+            "http://www.sec.gov/CIK",
+            "0000123456",
             "I2026",
             "2026-12-31",
             "iso4217:USD",
             "1234000000",
-            "-6"
+            "-6",
+            "",
+            "",
+            "false"
         ]
     );
     let duration: Vec<&str> = data.grid[2].cells.iter().map(|c| c.text.as_str()).collect();
-    assert_eq!(duration[2], "2026-01-01/2026-12-31");
+    assert_eq!(duration[4], "2026-01-01/2026-12-31");
     let divided: Vec<&str> = data.grid[4].cells.iter().map(|c| c.text.as_str()).collect();
-    assert_eq!(divided[3], "iso4217:USD/xbrli:shares");
-    assert_eq!(divided[4], "", "a nil fact has no value to render");
+    assert_eq!(divided[5], "iso4217:USD/xbrli:shares");
+    assert_eq!(divided[6], "", "a nil fact has no value to render");
     assert!(!data.grid[1].cells[0].column_header, "rows are not headers");
+}
+
+#[test]
+fn the_fact_table_declares_its_column_types_and_types_its_cells() {
+    let (_, document) = fold_default(XBRL);
+    let data = document.tables[0].data.as_ref().expect("table data");
+    let declared: Vec<(&str, Option<&str>)> = data
+        .columns
+        .iter()
+        .map(|column| (column.name.as_str(), column.declared_type.as_deref()))
+        .collect();
+    assert_eq!(declared.len(), 11);
+    assert!(
+        declared.contains(&("value", Some("decimal"))),
+        "{declared:?}"
+    );
+    assert!(declared.contains(&("nil", Some("boolean"))), "{declared:?}");
+
+    // The value cell is a number, not a string that looks like one.
+    let value = data.grid[1].cells[6].value.as_ref().expect("a typed value");
+    assert_eq!(
+        value.kind,
+        Some(doc::cell_value::Kind::Number(1_234_000_000.0))
+    );
+    let decimals = data.grid[1].cells[7]
+        .value
+        .as_ref()
+        .expect("decimals is a number");
+    assert_eq!(decimals.kind, Some(doc::cell_value::Kind::Number(-6.0)));
+    let nil = data.grid[1].cells[10].value.as_ref().expect("nil is typed");
+    assert_eq!(nil.kind, Some(doc::cell_value::Kind::Boolean(false)));
+
+    // The nil fact carries the nil flag, and has no number to carry.
+    let nil_row = &data.grid[4].cells;
+    assert!(nil_row[6].value.is_none(), "a nil fact has no value");
+    assert_eq!(
+        nil_row[10].value.as_ref().and_then(|v| v.kind.clone()),
+        Some(doc::cell_value::Kind::Boolean(true))
+    );
+}
+
+#[test]
+fn a_dimensioned_fact_points_at_its_axes() {
+    let (_, document) = fold_default(XBRL);
+    assert_eq!(
+        document.key_value_items.len(),
+        1,
+        "one fact of the fixture is dimensioned"
+    );
+    let graph = document.key_value_items[0]
+        .graph
+        .as_ref()
+        .expect("the axes are a graph, not a rendering of one");
+    let keys: Vec<&str> = graph
+        .cells
+        .iter()
+        .filter(|c| c.label == doc::GraphCellLabel::Key as i32)
+        .map(|c| c.text.as_str())
+        .collect();
+    let values: Vec<&str> = graph
+        .cells
+        .iter()
+        .filter(|c| c.label == doc::GraphCellLabel::Value as i32)
+        .map(|c| c.text.as_str())
+        .collect();
+    assert_eq!(keys, ["us-gaap:StatementGeographicalAxis"]);
+    assert_eq!(values, ["us-gaap:NorthAmericaMember"]);
+    assert_eq!(graph.links.len(), 1);
+    assert_eq!(
+        graph.links[0].label,
+        doc::GraphLinkLabel::ToValue as i32,
+        "the axis names the member"
+    );
+
+    let data = document.tables[0].data.as_ref().expect("table data");
+    let dimensioned = &data.grid[3].cells[3];
+    assert_eq!(
+        dimensioned.r#ref.as_ref().map(|r| r.r#ref.as_str()),
+        Some("#/key_value_items/0"),
+        "the context cell points at the axes rather than hiding them"
+    );
+    let undimensioned = &data.grid[1].cells[3];
+    assert!(undimensioned.r#ref.is_none());
 }
 
 #[test]
@@ -1195,5 +1300,21 @@ fn metadata_with_no_typed_home_does_not_reach_the_document() {
     assert!(
         !rendered.contains("G06F16/93"),
         "a classification code with no typed home must not be smuggled in as a string"
+    );
+}
+
+#[test]
+fn an_xbrl_footnote_folds_as_a_footnote_addressable_by_its_label() {
+    let (_, document) = fold_default(XBRL);
+    let footnote = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|b| b.label == doc::DocItemLabel::Footnote as i32)
+        .expect("the footnote linkbase is content");
+    assert!(footnote.text.starts_with("Includes restricted cash"));
+    assert!(
+        document.anchors.iter().any(|a| a.name == "fn-1"),
+        "the xlink:label is the name the arcs address it by"
     );
 }

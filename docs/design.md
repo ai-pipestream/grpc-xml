@@ -207,6 +207,19 @@ inspection aid on the typed stream, not document structure.
 **Warnings and counts** from the trailer. They describe the stream, not the
 document.
 
+**XBRL facts.** One table, created when the first fact arrives. Eleven
+columns — `concept`, `entity_scheme`, `entity`, `context`, `period`, `unit`,
+`value`, `decimals`, `precision`, `sign`, `nil` — declared in
+`TableData.columns` with the type each holds. The cells that have a machine
+value carry it in `TableCell.value`: the fact's number with the source's
+sign applied, `decimals` and `precision` as numbers (`INF` is the floating
+point infinity, not a marker), and `sign` and `nil` as booleans. A fact's
+segment and scenario axes become a `KeyValueItem` with real `GraphData`,
+one KEY cell per axis linked to the VALUE cell holding its member, and the
+fact row's `context` cell points at it. An XBRL footnote is narrative a
+filer attached to a number, so it folds as a `FOOTNOTE` item; a label names
+a concept in a schema this service never reads and stays on the wire.
+
 **USPTO claims as list items.** They stream as `TEXT` with `role = "claim"`
 and an ordinal, and that is what they fold to; the claim numbering is in
 `xml.ordinal`.

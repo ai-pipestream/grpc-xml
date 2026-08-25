@@ -111,6 +111,7 @@ exactly one `status` last.
 | `html_island` | An XHTML fragment, re-serialized, for the HTML collector |
 | `meta_item` | One decoded metadata record: a date, an identifier, a classification code, licence terms, a funding award, a cited reference. Only when `emit_source_metadata` was set |
 | `page` | One page of an archive dialect opens: its number, its extent and the unit they are measured in. Archive dialects only |
+| `xbrl_note` | One XBRL footnote or label declared inside the instance, with the facts its arcs attach it to |
 | `document` | The whole parse folded into one `Document`. Only when `emit_document` was set, exactly once, immediately before `status` |
 | `status` | `ParseStatus`: dialect, counts, aggregated warnings, bytes consumed, elapsed |
 
@@ -242,7 +243,7 @@ wanted.
 |---|---|---|
 | JATS | `http://jats.nlm.nih.gov*` namespace, `//NLM//` or JATS public id, root `article` | title, contributors, affiliations, abstract, keywords, nested sections, paragraphs, lists, formulas, figures, captioned tables, references |
 | USPTO | `//USPTO//` public id, ST.96 namespace, root `us-patent-grant` / `us-patent-application` / `patent-document` | title, inventors, assignees, document and application numbers, abstract, headings, description, drawing descriptions, numbered claims, drawing references, CALS tables |
-| XBRL | `http://www.xbrl.org/2003/instance` namespace, root `xbrl` | contexts (entity, period, segment/scenario dimensions), units (simple and divide), facts with `contextRef` / `unitRef` resolved inline, `decimals`, `precision`, `sign`, `xsi:nil` |
+| XBRL | `http://www.xbrl.org/2003/instance` namespace, root `xbrl` | contexts (entity, period, segment/scenario dimensions), units (simple and divide), facts with `contextRef` / `unitRef` resolved inline, `decimals`, `precision`, `sign`, `xsi:nil`, `@id`, plus the footnote and label linkbases inside the instance |
 | DocLang | the `NS_DOCLANG` namespace URI (defined in `src/sniff.rs`), root `doclang`; an alternate root name is also accepted | typed decode of label-named elements and of a generic `item` carrying a `DocItemLabel` short name |
 | DCLX | ZIP magic `PK\x03\x04` | the archive's root `document.xml` member, mapped exactly as DocLang; `assets/` and `pages/` images stay compressed and undecoded |
 | METS_GBS | gzip magic `\x1f\x8b`, then a tar holding a METS manifest with `PROFILE="gbs"` | pages in manifest (`div TYPE="page" ORDER`) order, one `TextItem` with `role = "ocr-line"` per hOCR `ocr_line` span of each page's `coordOCR` file, `x_wconf` as the item's source confidence; scans and plain OCR text are counted, warned about and never decoded |

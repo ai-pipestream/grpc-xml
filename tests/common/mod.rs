@@ -290,6 +290,17 @@ pub fn texts(items: &[&pb::TextItem]) -> Vec<String> {
     items.iter().map(|i| i.text.clone()).collect()
 }
 
+/// Every `XbrlNote` in a stream.
+pub fn xbrl_notes(events: &[pb::ParseXmlResponse]) -> Vec<&pb::XbrlNote> {
+    events
+        .iter()
+        .filter_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::XbrlNote(note)) => Some(note),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Every `Fact` in a stream.
 pub fn facts(events: &[pb::ParseXmlResponse]) -> Vec<&pb::Fact> {
     events
@@ -534,7 +545,7 @@ pub const USPTO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
 /// An XBRL instance with a duration context, an instant context, a unit, a
 /// dimensioned context and four facts, one of them nil.
-pub const XBRL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+pub const XBRL: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <xbrl xmlns="http://www.xbrl.org/2003/instance"
       xmlns:link="http://www.xbrl.org/2003/linkbase"
       xmlns:xlink="http://www.w3.org/1999/xlink"
@@ -566,12 +577,17 @@ pub const XBRL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
       <unitDenominator><measure>xbrli:shares</measure></unitDenominator>
     </divide>
   </unit>
-  <us-gaap:Assets contextRef="I2026" unitRef="usd" decimals="-6">1234000000</us-gaap:Assets>
+  <us-gaap:Assets id="f-assets" contextRef="I2026" unitRef="usd" decimals="-6">1234000000</us-gaap:Assets>
   <us-gaap:Revenues contextRef="D2026" unitRef="usd" decimals="-6">987000000</us-gaap:Revenues>
   <us-gaap:Revenues contextRef="D2026-NA" unitRef="usd" decimals="-6">412000000</us-gaap:Revenues>
   <us-gaap:EarningsPerShareBasic contextRef="D2026" unitRef="usd-per-share" decimals="2" xsi:nil="true"/>
+  <link:footnoteLink xlink:type="extended" xlink:role="http://www.xbrl.org/2003/role/link">
+    <link:loc xlink:type="locator" xlink:href="#f-assets" xlink:label="fact-assets"/>
+    <link:footnoteArc xlink:type="arc" xlink:arcrole="http://www.xbrl.org/2003/arcrole/fact-footnote" xlink:from="fact-assets" xlink:to="fn-1"/>
+    <link:footnote xlink:type="resource" xlink:label="fn-1" xlink:role="http://www.xbrl.org/2003/role/footnote" xml:lang="en">Includes restricted cash of 12 million.</link:footnote>
+  </link:footnoteLink>
 </xbrl>
-"#;
+"##;
 
 /// A `DocLang` document in both spellings: elements named for their label, and
 /// a generic `item` carrying a `DocItemLabel` short name.

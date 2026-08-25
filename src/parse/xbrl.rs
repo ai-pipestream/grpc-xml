@@ -60,7 +60,22 @@ impl<R: BufRead> Driver<'_, R> {
                     "linkbase schemaRef recorded and not dereferenced",
                 );
             }
+            // Footnote and label linkbases are infrastructure by namespace
+            // and content by intent: a footnote is the narrative a filer
+            // attached to a number, and `xml.proto` says so. They used to be
+            // consumed with everything else.
+            let note_kind = match local {
+                "footnoteLink" => Some(pb::XbrlNoteKind::Footnote),
+                "labelLink" => Some(pb::XbrlNoteKind::Label),
+                _ => None,
+            };
             self.count_child(local, qname);
+            if let Some(kind) = note_kind {
+                self.push_frame(local, qname);
+                let result = self.read_note_link(kind);
+                self.stack.pop();
+                return result;
+            }
             self.consume_subtree()?;
             return Ok(());
         }
@@ -115,6 +130,7 @@ impl<R: BufRead> Driver<'_, R> {
             sign: attrs.get("sign").map(str::to_owned),
             path: self.path(),
             source: Some(self.source.clone()),
+            element_id: attrs.get("id").map(str::to_owned),
         };
         self.fact = Some(PendingFact {
             depth: self.stack.len(),
@@ -270,6 +286,148 @@ impl<R: BufRead> Driver<'_, R> {
                 Step::Eof => {
                     return Err(ParseError::Truncated(
                         "input ended inside an XBRL unit".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// A locator, an arc or a note, as one `link:footnoteLink` declares them.
+///
+/// The three are siblings joined by `xlink:label`: a locator names a fact,
+/// an arc joins a locator's label to a note's label, and the note carries
+/// the text. Resolving them needs all three, so the whole extended link is
+/// read before any note is emitted.
+#[derive(Default)]
+struct NoteLink {
+    /// `xlink:label` to `xlink:href`, one per `link:loc`.
+    locators: Vec<(String, String)>,
+    /// `xlink:from` to `xlink:to`, one per arc.
+    arcs: Vec<(String, String)>,
+    /// The notes themselves, in document order.
+    notes: Vec<pb::XbrlNote>,
+}
+
+/// Upper bound on elements read from one extended link.
+///
+/// An extended link is bounded by the instance it annotates in practice;
+/// this bounds it in the pathological case, where the rest is consumed.
+const MAX_NOTE_LINK_ELEMENTS: usize = 4096;
+
+impl<R: BufRead> Driver<'_, R> {
+    /// Read one `link:footnoteLink` or `link:labelLink` whole and emit a
+    /// note per `link:footnote` or `link:label` inside it.
+    ///
+    /// The arcs run from a locator to a note, so a note's targets are the
+    /// hrefs of the locators whose label is the `from` of an arc whose `to`
+    /// is the note's label. A note nothing points at is still emitted: the
+    /// text exists, and dropping it would repeat the bug this fixes.
+    pub(super) fn read_note_link(&mut self, kind: pb::XbrlNoteKind) -> Result<(), ParseError> {
+        let link = self.read_note_link_body(kind)?;
+        for mut note in link.notes {
+            note.targets = link
+                .arcs
+                .iter()
+                .filter(|(_, to)| *to == note.label)
+                .filter_map(|(from, _)| {
+                    link.locators
+                        .iter()
+                        .find(|(label, _)| label == from)
+                        .map(|(_, href)| href.clone())
+                })
+                .collect();
+            self.counts.xbrl_notes += 1;
+            self.send(pb::parse_xml_response::Event::XbrlNote(note))?;
+        }
+        Ok(())
+    }
+
+    /// Walk the extended link, collecting its locators, arcs and notes.
+    fn read_note_link_body(&mut self, kind: pb::XbrlNoteKind) -> Result<NoteLink, ParseError> {
+        let mut link = NoteLink::default();
+        let mut open: Option<(pb::XbrlNote, usize)> = None;
+        let mut depth = 1usize;
+        let mut elements = 0usize;
+        loop {
+            match self.next_step()? {
+                Step::Start {
+                    local,
+                    qname,
+                    attrs,
+                    ..
+                } => {
+                    depth += 1;
+                    elements += 1;
+                    self.counts.elements_visited += 1;
+                    if elements > MAX_NOTE_LINK_ELEMENTS {
+                        continue;
+                    }
+                    if open.is_some() {
+                        // Markup inside a note, including the XHTML the
+                        // contract says these may carry, flattens into the
+                        // note's text the way a capture flattens markup.
+                        continue;
+                    }
+                    match local.as_str() {
+                        "loc" => link.locators.push((
+                            attrs.get("label").unwrap_or_default().to_owned(),
+                            attrs.get("href").unwrap_or_default().to_owned(),
+                        )),
+                        "footnoteArc" | "labelArc" => link.arcs.push((
+                            attrs.get("from").unwrap_or_default().to_owned(),
+                            attrs.get("to").unwrap_or_default().to_owned(),
+                        )),
+                        "footnote" | "label" => {
+                            self.push_frame(&local, &qname);
+                            let note = pb::XbrlNote {
+                                kind: kind as i32,
+                                label: attrs.get("label").unwrap_or_default().to_owned(),
+                                role: attrs.get("role").map(str::to_owned),
+                                language: attrs.get("lang").map(str::to_owned),
+                                targets: Vec::new(),
+                                text: String::new(),
+                                path: self.path(),
+                                source: Some(self.source.clone()),
+                            };
+                            self.stack.pop();
+                            open = Some((note, depth));
+                        }
+                        _ => {}
+                    }
+                }
+                Step::End => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(link);
+                    }
+                    if let Some((_, note_depth)) = open.as_ref()
+                        && depth < *note_depth
+                        && let Some((mut note, _)) = open.take()
+                    {
+                        note.text = collapse(&note.text);
+                        link.notes.push(note);
+                    }
+                }
+                Step::Text(chunk) => {
+                    if let Some((note, _)) = open.as_mut() {
+                        note.text.push_str(&chunk);
+                    }
+                }
+                Step::GeneralRef { resolved, .. } => {
+                    if let (Some(resolved), Some((note, _))) = (resolved, open.as_mut()) {
+                        note.text.push_str(&resolved);
+                    }
+                }
+                Step::Ignorable => {}
+                Step::Declaration { .. } | Step::DocType(_) => {
+                    return Err(ParseError::Malformed(
+                        "a declaration inside an element".to_owned(),
+                    ));
+                }
+                Step::Eof => {
+                    return Err(ParseError::Truncated(
+                        "input ended inside an XBRL linkbase".to_owned(),
                     ));
                 }
             }

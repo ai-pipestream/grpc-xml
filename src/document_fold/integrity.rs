@@ -113,6 +113,15 @@ impl Walk {
                 table.parent.as_ref(),
             );
         }
+        for (index, item) in document.key_value_items.iter().enumerate() {
+            let expected = format!("#/key_value_items/{index}");
+            self.item(
+                &item.self_ref,
+                &expected,
+                &item.children,
+                item.parent.as_ref(),
+            );
+        }
     }
 
     /// One item: its ref must be present, unique and exactly its position.
@@ -169,6 +178,22 @@ impl Walk {
             {
                 self.errors
                     .push(format!("parent {parent} does not list {child} as a child"));
+            }
+        }
+        // A cell may point at an item of its own, which is only a merge
+        // contract if it resolves.
+        let cell_refs = document
+            .tables
+            .iter()
+            .flat_map(|table| table.data.iter())
+            .flat_map(|data| data.table_cells.iter())
+            .filter_map(|cell| cell.r#ref.as_ref());
+        for target in cell_refs {
+            if !self.refs.contains(&target.r#ref) {
+                self.errors.push(format!(
+                    "table cell reference {} does not resolve",
+                    target.r#ref
+                ));
             }
         }
         let captions = document
