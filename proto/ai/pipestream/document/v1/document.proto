@@ -653,6 +653,10 @@ message Formatting {
   Script script = 5;
   // Raw script string (fallback for unknown enum values).
   optional string script_raw = 6;
+  // Styles beyond the upstream dialect's set; its renderers ignore them.
+  bool monospace = 7;
+  bool small_caps = 8;
+  bool math = 9;
 }
 
 // BaseTextItem is a union type representing any text-based item in the document.
@@ -1348,6 +1352,17 @@ message InlineSpan {
   // date, a cross-reference), so resolved field text stays distinguishable
   // from authored text.
   optional string field_code = 9;
+  // What the span's target is, when the source distinguishes.
+  optional ReferenceKind reference_kind = 10;
+}
+
+// ReferenceKind names what an inline reference points at.
+enum ReferenceKind {
+  REFERENCE_KIND_UNSPECIFIED = 0;
+  REFERENCE_KIND_CITATION = 1;
+  REFERENCE_KIND_FOOTNOTE = 2;
+  REFERENCE_KIND_CLAIM = 3;
+  REFERENCE_KIND_SECTION = 4;
 }
 
 // DocumentMeta carries the metadata the source declares about itself.
@@ -1368,9 +1383,68 @@ message DocumentMeta {
   optional string schema_location = 8;
   optional string created_raw = 9;
   optional string modified_raw = 10;
+  // Source-scoped identifiers (a DOI, a PMID, an ISSN), each typed.
+  repeated Identifier identifiers = 11;
+  // Classification codes the source carries (CPC, IPC, subject schemes).
+  repeated Classification classifications = 12;
+  optional LicenseMeta license = 13;
+  repeated FundingAward funding = 14;
+  // Namespace bindings and schema locations an XML source declares.
+  repeated NamespaceBinding namespaces = 15;
+  repeated SchemaLocation schema_locations = 16;
+  // Civil twins for sources that state a date without an instant (a
+  // publication year and month); the Timestamp fields stay unset then.
+  optional CivilDateTime created_civil = 17;
+  optional CivilDateTime modified_civil = 18;
   // Source metadata that is genuinely open vocabulary. Data whose shape the
   // fleet knows gets a typed field, never an entry here.
   map<string, string> extra = 100;
+}
+
+// Identifier is one source-scoped identifier.
+message Identifier {
+  // The identifier scheme (doi, pmid, issn, publisher-id).
+  string kind = 1;
+  string value = 2;
+  // The scope the source attaches (electronic vs print ISSN).
+  optional string scope = 3;
+}
+
+// Classification is one classification code the source declares.
+message Classification {
+  string scheme = 1;
+  string code = 2;
+  optional string edition = 3;
+  optional string office = 4;
+}
+
+// LicenseMeta carries the source's own license and copyright statement.
+message LicenseMeta {
+  optional string type_uri = 1;
+  optional string statement = 2;
+  optional string copyright_statement = 3;
+  optional int32 copyright_year = 4;
+  optional string copyright_holder = 5;
+}
+
+// FundingAward is one funding statement the source records.
+message FundingAward {
+  optional string funder = 1;
+  optional string award_id = 2;
+  optional string statement = 3;
+}
+
+// NamespaceBinding is one prefix-to-URI binding an XML source declares.
+message NamespaceBinding {
+  string prefix = 1;
+  string uri = 2;
+}
+
+// SchemaLocation is one namespace-to-location pair from a schema
+// declaration.
+message SchemaLocation {
+  string namespace = 1;
+  string location = 2;
 }
 
 // CellValue is a table cell's typed value; the cell's `text` stays the
