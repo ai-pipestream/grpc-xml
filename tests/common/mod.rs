@@ -371,7 +371,11 @@ pub fn warned(events: &[pb::ParseXmlResponse], code: pb::WarningCode) -> bool {
 pub const JATS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/"
          xmlns:xlink="http://www.w3.org/1999/xlink"
-         article-type="research-article">
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://jats.nlm.nih.gov/ns/archiving/1.3/ JATS-archivearticle1.xsd"
+         xml:lang="en"
+         article-type="research-article"
+         dtd-version="1.3">
   <front>
     <journal-meta>
       <journal-title>Journal of Streaming Parsers</journal-title>

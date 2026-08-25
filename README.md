@@ -103,7 +103,7 @@ exactly one `status` last.
 
 | Event | Carries |
 |---|---|
-| `info` | `XmlInfo`: resolved dialect and the evidence for it, root namespace and name, DOCTYPE identifiers, encoding |
+| `info` | `XmlInfo`: resolved dialect and the evidence for it, root namespace and name, DOCTYPE identifiers, encoding, the root element's own attributes, its namespace bindings, its `xsi:schemaLocation` pairs and its `xml:lang` |
 | `text_item` | One unit of text: title, heading, paragraph, list item, caption, reference, author, patent claim. `label` is structural, `role` is the dialect's own vocabulary. `spans` carries its inline runs when `emit_inline_spans` is set |
 | `table_start` / `table_row` / `table_end` | A table, streamed a row at a time as each row's end tag is read |
 | `fact` | One XBRL fact with its context and unit resolved inline |

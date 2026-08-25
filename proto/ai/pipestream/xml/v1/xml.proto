@@ -172,6 +172,54 @@ message XmlInfo {
 
   // Version named in the XML declaration, for example `1.0`.
   optional string xml_version = 10;
+
+  // Every attribute of the root element except its namespace declarations,
+  // as written. The root never becomes a `TextItem`, so this is the only
+  // place JATS `@article-type` and `@dtd-version`, USPTO `@lang`,
+  // `@country` and `@date-produced`, and METS `@PROFILE` reach the wire.
+  // Unlike `TextItem.attributes` these do not wait for
+  // `ParseOptions.include_attributes`: there is no item to attach them to.
+  repeated Attribute root_attributes = 11;
+
+  // Prefix-to-URI bindings declared on the root element. `TextItem.path` is
+  // written in qualified names, so without these a path is not portably
+  // resolvable and two documents that bind the same prefix to different
+  // URIs are indistinguishable.
+  repeated NamespaceBinding namespaces = 12;
+
+  // Schema documents the root associates with the instance, decoded from
+  // `xsi:schemaLocation` and `xsi:noNamespaceSchemaLocation`. This is the
+  // modern schema-identification signal, the counterpart to the DOCTYPE
+  // public and system identifiers above. Recorded, never dereferenced.
+  repeated SchemaLocation schema_locations = 13;
+
+  // Value of the root element's `xml:lang`, when it declares one.
+  optional string language = 14;
+}
+
+// NamespaceBinding is one namespace declaration, as the document wrote it.
+message NamespaceBinding {
+  // Prefix being bound. Empty for the default declaration (`xmlns=`).
+  string prefix = 1;
+
+  // Namespace URI the prefix binds to. Empty undeclares the prefix.
+  string uri = 2;
+}
+
+// SchemaLocation is one namespace-to-schema-document pair.
+//
+// `xsi:schemaLocation` writes these as a whitespace-separated sequence of
+// alternating namespaces and locations; they are decoded into pairs here so
+// a consumer does not have to re-split a string that has two meanings.
+message SchemaLocation {
+  // Namespace URI the schema document describes. Empty when the pair came
+  // from `xsi:noNamespaceSchemaLocation`, which names a schema for
+  // unqualified content.
+  string namespace = 1;
+
+  // Location of the schema document, as written. This server performs no
+  // schema retrieval of any kind, so the value is inert.
+  string location = 2;
 }
 
 // DialectEvidence names the signal that resolved the dialect.

@@ -91,6 +91,16 @@ the nesting now says the same thing. Content that arrives before the first
 heading sits on `#/body`. **No section `GroupItem`s**: the levels come from
 the parser rather than from tag names, so there is nothing to fill.
 
+**Source metadata.** `Document.source_meta` carries what the document
+declares about itself in typed slots: `title` from the `TITLE` item,
+`language` from the root `xml:lang`, `keywords` from `role = "keyword"`
+items, `authors` from `role = "author" | "contributor" | "inventor"`. The
+abstract becomes `body.meta.summary`, quoted rather than generated. It is
+attached only when the source said something, because an all-default
+message would claim an empty declaration rather than an absent one. The
+root's `xsi:schemaLocation` pairs and its namespace bindings have no typed
+slot in this schema yet and stay on `XmlInfo`.
+
 **Identity.** `schema_name` is set from the `SCHEMA_NAME` constant in
 `src/document_fold.rs`, the upstream v2 document schema identifier this
 plane stays compatible with. `origin.mimetype = "application/xml"`, `name`

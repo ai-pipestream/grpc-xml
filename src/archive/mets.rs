@@ -16,6 +16,7 @@ use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
 
 use super::{NS_METS, budget_for, read_inflated, stream_error};
+use crate::dialect::Attrs;
 use crate::parse::{self, EmitFn, InputStats, ParseConfig, ParseError, collapse};
 use crate::proto::v1 as pb;
 use crate::security;
@@ -246,6 +247,12 @@ struct Manifest {
     encoding: Option<String>,
     root_namespace: String,
     root_local_name: String,
+    /// The `mets:mets` element's own attributes: `PROFILE`, `LABEL`, `TYPE`
+    /// and whatever else the export stamps on its manifest.
+    root_attributes: Vec<pb::Attribute>,
+    namespaces: Vec<pb::NamespaceBinding>,
+    schema_locations: Vec<pb::SchemaLocation>,
+    language: Option<String>,
     pages: BTreeMap<u32, PageFiles>,
     elements_visited: u64,
 }
@@ -272,6 +279,11 @@ impl ManifestWalk {
         if manifest.root_local_name.is_empty() {
             manifest.root_local_name.clone_from(&local);
             NS_METS.clone_into(&mut manifest.root_namespace);
+            let attrs = attrs_of(start);
+            manifest.root_attributes = parse::root_attributes(&attrs);
+            manifest.namespaces = parse::namespace_bindings(&attrs);
+            manifest.schema_locations = parse::schema_locations(&attrs);
+            manifest.language = attrs.get("lang").map(str::to_owned);
         }
         match local.as_str() {
             "fileGrp" => {
@@ -391,6 +403,10 @@ impl MetsDriver<'_> {
             title: None,
             encoding: manifest.encoding.clone(),
             xml_version: manifest.xml_version.clone(),
+            root_attributes: manifest.root_attributes.clone(),
+            namespaces: manifest.namespaces.clone(),
+            schema_locations: manifest.schema_locations.clone(),
+            language: manifest.language.clone(),
         };
         self.send(pb::parse_xml_response::Event::Info(info))?;
 
@@ -691,6 +707,17 @@ fn member_by_href<'a>(members: &'a BTreeMap<String, Vec<u8>>, href: &str) -> Opt
         .iter()
         .find(|(name, _)| name.ends_with(&suffix))
         .map(|(_, bytes)| bytes.as_slice())
+}
+
+/// A start tag's attributes in the shape the shared decoders expect.
+fn attrs_of(start: &quick_xml::events::BytesStart<'_>) -> Attrs {
+    Attrs(
+        start
+            .attributes()
+            .filter_map(Result::ok)
+            .map(|a| (a.key.as_ref().to_owned(), a.value.as_ref().to_owned()))
+            .collect(),
+    )
 }
 
 /// An attribute's value by local name, as written. hOCR and METS both

@@ -94,7 +94,7 @@ impl<R: BufRead> Driver<'_, R> {
                     namespace,
                     local,
                     qname,
-                    attrs: _,
+                    attrs,
                 } => {
                     let signals = Signals {
                         root_namespace: namespace.clone(),
@@ -131,6 +131,10 @@ impl<R: BufRead> Driver<'_, R> {
                         title: None,
                         encoding,
                         xml_version: version,
+                        root_attributes: root_attributes(&attrs),
+                        namespaces: namespace_bindings(&attrs),
+                        schema_locations: schema_locations(&attrs),
+                        language: attrs.get("lang").map(str::to_owned),
                     };
                     self.send(pb::parse_xml_response::Event::Info(info))?;
                     return Ok(());
@@ -816,4 +820,72 @@ impl<R: BufRead> Driver<'_, R> {
         };
         self.send(pb::parse_xml_response::Event::Status(status))
     }
+}
+
+/// Every attribute of the root element except its namespace declarations.
+///
+/// The root never becomes an item, so `reportable_attributes` never sees it
+/// and `ParseOptions.include_attributes` cannot reach it. These are carried
+/// unconditionally instead: there is one root element per document, and the
+/// attributes on it are the document's own statement about itself.
+pub(crate) fn root_attributes(attrs: &Attrs) -> Vec<pb::Attribute> {
+    attrs
+        .0
+        .iter()
+        .filter(|(key, _)| key != "xmlns" && !key.starts_with("xmlns:"))
+        .map(|(name, value)| pb::Attribute {
+            name: name.clone(),
+            value: value.clone(),
+        })
+        .collect()
+}
+
+/// The namespace declarations of the root element, decoded into bindings.
+///
+/// These are filtered out of every item's attributes as "not content", which
+/// is true and is also why a `TextItem.path` written in qualified names had
+/// nothing to resolve those names against.
+pub(crate) fn namespace_bindings(attrs: &Attrs) -> Vec<pb::NamespaceBinding> {
+    attrs
+        .0
+        .iter()
+        .filter_map(|(key, value)| {
+            let prefix = if key == "xmlns" {
+                ""
+            } else {
+                key.strip_prefix("xmlns:")?
+            };
+            Some(pb::NamespaceBinding {
+                prefix: prefix.to_owned(),
+                uri: value.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The schema documents the root associates with the instance.
+///
+/// `xsi:schemaLocation` is a whitespace-separated sequence of alternating
+/// namespace URIs and locations; a trailing namespace with no location is
+/// malformed and is dropped rather than paired with an empty string.
+/// `xsi:noNamespaceSchemaLocation` is a bare location for unqualified
+/// content, which is the empty-namespace pair.
+pub(crate) fn schema_locations(attrs: &Attrs) -> Vec<pb::SchemaLocation> {
+    let mut locations = Vec::new();
+    if let Some(raw) = attrs.get("schemaLocation") {
+        let mut tokens = raw.split_whitespace();
+        while let (Some(namespace), Some(location)) = (tokens.next(), tokens.next()) {
+            locations.push(pb::SchemaLocation {
+                namespace: namespace.to_owned(),
+                location: location.to_owned(),
+            });
+        }
+    }
+    if let Some(location) = attrs.get("noNamespaceSchemaLocation") {
+        locations.push(pb::SchemaLocation {
+            namespace: String::new(),
+            location: location.to_owned(),
+        });
+    }
+    locations
 }

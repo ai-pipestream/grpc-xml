@@ -70,6 +70,10 @@ const BODY_REF: &str = "#/body";
 /// no page chrome to put there.
 const FURNITURE_REF: &str = "#/furniture";
 
+/// `SummaryMetaField.created_by` for a summary the document wrote itself.
+/// Nothing here generates a summary; an abstract is quoted, not produced.
+const SUMMARY_CREATED_BY: &str = "source";
+
 /// Column headings of the XBRL fact table, in order.
 const FACT_COLUMNS: [&str; 6] = ["concept", "context", "period", "unit", "value", "decimals"];
 
@@ -97,6 +101,11 @@ pub struct DocumentFold {
     /// first-writer-wins order. It becomes `Document.anchors`, and it is what
     /// turns a cross-reference into a resolved `FineRef`.
     anchors: BTreeMap<String, String>,
+    /// What the document says about itself, gathered as the items that carry
+    /// it stream past. Published as `Document.source_meta`.
+    source_meta: doc::DocumentMeta,
+    /// Abstract paragraphs in document order, for the body's summary.
+    summary: Vec<String>,
 }
 
 /// A table being assembled from `table_start` / `table_row` / `table_end`.
@@ -146,6 +155,8 @@ impl DocumentFold {
             headings: Vec::new(),
             islands_skipped: 0,
             anchors: BTreeMap::new(),
+            source_meta: doc::DocumentMeta::default(),
+            summary: Vec::new(),
         }
     }
 
@@ -197,11 +208,65 @@ impl DocumentFold {
             }
         }
         self.publish_anchors();
+        self.publish_source_meta();
         self.islands_skipped = 0;
         self.facts_table = None;
         self.headings.clear();
         self.anchors.clear();
+        self.source_meta = doc::DocumentMeta::default();
+        self.summary.clear();
         std::mem::replace(&mut self.document, Self::new().document)
+    }
+
+    // ----------------------------------------------------------- source meta
+
+    /// Publish what the document declared about itself.
+    ///
+    /// `DocumentMeta` is only attached when the source actually said
+    /// something: an all-default message would claim the document declared
+    /// an empty title and no language, which is not what an absent
+    /// declaration means.
+    fn publish_source_meta(&mut self) {
+        let meta = std::mem::take(&mut self.source_meta);
+        if meta != doc::DocumentMeta::default() {
+            self.document.source_meta = Some(meta);
+        }
+        if self.summary.is_empty() {
+            return;
+        }
+        let text = self.summary.join(" ");
+        if let Some(body) = self.document.body.as_mut() {
+            body.meta.get_or_insert_default().summary = Some(doc::SummaryMetaField {
+                text,
+                // The abstract is the document's own summary, quoted rather
+                // than generated, so there is no confidence to claim and the
+                // creator is the source.
+                confidence: None,
+                created_by: Some(SUMMARY_CREATED_BY.to_owned()),
+                ..doc::SummaryMetaField::default()
+            });
+        }
+    }
+
+    /// Route an item that carries document-level metadata into the typed
+    /// slots the Document plane already has for it.
+    ///
+    /// The role vocabulary is the source's own, so the match is on what the
+    /// dialects actually emit rather than on a normalized set.
+    fn collect_source_meta(&mut self, item: &pb::TextItem, label: pb::XmlItemLabel) {
+        if label == pb::XmlItemLabel::Title && self.source_meta.title.is_none() {
+            self.source_meta.title = Some(item.text.clone());
+        }
+        match item.role.as_str() {
+            "keyword" => self.source_meta.keywords.push(item.text.clone()),
+            // JATS writes the contributor's kind into `contrib-type`, which
+            // becomes the role verbatim; USPTO names the role in the element.
+            "author" | "contributor" | "inventor" => {
+                self.source_meta.authors.push(item.text.clone());
+            }
+            "abstract" => self.summary.push(item.text.clone()),
+            _ => {}
+        }
     }
 
     // --------------------------------------------------------------- anchors
@@ -270,6 +335,9 @@ impl DocumentFold {
         }
         if let Some(title) = info.title.as_ref().filter(|t| !t.is_empty()) {
             self.document.name.clone_from(title);
+        }
+        if let Some(language) = info.language.as_ref().filter(|l| !l.is_empty()) {
+            self.source_meta.language = Some(language.clone());
         }
         let mut fields = BTreeMap::new();
         fields.insert("xml.dialect", string(model));
@@ -373,6 +441,7 @@ impl DocumentFold {
             item: Some(variant),
         });
         self.claim_anchor(item.element_id.as_ref(), &self_ref);
+        self.collect_source_meta(item, label);
         self.link_child(&parent, &self_ref);
         if label == pb::XmlItemLabel::SectionHeader {
             self.headings.push((level, self_ref.clone()));

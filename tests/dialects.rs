@@ -356,6 +356,84 @@ async fn attributes_are_off_by_default_and_exclude_namespace_declarations() {
     );
 }
 
+#[tokio::test]
+async fn the_root_element_attributes_reach_the_wire_without_being_asked_for() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, options()).await;
+    let info = info(&events);
+    let attrs: Vec<(&str, &str)> = info
+        .root_attributes
+        .iter()
+        .map(|a| (a.name.as_str(), a.value.as_str()))
+        .collect();
+    assert!(
+        attrs.contains(&("article-type", "research-article")),
+        "{attrs:?}"
+    );
+    assert!(attrs.contains(&("dtd-version", "1.3")), "{attrs:?}");
+    assert!(
+        attrs.iter().all(|(name, _)| !name.starts_with("xmlns")),
+        "namespace declarations are bindings, not attributes: {attrs:?}"
+    );
+    assert_eq!(info.language.as_deref(), Some("en"));
+}
+
+#[tokio::test]
+async fn the_modern_schema_signal_is_decoded_into_pairs() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, options()).await;
+    let locations: Vec<(&str, &str)> = info(&events)
+        .schema_locations
+        .iter()
+        .map(|l| (l.namespace.as_str(), l.location.as_str()))
+        .collect();
+    assert_eq!(
+        locations,
+        [(
+            "http://jats.nlm.nih.gov/ns/archiving/1.3/",
+            "JATS-archivearticle1.xsd"
+        )],
+        "xsi:schemaLocation is alternating namespaces and locations, not one string"
+    );
+}
+
+#[tokio::test]
+async fn namespace_bindings_make_a_prefixed_path_resolvable() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, options()).await;
+    let bindings: Vec<(&str, &str)> = info(&events)
+        .namespaces
+        .iter()
+        .map(|n| (n.prefix.as_str(), n.uri.as_str()))
+        .collect();
+    assert!(
+        bindings.contains(&("", "http://jats.nlm.nih.gov/ns/archiving/1.3/")),
+        "the default binding is the one with the empty prefix: {bindings:?}"
+    );
+    assert!(
+        bindings.contains(&("xlink", "http://www.w3.org/1999/xlink")),
+        "{bindings:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_schema_location_drops_the_unpaired_tail() {
+    // An odd token count means the last namespace names no document; a
+    // fabricated empty location would be worse than reporting nothing.
+    let article = JATS.replace(
+        r#"xsi:schemaLocation="http://jats.nlm.nih.gov/ns/archiving/1.3/ JATS-archivearticle1.xsd""#,
+        r#"xsi:schemaLocation="urn:a a.xsd urn:b""#,
+    );
+    let client = client().await;
+    let events = parse_ok(&client, &article, options()).await;
+    let locations: Vec<(&str, &str)> = info(&events)
+        .schema_locations
+        .iter()
+        .map(|l| (l.namespace.as_str(), l.location.as_str()))
+        .collect();
+    assert_eq!(locations, [("urn:a", "a.xsd")]);
+}
+
 // ------------------------------------------------------------------ USPTO
 
 #[tokio::test]

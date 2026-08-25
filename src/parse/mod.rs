@@ -34,6 +34,7 @@ mod island;
 mod table;
 mod xbrl;
 
+pub(crate) use driver::{namespace_bindings, root_attributes, schema_locations};
 pub(crate) use encoding::decoding_reader;
 
 use island::Island;

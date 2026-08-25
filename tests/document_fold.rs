@@ -1088,3 +1088,56 @@ fn the_default_fold_carries_no_spans_and_no_targets() {
         "spans follow the option that produced them"
     );
 }
+
+// --------------------------------------------------------------- source meta
+
+#[test]
+fn the_document_metadata_lands_in_typed_slots() {
+    let (_, document) = fold_default(JATS);
+    let meta = document
+        .source_meta
+        .as_ref()
+        .expect("the article declares metadata about itself");
+    assert_eq!(meta.title.as_deref(), Some("Streaming XML Without a DOM"));
+    assert_eq!(
+        meta.language.as_deref(),
+        Some("en"),
+        "xml:lang on the root is the document's language"
+    );
+    assert_eq!(meta.keywords, ["streaming", "xml"]);
+    assert_eq!(meta.authors, ["Rivera Ana", "Okafor Chidi"]);
+}
+
+#[test]
+fn the_abstract_becomes_the_body_summary() {
+    let (_, document) = fold_default(JATS);
+    let summary = document
+        .body
+        .as_ref()
+        .and_then(|body| body.meta.as_ref())
+        .and_then(|meta| meta.summary.as_ref())
+        .expect("an abstract is a summary the document wrote itself");
+    assert_eq!(
+        summary.text,
+        "A collector need not build a tree to produce a document."
+    );
+    assert!(
+        summary.confidence.is_none(),
+        "a quoted abstract has no confidence to claim"
+    );
+}
+
+#[test]
+fn a_document_that_declares_nothing_about_itself_carries_no_metadata() {
+    let bare = r#"<?xml version="1.0"?>
+<xbrl xmlns="http://www.xbrl.org/2003/instance">
+  <context id="c"><entity><identifier scheme="s">e</identifier></entity>
+  <period><instant>2026-01-01</instant></period></context>
+</xbrl>
+"#;
+    let (_, document) = fold_default(bare);
+    assert!(
+        document.source_meta.is_none(),
+        "an absent declaration is not an empty one"
+    );
+}
