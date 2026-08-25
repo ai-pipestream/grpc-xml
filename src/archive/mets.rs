@@ -483,6 +483,9 @@ impl MetsDriver<'_> {
                 element_id: line.element_id,
                 attributes: line.attributes,
                 source: Some(source),
+                // hOCR marks words and their boxes, not emphasis: an OCR
+                // line has no inline markup to record.
+                spans: Vec::new(),
             };
             self.counts.text_items += 1;
             self.send(pb::parse_xml_response::Event::TextItem(item))?;

@@ -93,6 +93,10 @@ pub struct DocumentFold {
     headings: Vec<(u32, String)>,
     /// `html_island` events seen and not mapped.
     islands_skipped: u64,
+    /// Every source identifier this fold has given an item a home for, in
+    /// first-writer-wins order. It becomes `Document.anchors`, and it is what
+    /// turns a cross-reference into a resolved `FineRef`.
+    anchors: BTreeMap<String, String>,
 }
 
 /// A table being assembled from `table_start` / `table_row` / `table_end`.
@@ -141,6 +145,7 @@ impl DocumentFold {
             facts_table: None,
             headings: Vec::new(),
             islands_skipped: 0,
+            anchors: BTreeMap::new(),
         }
     }
 
@@ -191,10 +196,59 @@ impl DocumentFold {
                     .insert("xml.html_islands".to_owned(), number(count));
             }
         }
+        self.publish_anchors();
         self.islands_skipped = 0;
         self.facts_table = None;
         self.headings.clear();
+        self.anchors.clear();
         std::mem::replace(&mut self.document, Self::new().document)
+    }
+
+    // --------------------------------------------------------------- anchors
+
+    /// Publish the source identifiers as `Document.anchors`, then upgrade
+    /// every cross-reference that names one to point at the item itself.
+    ///
+    /// Resolution has to wait for the end of the stream because references
+    /// run both ways: a citation names an entry of the reference list, which
+    /// arrives long after the sentence citing it. Until then a span's target
+    /// is the source name written as `#<id>`, which stays as it is for an
+    /// identifier the document never defines. Item refs begin `#/`, which no
+    /// XML name can, so the two never collide.
+    fn publish_anchors(&mut self) {
+        self.document.anchors = self
+            .anchors
+            .iter()
+            .map(|(name, self_ref)| doc::NamedAnchor {
+                name: name.clone(),
+                target: Some(fine(self_ref)),
+            })
+            .collect();
+        for item in &mut self.document.texts {
+            let Some(base) = base_of(item) else { continue };
+            for span in &mut base.spans {
+                let Some(target) = span.target.as_mut() else {
+                    continue;
+                };
+                if let Some(name) = target.r#ref.strip_prefix('#')
+                    && let Some(self_ref) = self.anchors.get(name)
+                {
+                    target.r#ref.clone_from(self_ref);
+                }
+            }
+        }
+    }
+
+    /// Remember that an item answers to a source identifier. The first item
+    /// to claim a name keeps it, matching how a conformant document declares
+    /// each identifier once.
+    fn claim_anchor(&mut self, element_id: Option<&String>, self_ref: &str) {
+        let Some(id) = element_id.filter(|id| !id.is_empty()) else {
+            return;
+        };
+        self.anchors
+            .entry(id.clone())
+            .or_insert_with(|| self_ref.to_owned());
     }
 
     // ------------------------------------------------------------------ info
@@ -284,6 +338,7 @@ impl DocumentFold {
                 orig: item.text.clone(),
                 text: item.text.clone(),
                 source: vec![source],
+                spans: inline_spans(&item.spans),
                 ..doc::TextItemBase::default()
             };
             match label {
@@ -317,6 +372,7 @@ impl DocumentFold {
         self.document.texts.push(doc::BaseTextItem {
             item: Some(variant),
         });
+        self.claim_anchor(item.element_id.as_ref(), &self_ref);
         self.link_child(&parent, &self_ref);
         if label == pb::XmlItemLabel::SectionHeader {
             self.headings.push((level, self_ref.clone()));
@@ -372,6 +428,7 @@ impl DocumentFold {
             source: vec![source],
             ..doc::PictureItem::default()
         });
+        self.claim_anchor(item.element_id.as_ref(), &self_ref);
         self.link_child(&parent, &self_ref);
     }
 
@@ -502,11 +559,20 @@ impl DocumentFold {
             ..doc::TableData::default()
         });
         let self_ref = item.self_ref.clone();
+        let element_id = item
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.custom_fields.get("xml.element_id"))
+            .and_then(|value| match value.kind.as_ref() {
+                Some(Kind::StringValue(id)) => Some(id.clone()),
+                _ => None,
+            });
         let parent = item
             .parent
             .as_ref()
             .map_or_else(|| BODY_REF.to_owned(), |parent| parent.r#ref.clone());
         self.document.tables.push(item);
+        self.claim_anchor(element_id.as_ref(), &self_ref);
         self.link_child(&parent, &self_ref);
     }
 
@@ -669,6 +735,99 @@ impl DocumentFold {
     }
 }
 
+/// The `TextItemBase` of an arena item, for the variants that carry one.
+///
+/// `CodeItem` inlines its base fields instead of wrapping them, and has no
+/// `spans` slot at all: a code block is verbatim, so it has no inline runs.
+fn base_of(item: &mut doc::BaseTextItem) -> Option<&mut doc::TextItemBase> {
+    match item.item.as_mut()? {
+        doc::base_text_item::Item::Title(item) => item.base.as_mut(),
+        doc::base_text_item::Item::SectionHeader(item) => item.base.as_mut(),
+        doc::base_text_item::Item::ListItem(item) => item.base.as_mut(),
+        doc::base_text_item::Item::Formula(item) => item.base.as_mut(),
+        doc::base_text_item::Item::Text(item) => item.base.as_mut(),
+        doc::base_text_item::Item::FieldHeading(item) => item.base.as_mut(),
+        doc::base_text_item::Item::FieldValue(item) => item.base.as_mut(),
+        doc::base_text_item::Item::Code(_) => None,
+    }
+}
+
+/// The Document-plane runs for one wire item's inline spans.
+///
+/// A reference that names several targets becomes one span per target over
+/// the same range, because `InlineSpan.target` holds one `FineRef`: the
+/// alternative would be joining identifiers into a string, which is exactly
+/// the shape the reference graph is supposed to escape. Targets are written
+/// as the source name (`#B12`) and resolved onto item refs when the stream
+/// ends; see [`DocumentFold::publish_anchors`].
+fn inline_spans(spans: &[pb::InlineSpan]) -> Vec<doc::InlineSpan> {
+    let mut folded = Vec::new();
+    for span in spans {
+        let Some(range) = span.range.as_ref() else {
+            continue;
+        };
+        let charspan = doc::IntSpan {
+            start: int(range.start),
+            end: int(range.end),
+        };
+        let formatting = formatting_of(&span.styles);
+        let hyperlink = span.hyperlink.clone().filter(|link| !link.is_empty());
+        if span.references.is_empty() {
+            if formatting.is_none() && hyperlink.is_none() {
+                // A run that says nothing the flat text does not already say.
+                continue;
+            }
+            folded.push(doc::InlineSpan {
+                range: Some(charspan),
+                formatting,
+                hyperlink,
+                ..doc::InlineSpan::default()
+            });
+            continue;
+        }
+        for name in &span.references {
+            folded.push(doc::InlineSpan {
+                range: Some(charspan),
+                formatting: formatting.clone(),
+                hyperlink: hyperlink.clone(),
+                target: Some(fine(&format!("#{name}"))),
+                ..doc::InlineSpan::default()
+            });
+        }
+    }
+    folded
+}
+
+/// The Document plane's `Formatting` for a run's styles, or `None` when the
+/// source said nothing this schema can express.
+///
+/// `Formatting` models weight, slant, decoration and vertical position.
+/// Monospace, small capitals and mathematical notation have no field here
+/// and are carried on the typed wire only.
+fn formatting_of(styles: &[i32]) -> Option<doc::Formatting> {
+    let mut formatting = doc::Formatting::default();
+    let mut expressed = false;
+    for style in styles
+        .iter()
+        .filter_map(|s| pb::SpanStyle::try_from(*s).ok())
+    {
+        match style {
+            pb::SpanStyle::Bold => formatting.bold = true,
+            pb::SpanStyle::Italic => formatting.italic = true,
+            pb::SpanStyle::Underline => formatting.underline = true,
+            pb::SpanStyle::Strikethrough => formatting.strikethrough = true,
+            pb::SpanStyle::Superscript => formatting.script = doc::Script::Super as i32,
+            pb::SpanStyle::Subscript => formatting.script = doc::Script::Sub as i32,
+            pb::SpanStyle::Unspecified
+            | pb::SpanStyle::Monospace
+            | pb::SpanStyle::SmallCaps
+            | pb::SpanStyle::Math => continue,
+        }
+        expressed = true;
+    }
+    expressed.then_some(formatting)
+}
+
 /// Per-item `meta.custom_fields`: everything the wire item says that the
 /// Document plane has no typed slot for.
 fn text_fields(item: &pb::TextItem) -> HashMap<String, Value> {
@@ -808,6 +967,15 @@ fn group(self_ref: &str, layer: doc::ContentLayer) -> doc::GroupItem {
         self_ref: self_ref.to_owned(),
         content_layer: layer as i32,
         ..doc::GroupItem::default()
+    }
+}
+
+/// A JSON-Pointer reference to another item, refined to a sub-range only
+/// when the caller has one; none of these do.
+fn fine(target: &str) -> doc::FineRef {
+    doc::FineRef {
+        r#ref: target.to_owned(),
+        range: None,
     }
 }
 

@@ -188,6 +188,7 @@ impl XmlParseService for XmlGrpc {
         let config = ParseConfig {
             dialect: Dialect::from_proto(dialect),
             emit_html_islands: options.emit_html_islands,
+            emit_inline_spans: options.emit_inline_spans,
             include_attributes: options.include_attributes,
             taxonomy_supplied: !options.taxonomy.is_empty(),
         };

@@ -49,17 +49,33 @@ use xbrl::PendingFact;
 /// the same bound to its own warning map.
 pub(crate) const MAX_WARNING_KINDS: usize = 64;
 
+/// Upper bound on inline runs recorded inside one captured element.
+///
+/// The runs are recorded while the capture is open, so a paragraph made of a
+/// million empty `<b/>` elements would otherwise be unbounded memory for one
+/// item. Real prose is orders of magnitude below this; past it the driver
+/// keeps flattening and stops recording.
+pub(crate) const MAX_INLINE_SPANS: usize = 512;
+
 /// Consumer of parse events; returns `false` when the client is gone and the
 /// parse should stop.
 pub type EmitFn<'a> = &'a mut dyn FnMut(pb::ParseXmlResponse) -> bool;
 
 /// Settings for one parse.
+///
+/// The switches are independent request options that mirror `ParseOptions`
+/// field for field, so they stay separate booleans rather than collapsing
+/// into a mode enum: a caller may set any subset, and the proto is where
+/// their meaning is documented.
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ParseConfig {
     /// Dialect the caller asked for, or `None` to sniff.
     pub dialect: Option<Dialect>,
     /// Emit XHTML subtrees as islands instead of flattening them.
     pub emit_html_islands: bool,
+    /// Record the inline markup inside captured elements as spans.
+    pub emit_inline_spans: bool,
     /// Attach unconsumed source attributes to every item.
     pub include_attributes: bool,
     /// True when the caller sent taxonomy bytes, which v1 does not use.
@@ -296,9 +312,14 @@ struct Capture {
     depth: usize,
     spec: dialect::Capture,
     text: String,
+    /// Code points appended to `text` so far, kept alongside it so a span
+    /// boundary costs a read rather than a walk of the whole string.
+    chars: usize,
     path: String,
     element_id: Option<String>,
     attributes: Vec<pb::Attribute>,
+    /// Inline runs recognized inside this capture, in the order they opened.
+    spans: Vec<SpanBuild>,
     /// True when the capture feeds `pending_caption` instead of the stream.
     is_caption: bool,
     /// True when the previous child event was an element end, which is where
@@ -306,11 +327,29 @@ struct Capture {
     after_child: bool,
 }
 
+/// One inline run being measured against the capture's growing text.
+///
+/// Offsets are into the *raw* captured string, because that is the one the
+/// driver is appending to; [`finish_capture`](Driver::finish_capture)
+/// translates them onto the collapsed text the item actually carries.
+struct SpanBuild {
+    /// Stack length of the element that opened the run, so its own end tag
+    /// closes it and a descendant's does not.
+    depth: usize,
+    start: usize,
+    end: Option<usize>,
+    inline: dialect::Inline,
+    element_name: String,
+    namespace: String,
+    attributes: Vec<pb::Attribute>,
+}
+
 /// A caption seen before its table.
 struct PendingCaption {
     text: String,
     path: String,
     element_id: Option<String>,
+    spans: Vec<pb::InlineSpan>,
     /// Stack length of the wrapper element; an unconsumed caption is emitted
     /// on its own when that wrapper closes.
     wrapper_depth: usize,
@@ -461,6 +500,56 @@ pub fn collapse(text: &str) -> String {
     out
 }
 
+/// Collapse, and record where each source code point landed.
+///
+/// The returned map has one entry per code point of `text`: the position it
+/// occupies in the collapsed string, or `None` when it was whitespace that
+/// collapsed away. It is the bridge between the offsets an inline run was
+/// measured at — into the raw captured string — and the offsets a consumer
+/// can use against the `text` it receives.
+fn collapse_positions(text: &str) -> (String, Vec<Option<u32>>) {
+    let mut out = String::with_capacity(text.len());
+    let mut map = Vec::new();
+    let mut pending_space = false;
+    let mut count = 0u32;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            pending_space = count > 0;
+            map.push(None);
+        } else {
+            if pending_space {
+                out.push(' ');
+                count += 1;
+                pending_space = false;
+            }
+            out.push(ch);
+            map.push(Some(count));
+            count += 1;
+        }
+    }
+    (out, map)
+}
+
+/// Translate a raw code-point range onto the collapsed text.
+///
+/// The run shrinks to the characters that survived: it starts at the first
+/// surviving code point at or after `start` and ends after the last one
+/// before `end`. A run that was nothing but whitespace has no position in
+/// the collapsed string and returns `None`.
+fn collapsed_range(map: &[Option<u32>], start: usize, end: usize) -> Option<pb::IntRange> {
+    let end = end.min(map.len());
+    if start >= end {
+        return None;
+    }
+    let mut kept = map[start..end].iter().flatten().copied();
+    let first = kept.next()?;
+    let last = kept.next_back().unwrap_or(first);
+    Some(pb::IntRange {
+        start: first,
+        end: last + 1,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,5 +570,51 @@ mod tests {
         // The whole point: no lookup table, so nothing to blow up.
         assert_eq!(resolve_reference("lol9"), None);
         assert_eq!(resolve_reference("xxe"), None);
+    }
+
+    #[test]
+    fn the_position_map_agrees_with_the_collapse_it_mirrors() {
+        // Two implementations of one rule is a drift risk; this is the check
+        // that keeps them honest.
+        for sample in [
+            "  a \n\t b  ",
+            "\n   \n",
+            "single",
+            "",
+            "a  b  c",
+            "\u{e9}l\u{e8}ve  na\u{ef}f",
+        ] {
+            let (collapsed, map) = collapse_positions(sample);
+            assert_eq!(collapsed, collapse(sample), "sample {sample:?}");
+            assert_eq!(map.len(), sample.chars().count(), "sample {sample:?}");
+            for (raw, position) in map.iter().enumerate() {
+                let Some(position) = position else { continue };
+                let source = sample.chars().nth(raw).expect("in range");
+                let landed = collapsed
+                    .chars()
+                    .nth(*position as usize)
+                    .expect("the map points inside the collapsed text");
+                assert_eq!(source, landed, "sample {sample:?} at {raw}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_maps_onto_the_characters_that_survived_collapsing() {
+        let raw = "  bold  and  plain ";
+        let (collapsed, map) = collapse_positions(raw);
+        assert_eq!(collapsed, "bold and plain");
+        // The leading whitespace is not part of the run the source marked.
+        let range = collapsed_range(&map, 0, 8).expect("the run has text");
+        assert_eq!((range.start, range.end), (0, 4));
+        let word: String = collapsed
+            .chars()
+            .skip(range.start as usize)
+            .take((range.end - range.start) as usize)
+            .collect();
+        assert_eq!(word, "bold");
+        // A run that is only whitespace has no position of its own.
+        assert_eq!(collapsed_range(&map, 6, 8), None);
+        assert_eq!(collapsed_range(&map, 3, 3), None);
     }
 }

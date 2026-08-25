@@ -131,6 +131,177 @@ pub struct AttrText {
     pub attr: &'static str,
 }
 
+/// What an element inside an open capture contributes beyond its text.
+///
+/// A capture flattens its descendants into one string, which is the right
+/// shape for the Document plane and the wrong shape for everything the
+/// markup said about *where* in that string something happened. An `Inline`
+/// is that missing half: the driver keeps flattening and records a parallel
+/// run for every element a dialect recognizes here.
+#[derive(Debug, Default, Clone)]
+pub struct Inline {
+    /// Character styles the element applies to its run.
+    pub styles: Vec<pb::SpanStyle>,
+    /// External link target read from an attribute.
+    pub hyperlink: Option<String>,
+    /// Scheme to prefix the run's own text with when the element carries no
+    /// link attribute, because the address *is* the text: `""` for a bare
+    /// URI, `"mailto:"` for an email address.
+    pub link_from_text: Option<&'static str>,
+    /// Identifiers inside this document the element points at. A source may
+    /// name several in one reference, which is why this is a list.
+    pub references: Vec<String>,
+    /// What `references` points at, as the source states it.
+    pub reference_kind: pb::ReferenceKind,
+}
+
+impl Inline {
+    /// A run that only carries styles.
+    fn styled(style: pb::SpanStyle) -> Self {
+        Self {
+            styles: vec![style],
+            ..Self::default()
+        }
+    }
+
+    /// A run that links out, reading the target from the first attribute
+    /// that carries one and falling back to the run's own text.
+    fn link(attrs: &Attrs, names: &[&str], scheme: &'static str) -> Self {
+        Self {
+            hyperlink: names
+                .iter()
+                .find_map(|name| attrs.get(name))
+                .map(str::to_owned),
+            link_from_text: Some(scheme),
+            ..Self::default()
+        }
+    }
+
+    /// A run that points at other items of the same document. Whitespace
+    /// separates the identifiers, as both JATS and USPTO write them.
+    fn reference(attrs: &Attrs, attr: &str, kind: pb::ReferenceKind) -> Self {
+        Self {
+            references: attrs
+                .get(attr)
+                .map(|raw| raw.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default(),
+            reference_kind: kind,
+            ..Self::default()
+        }
+    }
+}
+
+/// Decide what an element inside an open capture contributes, or `None` when
+/// it contributes only its text.
+///
+/// This is the counterpart to [`action`] for the elements that rule never
+/// sees: once a capture is open the driver flattens everything under it, so
+/// the inline vocabulary of every dialect lives here instead.
+#[must_use]
+pub fn inline(dialect: Dialect, ctx: &ElementCtx<'_>) -> Option<Inline> {
+    match dialect {
+        Dialect::Jats => jats_inline(ctx),
+        Dialect::Uspto => uspto_inline(ctx),
+        Dialect::Doclang | Dialect::Dclx => doclang_inline(ctx),
+        // An XBRL instance has no prose, and a METS export's hOCR is walked
+        // by the archive driver rather than by a capture.
+        Dialect::Xbrl | Dialect::MetsGbs => None,
+    }
+}
+
+/// JATS inline vocabulary: emphasis, `ext-link`, `uri`, `email` and the
+/// `xref` cross-reference graph.
+fn jats_inline(ctx: &ElementCtx<'_>) -> Option<Inline> {
+    match ctx.local {
+        "bold" => Some(Inline::styled(pb::SpanStyle::Bold)),
+        "italic" | "em" => Some(Inline::styled(pb::SpanStyle::Italic)),
+        "underline" => Some(Inline::styled(pb::SpanStyle::Underline)),
+        "strike" => Some(Inline::styled(pb::SpanStyle::Strikethrough)),
+        "monospace" => Some(Inline::styled(pb::SpanStyle::Monospace)),
+        "sc" => Some(Inline::styled(pb::SpanStyle::SmallCaps)),
+        "sup" => Some(Inline::styled(pb::SpanStyle::Superscript)),
+        "sub" => Some(Inline::styled(pb::SpanStyle::Subscript)),
+        // Nested inside a captured paragraph these cannot become their own
+        // FORMULA item, so the run says the text is notation instead.
+        "inline-formula" | "tex-math" | "math" => Some(Inline::styled(pb::SpanStyle::Math)),
+        "ext-link" | "self-uri" | "uri" => Some(Inline::link(ctx.attrs, &["href"], "")),
+        "email" => Some(Inline::link(ctx.attrs, &["href"], "mailto:")),
+        "xref" => Some(Inline::reference(
+            ctx.attrs,
+            "rid",
+            jats_reference_kind(ctx.attrs.get("ref-type")),
+        )),
+        _ => None,
+    }
+}
+
+/// The JATS `ref-type` vocabulary, as the source states it.
+fn jats_reference_kind(ref_type: Option<&str>) -> pb::ReferenceKind {
+    match ref_type {
+        Some("bibr") => pb::ReferenceKind::Citation,
+        Some("fn") => pb::ReferenceKind::Footnote,
+        Some("fig") => pb::ReferenceKind::Figure,
+        Some("table") => pb::ReferenceKind::Table,
+        Some("disp-formula") => pb::ReferenceKind::Equation,
+        Some("sec") => pb::ReferenceKind::Section,
+        _ => pb::ReferenceKind::CrossRef,
+    }
+}
+
+/// USPTO inline vocabulary. `claim-ref` is the one that matters most: claim
+/// dependency is the defining structure of a patent's claim set, and it is
+/// stated nowhere else in the document.
+fn uspto_inline(ctx: &ElementCtx<'_>) -> Option<Inline> {
+    match ctx.local {
+        "b" => Some(Inline::styled(pb::SpanStyle::Bold)),
+        "i" => Some(Inline::styled(pb::SpanStyle::Italic)),
+        "u" => Some(Inline::styled(pb::SpanStyle::Underline)),
+        "smallcaps" => Some(Inline::styled(pb::SpanStyle::SmallCaps)),
+        "sup" | "sup2" => Some(Inline::styled(pb::SpanStyle::Superscript)),
+        "sub" | "sub2" => Some(Inline::styled(pb::SpanStyle::Subscript)),
+        "maths" | "math" => Some(Inline::styled(pb::SpanStyle::Math)),
+        "claim-ref" | "ClaimReference" => Some(Inline::reference(
+            ctx.attrs,
+            "idref",
+            pb::ReferenceKind::Claim,
+        )),
+        "figref" => Some(Inline::reference(
+            ctx.attrs,
+            "idref",
+            pb::ReferenceKind::Figure,
+        )),
+        "crossref" => Some(Inline::reference(
+            ctx.attrs,
+            "idref",
+            pb::ReferenceKind::CrossRef,
+        )),
+        _ => None,
+    }
+}
+
+/// `DocLang` inline vocabulary. The element names mirror the labels, so an
+/// element that would be its own item at the top level becomes a styled run
+/// when it appears inside one.
+fn doclang_inline(ctx: &ElementCtx<'_>) -> Option<Inline> {
+    match ctx.local {
+        "bold" | "b" | "strong" => Some(Inline::styled(pb::SpanStyle::Bold)),
+        "italic" | "i" | "em" => Some(Inline::styled(pb::SpanStyle::Italic)),
+        "underline" | "u" => Some(Inline::styled(pb::SpanStyle::Underline)),
+        "strike" | "s" => Some(Inline::styled(pb::SpanStyle::Strikethrough)),
+        "code" | "monospace" => Some(Inline::styled(pb::SpanStyle::Monospace)),
+        "sup" => Some(Inline::styled(pb::SpanStyle::Superscript)),
+        "sub" => Some(Inline::styled(pb::SpanStyle::Subscript)),
+        "formula" | "math" => Some(Inline::styled(pb::SpanStyle::Math)),
+        "link" | "a" => Some(Inline::link(ctx.attrs, &["href", "uri"], "")),
+        "ref" | "xref" => Some(Inline::reference(
+            ctx.attrs,
+            "target",
+            pb::ReferenceKind::CrossRef,
+        )),
+        _ => None,
+    }
+}
+
 /// Context passed to a mapping rule.
 pub struct ElementCtx<'a> {
     /// Resolved namespace URI, empty when the element is unqualified.
@@ -488,6 +659,57 @@ mod tests {
         };
         assert_eq!(capture.ordinal, Some(3));
         assert_eq!(capture.role, "claim");
+    }
+
+    #[test]
+    fn a_jats_link_yields_its_href_and_a_jats_xref_its_targets() {
+        let ancestors = path(&["article", "body", "sec", "p"]);
+        let attrs = Attrs(vec![(
+            "xlink:href".to_owned(),
+            "https://example.org/spec".to_owned(),
+        )]);
+        let link = jats_inline(&ctx("ext-link", &ancestors, &attrs)).expect("a link is inline");
+        assert_eq!(link.hyperlink.as_deref(), Some("https://example.org/spec"));
+        assert!(link.references.is_empty());
+
+        // A JATS xref may name several targets in one attribute, and each is
+        // its own edge of the reference graph.
+        let attrs = Attrs(vec![
+            ("ref-type".to_owned(), "bibr".to_owned()),
+            ("rid".to_owned(), "b1 b2".to_owned()),
+        ]);
+        let xref = jats_inline(&ctx("xref", &ancestors, &attrs)).expect("an xref is inline");
+        assert_eq!(xref.references, ["b1", "b2"]);
+        assert_eq!(xref.reference_kind, pb::ReferenceKind::Citation);
+    }
+
+    #[test]
+    fn an_unmarked_jats_xref_is_a_cross_reference_not_a_guess() {
+        let ancestors = path(&["article", "body", "sec", "p"]);
+        let attrs = Attrs(vec![("rid".to_owned(), "s2".to_owned())]);
+        let xref = jats_inline(&ctx("xref", &ancestors, &attrs)).expect("an xref is inline");
+        assert_eq!(xref.reference_kind, pb::ReferenceKind::CrossRef);
+    }
+
+    #[test]
+    fn a_uspto_claim_reference_carries_the_claim_it_depends_on() {
+        let ancestors = path(&["us-patent-grant", "claims", "claim", "claim-text"]);
+        let attrs = Attrs(vec![("idref".to_owned(), "CLM-00001".to_owned())]);
+        let inline =
+            uspto_inline(&ctx("claim-ref", &ancestors, &attrs)).expect("a claim-ref is inline");
+        assert_eq!(inline.references, ["CLM-00001"]);
+        assert_eq!(inline.reference_kind, pb::ReferenceKind::Claim);
+    }
+
+    #[test]
+    fn emphasis_maps_to_styles_and_ordinary_elements_stay_invisible() {
+        let ancestors = path(&["article", "body", "sec", "p"]);
+        let attrs = Attrs::default();
+        let italic = jats_inline(&ctx("italic", &ancestors, &attrs)).expect("italic is inline");
+        assert_eq!(italic.styles, [pb::SpanStyle::Italic]);
+        assert!(jats_inline(&ctx("named-content", &ancestors, &attrs)).is_none());
+        // An XBRL instance has no prose, so nothing in it is an inline run.
+        assert!(inline(Dialect::Xbrl, &ctx("italic", &ancestors, &attrs)).is_none());
     }
 
     #[test]

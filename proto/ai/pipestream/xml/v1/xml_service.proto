@@ -94,6 +94,16 @@ message ParseOptions {
   // work. What the projection drops is listed in this repository's
   // `docs/design.md`.
   bool emit_document = 6;
+
+  // Read the inline markup inside captured elements and report it as
+  // `TextItem.spans`. Default false, which keeps today's stream: the item
+  // text is flattened either way, and with the flag off the runs that
+  // produced it are not reported.
+  //
+  // Set it when emphasis, hyperlinks or the cross-reference graph matter.
+  // The flat `text` is byte-identical with the flag on, so a consumer that
+  // ignores `spans` sees no difference.
+  bool emit_inline_spans = 7;
 }
 
 // ParseXmlRequest is one frame of the upload.

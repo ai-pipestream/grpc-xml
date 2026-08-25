@@ -345,6 +345,17 @@ pub fn status(events: &[pb::ParseXmlResponse]) -> &pb::ParseStatus {
         .expect("stream has a ParseStatus")
 }
 
+/// The inline spans of an item, by the text it covers, so an assertion
+/// reads as the source does rather than as a pair of integers.
+pub fn span_text(item: &pb::TextItem, span: &pb::InlineSpan) -> String {
+    let range = span.range.as_ref().expect("every span carries its range");
+    item.text
+        .chars()
+        .skip(range.start as usize)
+        .take((range.end - range.start) as usize)
+        .collect()
+}
+
 /// True when the trailer carries at least one warning of this code.
 pub fn warned(events: &[pb::ParseXmlResponse], code: pb::WarningCode) -> bool {
     status(events)
@@ -414,6 +425,7 @@ pub const JATS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
         <graphic xlink:href="pipeline.png"/>
       </fig>
       <p>Throughput scales with the number of <italic>concurrent</italic> streams.</p>
+      <p>See <xref ref-type="bibr" rid="b1">Rivera</xref> and the <ext-link ext-link-type="uri" xlink:href="https://example.org/spec">specification</ext-link>.</p>
     </sec>
   </body>
   <back>
@@ -467,7 +479,7 @@ pub const USPTO: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
   </description>
   <claims id="claims">
     <claim id="CLM-00001" num="00001"><claim-text>1. A method comprising streaming items.</claim-text></claim>
-    <claim id="CLM-00002" num="00002"><claim-text>2. The method of claim 1, wherein items are ordered.</claim-text></claim>
+    <claim id="CLM-00002" num="00002"><claim-text>2. The method of <claim-ref idref="CLM-00001">claim 1</claim-ref>, wherein items are ordered.</claim-text></claim>
     <claim id="CLM-00003" num="00003"><claim-text>3. The method of claim 1, further comprising a trailer.</claim-text></claim>
   </claims>
 </us-patent-grant>

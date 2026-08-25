@@ -13,8 +13,9 @@ use quick_xml::events::{BytesText, Event};
 use quick_xml::name::ResolveResult;
 
 use super::{
-    Capture, Frame, MAX_WARNING_KINDS, ParseError, PendingCaption, Step, attribute_value, collapse,
-    convert_error, resolve_reference,
+    Capture, Frame, MAX_INLINE_SPANS, MAX_WARNING_KINDS, ParseError, PendingCaption, SpanBuild,
+    Step, attribute_value, collapse, collapse_positions, collapsed_range, convert_error,
+    resolve_reference,
 };
 use crate::dialect::{self, Action, Attrs, ElementCtx};
 use crate::proto::v1 as pb;
@@ -216,16 +217,16 @@ impl<R: BufRead> Driver<'_, R> {
             self.push_frame(local, qname);
             return Ok(());
         }
-        // A capture flattens everything under it; nested rules do not fire.
-        if let Some(capture) = self.capture.as_mut() {
-            if capture.after_child
-                && !capture.text.is_empty()
-                && !capture.text.ends_with(char::is_whitespace)
-            {
-                // Two adjacent sibling elements are two words, not one.
-                capture.text.push(' ');
+        // A capture flattens everything under it into one string. Structural
+        // rules still do not fire inside one — a paragraph does not sprout a
+        // nested paragraph — but the inline vocabulary does, so emphasis,
+        // links and cross-references are recorded as runs over the string
+        // the flattening is already building.
+        if self.capture.is_some() {
+            self.capture_child_boundary();
+            if self.config.emit_inline_spans {
+                self.open_inline_span(namespace, local, qname, attrs);
             }
-            capture.after_child = false;
             self.push_frame(local, qname);
             return Ok(());
         }
@@ -308,6 +309,17 @@ impl<R: BufRead> Driver<'_, R> {
             if depth == capture.depth {
                 self.finish_capture()?;
             } else {
+                // The innermost run still open at this depth is the one this
+                // end tag closes; anything deeper closed before it.
+                let chars = capture.chars;
+                if let Some(span) = capture
+                    .spans
+                    .iter_mut()
+                    .rev()
+                    .find(|span| span.end.is_none() && span.depth == depth)
+                {
+                    span.end = Some(chars);
+                }
                 capture.after_child = true;
             }
             self.stack.pop();
@@ -341,6 +353,7 @@ impl<R: BufRead> Driver<'_, R> {
         }
         if let Some(capture) = self.capture.as_mut() {
             capture.text.push_str(text);
+            capture.chars += text.chars().count();
             capture.after_child = false;
             return;
         }
@@ -390,6 +403,7 @@ impl<R: BufRead> Driver<'_, R> {
         }
         if let Some(capture) = self.capture.as_mut() {
             capture.text.push_str(&text);
+            capture.chars += text.chars().count();
             capture.after_child = false;
             return;
         }
@@ -419,22 +433,118 @@ impl<R: BufRead> Driver<'_, R> {
             depth: self.stack.len(),
             spec: dialect::Capture { level, ..spec },
             text: String::new(),
+            chars: 0,
             path: self.path(),
             element_id: attrs.get("id").map(str::to_owned),
             attributes: self.reportable_attributes(attrs),
+            spans: Vec::new(),
             is_caption,
             after_child: false,
         });
+    }
+
+    /// Insert the word boundary a new child element implies, and clear the
+    /// flag that asked for it.
+    ///
+    /// Two adjacent sibling elements are two words, not one, and the space
+    /// that says so is part of the capture's text, so it counts toward the
+    /// offsets the inline runs are measured at.
+    fn capture_child_boundary(&mut self) {
+        let Some(capture) = self.capture.as_mut() else {
+            return;
+        };
+        if capture.after_child
+            && !capture.text.is_empty()
+            && !capture.text.ends_with(char::is_whitespace)
+        {
+            capture.text.push(' ');
+            capture.chars += 1;
+        }
+        capture.after_child = false;
+    }
+
+    /// Record an inline run for an element the dialect recognizes, opening
+    /// at the capture's current length.
+    ///
+    /// The run's end is filled in by the matching end tag; a run whose
+    /// element never closes cannot happen, because the reader rejects an
+    /// unbalanced tree before the driver sees it.
+    fn open_inline_span(&mut self, namespace: &str, local: &str, qname: &str, attrs: &Attrs) {
+        let ancestors: Vec<String> = self.stack.iter().map(|f| f.local.clone()).collect();
+        let ctx = ElementCtx {
+            namespace,
+            local,
+            ancestors: &ancestors,
+            attrs,
+        };
+        let Some(inline) = dialect::inline(self.dialect, &ctx) else {
+            return;
+        };
+        let attributes = self.reportable_attributes(attrs);
+        // The frame for this element is pushed by the caller after this
+        // returns, so its depth is one deeper than the stack stands now.
+        let depth = self.stack.len() + 1;
+        if let Some(capture) = self.capture.as_mut() {
+            if capture.spans.len() >= MAX_INLINE_SPANS {
+                return;
+            }
+            capture.spans.push(SpanBuild {
+                depth,
+                start: capture.chars,
+                end: None,
+                inline,
+                element_name: qname.to_owned(),
+                namespace: namespace.to_owned(),
+                attributes,
+            });
+        }
+    }
+
+    /// Translate the runs recorded against the raw captured string onto the
+    /// collapsed text the item carries.
+    fn finish_spans(spans: Vec<SpanBuild>, text: &str, map: &[Option<u32>]) -> Vec<pb::InlineSpan> {
+        spans
+            .into_iter()
+            .filter_map(|span| {
+                let range = collapsed_range(map, span.start, span.end.unwrap_or(map.len()))?;
+                let mut hyperlink = span.inline.hyperlink;
+                if hyperlink.is_none()
+                    && let Some(scheme) = span.inline.link_from_text
+                {
+                    // The address is the run's own text: a bare `<uri>` or
+                    // an `<email>` with no href attribute.
+                    let run: String = text
+                        .chars()
+                        .skip(range.start as usize)
+                        .take((range.end - range.start) as usize)
+                        .collect();
+                    if !run.is_empty() {
+                        hyperlink = Some(format!("{scheme}{run}"));
+                    }
+                }
+                Some(pb::InlineSpan {
+                    range: Some(range),
+                    styles: span.inline.styles.iter().map(|s| *s as i32).collect(),
+                    hyperlink,
+                    references: span.inline.references,
+                    reference_kind: span.inline.reference_kind as i32,
+                    element_name: span.element_name,
+                    namespace: span.namespace,
+                    attributes: span.attributes,
+                })
+            })
+            .collect()
     }
 
     pub(super) fn finish_capture(&mut self) -> Result<(), ParseError> {
         let Some(capture) = self.capture.take() else {
             return Ok(());
         };
-        let text = collapse(&capture.text);
+        let (text, positions) = collapse_positions(&capture.text);
         if text.is_empty() {
             return Ok(());
         }
+        let spans = Self::finish_spans(capture.spans, &text, &positions);
         if capture.is_caption {
             // The caption belongs to the table that follows it inside the
             // same wrapper; `wrapper_depth` is where it gives up waiting.
@@ -442,6 +552,7 @@ impl<R: BufRead> Driver<'_, R> {
                 text,
                 path: capture.path,
                 element_id: capture.element_id,
+                spans,
                 wrapper_depth: capture.depth.saturating_sub(1),
             });
             return Ok(());
@@ -457,6 +568,7 @@ impl<R: BufRead> Driver<'_, R> {
             element_id: capture.element_id,
             attributes: capture.attributes,
             source: Some(self.source.clone()),
+            spans,
         };
         self.counts.text_items += 1;
         self.send(pb::parse_xml_response::Event::TextItem(item))
@@ -477,6 +589,7 @@ impl<R: BufRead> Driver<'_, R> {
             element_id: pending.element_id,
             attributes: Vec::new(),
             source: Some(self.source.clone()),
+            spans: pending.spans,
         };
         self.counts.text_items += 1;
         self.send(pb::parse_xml_response::Event::TextItem(item))
@@ -655,6 +768,9 @@ impl<R: BufRead> Driver<'_, R> {
             element_id: attrs.get("id").map(str::to_owned),
             attributes: self.reportable_attributes(attrs),
             source: Some(self.source.clone()),
+            // An item whose text came from an attribute has no inline
+            // markup by construction: there is no element content to mark.
+            spans: Vec::new(),
         }
     }
 

@@ -936,3 +936,155 @@ async fn every_dialect_folds_over_the_wire_into_a_sound_fragment() {
         assert_attribution(document, model);
     }
 }
+
+// -------------------------------------------------------------- inline spans
+
+#[test]
+fn a_link_run_folds_onto_the_text_it_covers() {
+    let (_, document) = fold(
+        JATS,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    );
+    let paragraph = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|base| base.text.starts_with("See Rivera"))
+        .expect("the paragraph that links and cites");
+    let link = paragraph
+        .spans
+        .iter()
+        .find(|span| span.hyperlink.is_some())
+        .expect("the ext-link becomes a hyperlink run");
+    assert_eq!(
+        link.hyperlink.as_deref(),
+        Some("https://example.org/spec"),
+        "TextItemBase.hyperlink had no writer in this crate before this run"
+    );
+    let range = link.range.as_ref().expect("a run has a range");
+    let start = usize::try_from(range.start).expect("a range starts at or after zero");
+    let width = usize::try_from(range.end - range.start).expect("a range does not run backwards");
+    let covered: String = paragraph.text.chars().skip(start).take(width).collect();
+    assert_eq!(covered, "specification");
+}
+
+#[test]
+fn a_citation_resolves_forward_onto_the_reference_it_names() {
+    // The citation is in the body and its target is in the back matter, so
+    // this only works because resolution waits for the end of the stream.
+    let (_, document) = fold(
+        JATS,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    );
+    let target = document
+        .anchors
+        .iter()
+        .find(|anchor| anchor.name == "b1")
+        .and_then(|anchor| anchor.target.as_ref())
+        .expect("the reference list declares b1")
+        .r#ref
+        .clone();
+    let entry = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|base| base.self_ref == target)
+        .expect("the anchor points at a real item");
+    assert_eq!(entry.text, "Rivera A. Parsers. 2025.");
+    assert_eq!(entry.label, doc::DocItemLabel::Reference as i32);
+
+    let citation = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|base| base.text.starts_with("See Rivera"))
+        .expect("the citing paragraph")
+        .spans
+        .iter()
+        .find_map(|span| span.target.clone())
+        .expect("the xref becomes a target");
+    assert_eq!(citation.r#ref, target);
+}
+
+#[test]
+fn a_cross_reference_the_document_never_defines_keeps_the_source_name() {
+    let article = JATS.replace(r#"rid="b1""#, r#"rid="nowhere""#);
+    let (_, document) = fold(
+        &article,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    );
+    let target = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|base| base.text.starts_with("See Rivera"))
+        .expect("the citing paragraph")
+        .spans
+        .iter()
+        .find_map(|span| span.target.clone())
+        .expect("a dangling reference is still a reference");
+    assert_eq!(
+        target.r#ref, "#nowhere",
+        "an unresolved target names the source identifier rather than lying about an item"
+    );
+    assert!(
+        document
+            .anchors
+            .iter()
+            .all(|anchor| anchor.name != "nowhere"),
+        "nothing declares the name, so nothing anchors it"
+    );
+}
+
+#[test]
+fn every_source_identifier_becomes_an_anchor_at_a_real_item() {
+    let (_, document) = fold(
+        JATS,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    );
+    let refs: Vec<String> = document
+        .texts
+        .iter()
+        .map(|item| base(item).self_ref.clone())
+        .chain(document.pictures.iter().map(|p| p.self_ref.clone()))
+        .chain(document.tables.iter().map(|t| t.self_ref.clone()))
+        .collect();
+    assert!(!document.anchors.is_empty());
+    for anchor in &document.anchors {
+        assert!(!anchor.name.is_empty());
+        let target = anchor.target.as_ref().expect("an anchor points somewhere");
+        assert!(
+            refs.contains(&target.r#ref),
+            "anchor {} points at {} which is not in the arena",
+            anchor.name,
+            target.r#ref
+        );
+    }
+    let names: Vec<&str> = document
+        .anchors
+        .iter()
+        .map(|anchor| anchor.name.as_str())
+        .collect();
+    assert!(names.contains(&"b1") && names.contains(&"b2"), "{names:?}");
+}
+
+#[test]
+fn the_default_fold_carries_no_spans_and_no_targets() {
+    let (_, document) = fold_default(JATS);
+    assert!(
+        document.texts.iter().map(base).all(|b| b.spans.is_empty()),
+        "spans follow the option that produced them"
+    );
+}

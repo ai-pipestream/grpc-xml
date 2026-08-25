@@ -207,6 +207,125 @@ message Attribute {
   string value = 2;
 }
 
+// SpanStyle names one character-level style a source applies to a run of
+// text. The set is the union of what the mapped dialects can say, not a
+// rendering model: a consumer that cannot express one ignores it.
+enum SpanStyle {
+  // Not stated.
+  SPAN_STYLE_UNSPECIFIED = 0;
+
+  // Bold weight (`bold`, `b`).
+  SPAN_STYLE_BOLD = 1;
+
+  // Italic or emphasized (`italic`, `i`, `em`).
+  SPAN_STYLE_ITALIC = 2;
+
+  // Underlined (`underline`, `u`).
+  SPAN_STYLE_UNDERLINE = 3;
+
+  // Struck through (`strike`, `s`).
+  SPAN_STYLE_STRIKETHROUGH = 4;
+
+  // Fixed-pitch (`monospace`, `code`).
+  SPAN_STYLE_MONOSPACE = 5;
+
+  // Raised (`sup`).
+  SPAN_STYLE_SUPERSCRIPT = 6;
+
+  // Lowered (`sub`).
+  SPAN_STYLE_SUBSCRIPT = 7;
+
+  // Small capitals (`sc`).
+  SPAN_STYLE_SMALL_CAPS = 8;
+
+  // Mathematical notation carried as source text (`inline-formula`,
+  // `tex-math`, MathML).
+  SPAN_STYLE_MATH = 9;
+}
+
+// ReferenceKind names what an intra-document reference points at, from the
+// source's own statement of it (`ref-type` in JATS, the element name in
+// USPTO). It is never inferred from the target.
+enum ReferenceKind {
+  // The source did not say.
+  REFERENCE_KIND_UNSPECIFIED = 0;
+
+  // A bibliographic citation (`ref-type="bibr"`).
+  REFERENCE_KIND_CITATION = 1;
+
+  // A reference with no more specific kind.
+  REFERENCE_KIND_CROSS_REF = 2;
+
+  // A footnote anchor (`ref-type="fn"`).
+  REFERENCE_KIND_FOOTNOTE = 3;
+
+  // A figure (`ref-type="fig"`).
+  REFERENCE_KIND_FIGURE = 4;
+
+  // A table (`ref-type="table"`).
+  REFERENCE_KIND_TABLE = 5;
+
+  // Another claim of the same patent (`claim-ref`).
+  REFERENCE_KIND_CLAIM = 6;
+
+  // A displayed formula (`ref-type="disp-formula"`).
+  REFERENCE_KIND_EQUATION = 7;
+
+  // A section of the same document (`ref-type="sec"`).
+  REFERENCE_KIND_SECTION = 8;
+}
+
+// IntRange is a half-open range of Unicode scalar values, `[start, end)`.
+//
+// Positions count code points rather than bytes so a consumer can index the
+// string it already has without decoding UTF-8 offsets.
+message IntRange {
+  // First code point of the run, zero-based and inclusive.
+  uint32 start = 1;
+
+  // One past the last code point of the run.
+  uint32 end = 2;
+}
+
+// InlineSpan is one run of an item's text that the flat string cannot
+// describe: emphasis, a hyperlink, or a cross-reference.
+//
+// Ranges index `TextItem.text` after flattening and whitespace collapse, so
+// they address the string the consumer received rather than the source
+// bytes. Spans nest and overlap exactly as the source elements do; they are
+// sent in the order their elements opened. Only sent when
+// `ParseOptions.emit_inline_spans` is set.
+message InlineSpan {
+  // The run this span covers.
+  IntRange range = 1;
+
+  // Character styles the source applies to the run. Empty for a run that is
+  // only a link or a reference.
+  repeated SpanStyle styles = 2;
+
+  // Target of an external link (`ext-link`, `uri`, `email`), as written. A
+  // bare email address is normalized to a `mailto:` URI.
+  optional string hyperlink = 3;
+
+  // Identifiers this run references inside the same document, as written:
+  // JATS `xref/@rid`, USPTO `claim-ref/@idref`. A source may name several
+  // in one reference, so this is a list rather than a joined string.
+  repeated string references = 4;
+
+  // What `references` points at, when the source says.
+  ReferenceKind reference_kind = 5;
+
+  // Qualified name of the source element that produced the run.
+  string element_name = 6;
+
+  // Resolved namespace URI of that element, empty when unqualified.
+  string namespace = 7;
+
+  // Attributes of the span element, when `ParseOptions.include_attributes`
+  // is set. Empty otherwise.
+  repeated Attribute attributes = 8;
+}
+
 // TextItem is one streamed unit of text, in document order.
 //
 // This is the workhorse event: titles, headings, paragraphs, list items,
@@ -254,6 +373,11 @@ message TextItem {
 
   // Provenance, always set.
   CollectorSource source = 10;
+
+  // Character-level runs inside `text`: emphasis, hyperlinks and
+  // cross-references that flattening would otherwise destroy. Only
+  // populated when `ParseOptions.emit_inline_spans` is set.
+  repeated InlineSpan spans = 11;
 }
 
 // TableStart opens a streamed table. Rows follow, then `TableEnd`.

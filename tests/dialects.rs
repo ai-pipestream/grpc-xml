@@ -15,6 +15,14 @@ use common::{
 };
 use grpc_xml::proto::v1 as pb;
 
+/// Default options plus the inline-span switch.
+fn with_spans() -> pb::ParseOptions {
+    pb::ParseOptions {
+        emit_inline_spans: true,
+        ..options()
+    }
+}
+
 // ------------------------------------------------------------------- JATS
 
 #[tokio::test]
@@ -185,6 +193,127 @@ async fn jats_inline_markup_is_flattened_into_one_paragraph() {
         paragraphs.contains(&"Throughput scales with the number of concurrent streams.".to_owned()),
         "inline markup must not split or duplicate the paragraph: {paragraphs:?}"
     );
+}
+
+#[tokio::test]
+async fn inline_spans_are_off_by_default_and_never_change_the_flat_text() {
+    let client = client().await;
+    let default_events = parse_ok(&client, JATS, options()).await;
+    assert!(
+        text_items(&default_events)
+            .iter()
+            .all(|i| i.spans.is_empty()),
+        "inline spans are opt-in"
+    );
+
+    let events = parse_ok(&client, JATS, with_spans()).await;
+    assert!(
+        text_items(&events).iter().any(|i| !i.spans.is_empty()),
+        "asking for spans must produce some"
+    );
+    // The flattening is unchanged: spans describe the same string, they do
+    // not rewrite it.
+    assert_eq!(
+        texts(&text_items(&default_events)),
+        texts(&text_items(&events)),
+        "the flat text is identical with and without spans"
+    );
+}
+
+#[tokio::test]
+async fn jats_link_and_citation_runs_survive_the_flattening() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, with_spans()).await;
+    let paragraph = text_items(&events)
+        .into_iter()
+        .find(|i| i.text.starts_with("See Rivera"))
+        .expect("the paragraph that links and cites");
+    assert_eq!(paragraph.text, "See Rivera and the specification.");
+    assert_eq!(paragraph.spans.len(), 2);
+
+    let citation = &paragraph.spans[0];
+    assert_eq!(common::span_text(paragraph, citation), "Rivera");
+    assert_eq!(citation.references, ["b1"]);
+    assert_eq!(
+        citation.reference_kind,
+        pb::ReferenceKind::Citation as i32,
+        "ref-type=bibr is a citation, not a bare cross-reference"
+    );
+    assert_eq!(citation.element_name, "xref");
+
+    let link = &paragraph.spans[1];
+    assert_eq!(common::span_text(paragraph, link), "specification");
+    assert_eq!(
+        link.hyperlink.as_deref(),
+        Some("https://example.org/spec"),
+        "the xlink:href of an ext-link is the whole point"
+    );
+    assert!(link.references.is_empty());
+}
+
+#[tokio::test]
+async fn jats_emphasis_lands_on_the_exact_word_it_marked() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, with_spans()).await;
+    let paragraph = text_items(&events)
+        .into_iter()
+        .find(|i| i.text.starts_with("Throughput scales"))
+        .expect("the paragraph with emphasis");
+    let italic = paragraph.spans.first().expect("one italic run");
+    assert_eq!(italic.styles, [pb::SpanStyle::Italic as i32]);
+    // Offsets are into the collapsed text the item actually carries, which
+    // is the property that makes them usable without re-parsing the source.
+    assert_eq!(common::span_text(paragraph, italic), "concurrent");
+}
+
+#[tokio::test]
+async fn uspto_claim_dependencies_reach_the_wire() {
+    let client = client().await;
+    let events = parse_ok(&client, USPTO, with_spans()).await;
+    let claims = items_with_role(&events, "claim");
+    assert!(claims[0].spans.is_empty(), "claim 1 depends on nothing");
+    let dependency = claims[1]
+        .spans
+        .first()
+        .expect("claim 2 depends on claim 1 and says so");
+    assert_eq!(common::span_text(claims[1], dependency), "claim 1");
+    assert_eq!(dependency.references, ["CLM-00001"]);
+    assert_eq!(dependency.reference_kind, pb::ReferenceKind::Claim as i32);
+    assert!(claims[2].spans.is_empty() || !claims[2].spans[0].references.is_empty());
+}
+
+#[tokio::test]
+async fn span_attributes_follow_the_attribute_option() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, with_spans()).await;
+    let paragraph = text_items(&events)
+        .into_iter()
+        .find(|i| i.text.starts_with("See Rivera"))
+        .expect("the paragraph that links and cites");
+    assert!(
+        paragraph.spans.iter().all(|s| s.attributes.is_empty()),
+        "span attributes ride include_attributes like every other attribute"
+    );
+
+    let events = parse_ok(
+        &client,
+        JATS,
+        pb::ParseOptions {
+            include_attributes: true,
+            ..with_spans()
+        },
+    )
+    .await;
+    let paragraph = text_items(&events)
+        .into_iter()
+        .find(|i| i.text.starts_with("See Rivera"))
+        .expect("the paragraph that links and cites");
+    let names: Vec<&str> = paragraph.spans[0]
+        .attributes
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect();
+    assert_eq!(names, ["ref-type", "rid"]);
 }
 
 #[tokio::test]

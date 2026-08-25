@@ -95,6 +95,7 @@ sequenceDiagram
 | `taxonomy` | XBRL taxonomy package bytes. Accepted, unused in v1 (see below) |
 | `emit_html_islands` | Hand XHTML subtrees to the HTML collector instead of flattening them |
 | `include_attributes` | Attach unconsumed source attributes to every item |
+| `emit_inline_spans` | Report the inline markup inside captured elements as `TextItem.spans`: emphasis, hyperlinks, cross-references. The flat `text` is unchanged |
 | `emit_document` | Also fold the parse into one `ai.pipestream.document.v1.Document`, sent just before the trailer (see below) |
 
 **Response.** Exactly one `info` first, content events in document order,
@@ -103,7 +104,7 @@ exactly one `status` last.
 | Event | Carries |
 |---|---|
 | `info` | `XmlInfo`: resolved dialect and the evidence for it, root namespace and name, DOCTYPE identifiers, encoding |
-| `text_item` | One unit of text: title, heading, paragraph, list item, caption, reference, author, patent claim. `label` is structural, `role` is the dialect's own vocabulary |
+| `text_item` | One unit of text: title, heading, paragraph, list item, caption, reference, author, patent claim. `label` is structural, `role` is the dialect's own vocabulary. `spans` carries its inline runs when `emit_inline_spans` is set |
 | `table_start` / `table_row` / `table_end` | A table, streamed a row at a time as each row's end tag is read |
 | `fact` | One XBRL fact with its context and unit resolved inline |
 | `html_island` | An XHTML fragment, re-serialized, for the HTML collector |

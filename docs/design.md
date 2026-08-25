@@ -112,6 +112,18 @@ the coordinator's merge, so treat those as a hint; the per-item
 and `xml.ordinal` when the event has them. **No `prov`**: these dialects
 have no pages and no boxes, and the path is the honest locator.
 
+**Inline runs** (`emit_inline_spans`). `TextItem.spans` folds onto
+`TextItemBase.spans`: styles onto `Formatting`, an `ext-link` href onto
+`InlineSpan.hyperlink`, and each `xref`/`claim-ref` identifier onto its own
+`InlineSpan.target`. Monospace, small capitals and mathematical notation
+have no field in `Formatting` and stay on the typed wire only. Targets are
+written as the source name (`#b1`) while the parse runs and are resolved
+onto item refs when the stream ends, because a citation normally names an
+entry that arrives after it; an identifier the document never defines keeps
+its `#name` form. Every item that declared an identifier becomes a
+`Document.anchors` entry, which is what makes that resolution possible in
+both directions.
+
 **Pictures.** A `PICTURE` event becomes a placeholder `PictureItem` in the
 picture arena with `image` unset: no bytes, no uri, no size. An XML picture
 is a reference, never pixels. The text such an event carries is never
