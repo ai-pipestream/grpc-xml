@@ -275,13 +275,11 @@ impl DocumentFold {
 
     /// Fold one decoded metadata record.
     ///
-    /// Two of the six shapes have a typed home in the Document schema: a
-    /// publication date is the document's `created` or `modified`, and a
-    /// cited-reference entry is a `REFERENCE` item like any other
-    /// bibliography entry. Identifiers, classification codes, licence terms
-    /// and funding awards have no field in this schema; they stay on the
-    /// typed wire, where they are decoded rather than lost, and
-    /// `docs/design.md` says so rather than leaving the gap silent.
+    /// Every shape has a typed home now: dates become the document's
+    /// creation and modification declarations, a cited-reference entry
+    /// becomes a `REFERENCE` item like any other bibliography entry, and the
+    /// rest land on `DocumentMeta` field for field. Nothing here is
+    /// flattened into a string or a map.
     fn on_meta_item(&mut self, item: &pb::MetaItem) {
         match item.value.as_ref() {
             Some(pb::meta_item::Value::Date(date)) => self.on_meta_date(date),
@@ -299,35 +297,86 @@ impl DocumentFold {
                     ..pb::TextItem::default()
                 });
             }
-            Some(
-                pb::meta_item::Value::Identifier(_)
-                | pb::meta_item::Value::Classification(_)
-                | pb::meta_item::Value::License(_)
-                | pb::meta_item::Value::Funding(_),
-            )
-            | None => {}
+            Some(pb::meta_item::Value::Identifier(identifier)) => {
+                if identifier.value.is_empty() {
+                    return;
+                }
+                self.source_meta.identifiers.push(doc::Identifier {
+                    kind: identifier.kind.clone(),
+                    value: identifier.value.clone(),
+                    scope: identifier.scope.clone(),
+                });
+            }
+            Some(pb::meta_item::Value::Classification(classification)) => {
+                if classification.code.is_empty() {
+                    return;
+                }
+                self.source_meta.classifications.push(doc::Classification {
+                    scheme: classification.scheme.clone(),
+                    code: classification.code.clone(),
+                    edition: classification.edition.clone(),
+                    office: classification.office.clone(),
+                });
+            }
+            Some(pb::meta_item::Value::License(license)) => {
+                // A document states its terms once; a second permissions
+                // block would be the same terms restated, and the first is
+                // the one the parser reached in document order.
+                if self.source_meta.license.is_some() {
+                    return;
+                }
+                self.source_meta.license = Some(doc::LicenseMeta {
+                    type_uri: license.type_uri.clone(),
+                    statement: license.statement.clone(),
+                    copyright_statement: license.copyright_statement.clone(),
+                    // The schema wants the year as a number; a source that
+                    // writes something else there states no year rather than
+                    // a zero one.
+                    copyright_year: license
+                        .copyright_year
+                        .as_deref()
+                        .and_then(|year| year.trim().parse().ok()),
+                    copyright_holder: license.copyright_holder.clone(),
+                });
+            }
+            Some(pb::meta_item::Value::Funding(funding)) => {
+                self.source_meta.funding.push(doc::FundingAward {
+                    funder: funding.funder.clone(),
+                    award_id: funding.award_id.clone(),
+                    statement: funding.statement.clone(),
+                });
+            }
+            None => {}
         }
     }
 
-    /// A publication date becomes `created`, a revision date `modified`.
+    /// A publication date becomes the document's creation declaration, a
+    /// revision date its modification declaration.
     ///
-    /// The value is written as far as the source states it: a `pub-date`
-    /// with only a year yields `2026`, which is a valid ISO 8601 date and
-    /// is what the document said, rather than a fabricated first of January.
+    /// Three fields say three different things about one date, and which of
+    /// them the source supports depends on what it wrote. The civil twin is
+    /// always set, because an XML publication date is a wall-clock date with
+    /// no time zone in it; the `Timestamp` is set only for a whole calendar
+    /// date, read as midnight UTC; the `_raw` twin keeps the source's own
+    /// spelling as far as it goes. A `pub-date` naming a year and a month is
+    /// a civil year and month, never a fabricated first of January.
     fn on_meta_date(&mut self, date: &pb::MetaDate) {
         let Some(written) = iso_date(date) else {
             return;
         };
+        let civil = civil_of(date);
         let instant = timestamp_of(date);
         match date.kind.as_str() {
             "" | "pub" | "epub" | "ppub" | "collection" | "epub-ppub" => {
                 if self.source_meta.created_raw.is_none() {
                     self.source_meta.created_raw = Some(written);
+                    self.source_meta.created_civil = civil;
                     self.source_meta.created = instant;
                 }
             }
             "rev-recd" | "revised" | "corrected" | "updated" => {
                 self.source_meta.modified_raw = Some(written);
+                self.source_meta.modified_civil = civil;
                 self.source_meta.modified = instant;
             }
             _ => {}
@@ -425,9 +474,27 @@ impl DocumentFold {
         if let Some(language) = info.language.as_ref().filter(|l| !l.is_empty()) {
             self.source_meta.language = Some(language.clone());
         }
-        // The modern schema signal, as the root wrote it. The typed pairs
-        // stay on `XmlInfo`; this field holds one schemaLocation string, so
-        // it gets the source's own spelling rather than a re-rendering.
+        // The bindings that make a prefixed path resolvable, and the schema
+        // documents the root associates with the instance, both field for
+        // field: the wire decoded them, so the projection carries the pairs
+        // rather than a re-rendering of them.
+        self.source_meta.namespaces = info
+            .namespaces
+            .iter()
+            .map(|binding| doc::NamespaceBinding {
+                prefix: binding.prefix.clone(),
+                uri: binding.uri.clone(),
+            })
+            .collect();
+        self.source_meta.schema_locations = info
+            .schema_locations
+            .iter()
+            .map(|location| doc::SchemaLocation {
+                namespace: location.namespace.clone(),
+                location: location.location.clone(),
+            })
+            .collect();
+        // The same declaration as one string, which is that field's shape.
         if let Some(location) = info
             .root_attributes
             .iter()
@@ -1085,6 +1152,23 @@ fn local_name(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
 }
 
+/// A date as the wall-clock value the source actually wrote.
+///
+/// `CivilDateTime` states a date without inventing a time zone, which is
+/// what a publication date is. A part the source did not state stays at the
+/// message's own default: a `pub-date` naming a year and a month leaves
+/// `day` at zero rather than claiming the first, and zero is not a day of
+/// any month.
+fn civil_of(date: &pb::MetaDate) -> Option<doc::CivilDateTime> {
+    let year = date.year?;
+    Some(doc::CivilDateTime {
+        year: int(year),
+        month: date.month.map_or(0, int),
+        day: date.day.map_or(0, int),
+        ..doc::CivilDateTime::default()
+    })
+}
+
 /// A date as an instant, and only when the source stated a whole calendar
 /// date.
 ///
@@ -1185,12 +1269,14 @@ fn inline_spans(spans: &[pb::InlineSpan]) -> Vec<doc::InlineSpan> {
             });
             continue;
         }
+        let reference_kind = doc_reference_kind(span.reference_kind);
         for name in &span.references {
             folded.push(doc::InlineSpan {
                 range: Some(charspan),
                 formatting: formatting.clone(),
                 hyperlink: hyperlink.clone(),
                 target: Some(fine(&format!("#{name}"))),
+                reference_kind,
                 ..doc::InlineSpan::default()
             });
         }
@@ -1201,9 +1287,10 @@ fn inline_spans(spans: &[pb::InlineSpan]) -> Vec<doc::InlineSpan> {
 /// The Document plane's `Formatting` for a run's styles, or `None` when the
 /// source said nothing this schema can express.
 ///
-/// `Formatting` models weight, slant, decoration and vertical position.
-/// Monospace, small capitals and mathematical notation have no field here
-/// and are carried on the typed wire only.
+/// Every style this collector recognizes has a field: weight, slant,
+/// decoration and vertical position from the upstream set, and monospace,
+/// small capitals and mathematical notation from the extension the schema
+/// grew for exactly this.
 fn formatting_of(styles: &[i32]) -> Option<doc::Formatting> {
     let mut formatting = doc::Formatting::default();
     let mut expressed = false;
@@ -1218,14 +1305,36 @@ fn formatting_of(styles: &[i32]) -> Option<doc::Formatting> {
             pb::SpanStyle::Strikethrough => formatting.strikethrough = true,
             pb::SpanStyle::Superscript => formatting.script = doc::Script::Super as i32,
             pb::SpanStyle::Subscript => formatting.script = doc::Script::Sub as i32,
-            pb::SpanStyle::Unspecified
-            | pb::SpanStyle::Monospace
-            | pb::SpanStyle::SmallCaps
-            | pb::SpanStyle::Math => continue,
+            pb::SpanStyle::Monospace => formatting.monospace = true,
+            pb::SpanStyle::SmallCaps => formatting.small_caps = true,
+            pb::SpanStyle::Math => formatting.math = true,
+            pb::SpanStyle::Unspecified => continue,
         }
         expressed = true;
     }
     expressed.then_some(formatting)
+}
+
+/// The Document plane's `ReferenceKind` for the kind the source stated.
+///
+/// The two vocabularies overlap rather than match: the wire's is the union
+/// of what the dialects say, and this schema names the four kinds a
+/// consumer treats differently. A kind with no member here is left unset,
+/// which says "the source did not distinguish" and is the honest reading of
+/// a target this plane cannot classify; the wire keeps the full answer.
+fn doc_reference_kind(kind: i32) -> Option<i32> {
+    let mapped = match pb::ReferenceKind::try_from(kind).ok()? {
+        pb::ReferenceKind::Citation => doc::ReferenceKind::Citation,
+        pb::ReferenceKind::Footnote => doc::ReferenceKind::Footnote,
+        pb::ReferenceKind::Claim => doc::ReferenceKind::Claim,
+        pb::ReferenceKind::Section => doc::ReferenceKind::Section,
+        pb::ReferenceKind::Unspecified
+        | pb::ReferenceKind::CrossRef
+        | pb::ReferenceKind::Figure
+        | pb::ReferenceKind::Table
+        | pb::ReferenceKind::Equation => return None,
+    };
+    Some(mapped as i32)
 }
 
 /// Per-item `meta.custom_fields`: everything the wire item says that the

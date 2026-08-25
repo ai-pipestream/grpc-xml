@@ -1239,12 +1239,9 @@ fn the_abstract_becomes_the_body_summary() {
 
 #[test]
 fn a_document_that_declares_nothing_about_itself_carries_no_metadata() {
-    let bare = r#"<?xml version="1.0"?>
-<xbrl xmlns="http://www.xbrl.org/2003/instance">
-  <context id="c"><entity><identifier scheme="s">e</identifier></entity>
-  <period><instant>2026-01-01</instant></period></context>
-</xbrl>
-"#;
+    // No namespace binding, no schema location, no language, no title, no
+    // keywords: a document that says nothing about itself.
+    let bare = "<?xml version=\"1.0\"?>\n<article><body><p>Just prose.</p></body></article>\n";
     let (_, document) = fold_default(bare);
     assert!(
         document.source_meta.is_none(),
@@ -1271,6 +1268,16 @@ fn a_publication_date_becomes_the_documents_created_date() {
         meta.created.is_none(),
         "a year and a month is not an instant, and inventing a day would be a lie"
     );
+    let created = meta
+        .created_civil
+        .as_ref()
+        .expect("a partial date is still a civil date");
+    assert_eq!((created.year, created.month), (2026, 2));
+    assert_eq!(
+        created.day, 0,
+        "the source stated no day, and zero is not a day of any month"
+    );
+
     assert_eq!(meta.modified_raw.as_deref(), Some("2026-03-04"));
     let modified = meta
         .modified
@@ -1279,6 +1286,18 @@ fn a_publication_date_becomes_the_documents_created_date() {
     // 2026-03-04T00:00:00Z.
     assert_eq!(modified.seconds, 1_772_582_400);
     assert_eq!(modified.nanos, 0);
+    let modified_civil = meta
+        .modified_civil
+        .as_ref()
+        .expect("the wall-clock value the source wrote");
+    assert_eq!(
+        (
+            modified_civil.year,
+            modified_civil.month,
+            modified_civil.day
+        ),
+        (2026, 3, 4)
+    );
 }
 
 #[test]
@@ -1300,11 +1319,7 @@ fn a_cited_reference_block_folds_as_reference_items() {
 }
 
 #[test]
-fn metadata_with_no_typed_home_does_not_reach_the_document() {
-    // Classification codes, licence terms, funding awards and identifiers
-    // have no field in the Document schema. They stay on the typed wire
-    // rather than being stuffed into a map; this test is the record of that
-    // gap, and it should fail the day the schema grows a home for them.
+fn a_classification_code_lands_in_its_own_typed_field() {
     let (_, document) = fold(
         USPTO,
         &ParseConfig {
@@ -1312,10 +1327,119 @@ fn metadata_with_no_typed_home_does_not_reach_the_document() {
             ..ParseConfig::default()
         },
     );
-    let rendered = format!("{document:?}");
+    let meta = document.source_meta.as_ref().expect("declared metadata");
+    let codes: Vec<(&str, &str)> = meta
+        .classifications
+        .iter()
+        .map(|c| (c.scheme.as_str(), c.code.as_str()))
+        .collect();
+    assert_eq!(
+        codes,
+        [("cpc", "G06F16/93")],
+        "a code is a scheme and a code, not a string in a map"
+    );
+    // And nothing was smuggled into the escape hatch on the way.
+    let body_fields = &document
+        .body
+        .as_ref()
+        .expect("body")
+        .meta
+        .as_ref()
+        .expect("body meta")
+        .custom_fields;
     assert!(
-        !rendered.contains("G06F16/93"),
-        "a classification code with no typed home must not be smuggled in as a string"
+        body_fields
+            .keys()
+            .all(|key| !key.contains("classification")),
+        "a typed field exists, so nothing belongs in custom_fields"
+    );
+}
+
+#[test]
+fn the_licence_funding_and_identifiers_land_in_their_own_typed_fields() {
+    let (_, document) = fold(
+        JATS,
+        &ParseConfig {
+            emit_source_metadata: true,
+            ..ParseConfig::default()
+        },
+    );
+    let meta = document.source_meta.as_ref().expect("declared metadata");
+
+    let license = meta.license.as_ref().expect("the permissions block");
+    assert_eq!(
+        license.type_uri.as_deref(),
+        Some("https://creativecommons.org/licenses/by/4.0/")
+    );
+    assert_eq!(
+        license.copyright_year,
+        Some(2026),
+        "the schema wants a number, so the year is parsed rather than copied"
+    );
+    assert_eq!(
+        license.statement.as_deref(),
+        Some("Distributed under CC BY 4.0.")
+    );
+
+    assert_eq!(meta.funding.len(), 1);
+    assert_eq!(
+        meta.funding[0].funder.as_deref(),
+        Some("National Science Foundation")
+    );
+    assert_eq!(meta.funding[0].award_id.as_deref(), Some("NSF-1234567"));
+
+    let identifiers: Vec<(&str, &str, Option<&str>)> = meta
+        .identifiers
+        .iter()
+        .map(|id| (id.kind.as_str(), id.value.as_str(), id.scope.as_deref()))
+        .collect();
+    assert!(
+        identifiers.contains(&("issn", "1234-5678", Some("epub"))),
+        "the scope the source attaches survives: {identifiers:?}"
+    );
+    assert!(
+        identifiers.contains(&("nlm-ta", "J Stream Parse", None)),
+        "{identifiers:?}"
+    );
+
+    let subjects: Vec<&str> = meta
+        .classifications
+        .iter()
+        .filter(|c| c.scheme == "jats-subject")
+        .map(|c| c.code.as_str())
+        .collect();
+    assert_eq!(subjects, ["Research Article"]);
+}
+
+#[test]
+fn the_namespace_bindings_and_schema_locations_reach_the_document() {
+    let (_, document) = fold_default(JATS);
+    let meta = document.source_meta.as_ref().expect("declared metadata");
+    let bindings: Vec<(&str, &str)> = meta
+        .namespaces
+        .iter()
+        .map(|n| (n.prefix.as_str(), n.uri.as_str()))
+        .collect();
+    assert!(
+        bindings.contains(&("", "http://jats.nlm.nih.gov/ns/archiving/1.3/")),
+        "{bindings:?}"
+    );
+    assert!(
+        bindings.contains(&("xlink", "http://www.w3.org/1999/xlink")),
+        "a path written in qualified names is resolvable now: {bindings:?}"
+    );
+    let locations: Vec<(&str, &str)> = meta
+        .schema_locations
+        .iter()
+        .map(|l| (l.namespace.as_str(), l.location.as_str()))
+        .collect();
+    assert_eq!(
+        locations,
+        [(
+            "http://jats.nlm.nih.gov/ns/archiving/1.3/",
+            "JATS-archivearticle1.xsd"
+        )],
+        "the pairs stay pairs in the projection too"
     );
 }
 
@@ -1332,5 +1456,127 @@ fn an_xbrl_footnote_folds_as_a_footnote_addressable_by_its_label() {
     assert!(
         document.anchors.iter().any(|a| a.name == "fn-1"),
         "the xlink:label is the name the arcs address it by"
+    );
+}
+
+#[test]
+fn a_citation_run_names_what_it_points_at() {
+    let (_, document) = fold(
+        JATS,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    );
+    let citation = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|b| b.text.starts_with("See Rivera"))
+        .expect("the citing paragraph")
+        .spans
+        .iter()
+        .find(|span| span.target.is_some())
+        .expect("the xref becomes a target")
+        .clone();
+    assert_eq!(
+        citation.reference_kind,
+        Some(doc::ReferenceKind::Citation as i32),
+        "ref-type=bibr is a citation on both planes"
+    );
+}
+
+#[test]
+fn a_claim_dependency_names_itself_a_claim_reference() {
+    let (_, document) = fold(
+        USPTO,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    );
+    let dependency = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|b| b.text.starts_with("2. The method"))
+        .expect("the dependent claim")
+        .spans
+        .iter()
+        .find(|span| span.target.is_some())
+        .expect("the claim-ref becomes a target")
+        .clone();
+    assert_eq!(
+        dependency.reference_kind,
+        Some(doc::ReferenceKind::Claim as i32)
+    );
+}
+
+#[test]
+fn a_kind_this_schema_does_not_name_is_left_unstated() {
+    // The wire's vocabulary is the union of what the dialects say; this
+    // schema names the four a consumer treats differently. A figure
+    // reference is left unset rather than mislabelled as a citation.
+    let article = JATS.replace(r#"ref-type="bibr" rid="b1""#, r#"ref-type="fig" rid="f1""#);
+    let (_, document) = fold(
+        &article,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    );
+    let span = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|b| b.text.starts_with("See Rivera"))
+        .expect("the citing paragraph")
+        .spans
+        .iter()
+        .find(|span| span.target.is_some())
+        .expect("the xref is still a target")
+        .clone();
+    assert_eq!(span.reference_kind, None);
+    assert_eq!(
+        span.target.map(|t| t.r#ref).as_deref(),
+        Some("#f1"),
+        "the target is still stated even when its kind is not"
+    );
+}
+
+#[test]
+fn monospace_small_caps_and_math_runs_have_their_own_bits() {
+    let article = JATS.replace(
+        "<italic>concurrent</italic>",
+        "<monospace>epoll</monospace> and <sc>MPI</sc> and          <inline-formula>O(n)</inline-formula>",
+    );
+    let (_, document) = fold(
+        &article,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    );
+    let spans = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|b| b.text.starts_with("Throughput scales"))
+        .expect("the paragraph with styled runs")
+        .spans
+        .clone();
+    let bits: Vec<(bool, bool, bool)> = spans
+        .iter()
+        .filter_map(|span| span.formatting.as_ref())
+        .map(|f| (f.monospace, f.small_caps, f.math))
+        .collect();
+    assert_eq!(
+        bits,
+        [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true)
+        ],
+        "three styles the upstream Formatting cannot express, each in its own field"
     );
 }

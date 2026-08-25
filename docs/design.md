@@ -102,17 +102,17 @@ an invented coordinate would be worse than none.
 
 **Structured metadata** (`emit_source_metadata`). A `meta_item` event folds
 into whatever the Document schema has a field for: a publication date
-becomes `source_meta.created` and a revision date `source_meta.modified`,
-with the `_raw` twin holding the source's own spelling as far as it states
-it (a `pub-date` with only a year yields `2026`, not a fabricated first of
-January) and the `Timestamp` set only for a whole calendar date; a
-cited-reference entry becomes a `REFERENCE` item like any other bibliography
-entry.
-Identifiers, classification codes, licence terms and funding awards have no
-field in this schema and stay on the typed wire, decoded rather than lost.
-They are deliberately **not** stuffed into `custom_fields`: a CPC code is
-not a string, and a map entry would make the gap invisible instead of
-recorded here.
+becomes the document's creation declaration and a revision date its
+modification declaration, in three fields that say three different things:
+`created_civil` always, because an XML publication date is a wall-clock date
+with no time zone in it; `created` only for a whole calendar date, read as
+midnight UTC; `created_raw` for the source's own spelling as far as it goes
+(a `pub-date` with only a year yields `2026`, never a fabricated first of
+January). A cited-reference entry becomes a `REFERENCE` item like any other
+bibliography entry. Identifiers, classification codes, licence terms and
+funding awards land on `source_meta.identifiers`, `.classifications`,
+`.license` and `.funding` field for field. Nothing here goes through
+`custom_fields`: a CPC code is a scheme and a code, not a string.
 
 **Source metadata.** `Document.source_meta` carries what the document
 declares about itself in typed slots: `title` from the `TITLE` item,
@@ -122,8 +122,10 @@ abstract becomes `body.meta.summary`, quoted rather than generated. It is
 attached only when the source said something, because an all-default
 message would claim an empty declaration rather than an absent one. The
 root's `xsi:schemaLocation` goes to `source_meta.schema_location` in the
-source's own spelling; the decoded namespace-and-location pairs and the
-namespace bindings have no typed slot in this schema and stay on `XmlInfo`.
+source's own spelling and to `source_meta.schema_locations` as the decoded
+namespace-and-location pairs; the namespace bindings go to
+`source_meta.namespaces`, which is what makes a `xml.path` written in
+qualified names resolvable from the Document alone.
 
 **Identity.** `schema_name` is set from the `SCHEMA_NAME` constant in
 `src/document_fold.rs`, the upstream v2 document schema identifier this
@@ -147,10 +149,14 @@ and `xml.ordinal` when the event has them. **No `prov`**: these dialects
 have no pages and no boxes, and the path is the honest locator.
 
 **Inline runs** (`emit_inline_spans`). `TextItem.spans` folds onto
-`TextItemBase.spans`: styles onto `Formatting`, an `ext-link` href onto
+`TextItemBase.spans`: styles onto `Formatting` (including its `monospace`,
+`small_caps` and `math` bits), an `ext-link` href onto
 `InlineSpan.hyperlink`, and each `xref`/`claim-ref` identifier onto its own
-`InlineSpan.target`. Monospace, small capitals and mathematical notation
-have no field in `Formatting` and stay on the typed wire only. Targets are
+`InlineSpan.target` with `reference_kind` set when this schema names the
+kind. The two reference vocabularies overlap rather than match: the wire's
+is the union of what the dialects say, so `CROSS_REF`, `FIGURE`, `TABLE`
+and `EQUATION` leave `reference_kind` unset, which reads as "not
+distinguished" rather than as a wrong classification. Targets are
 written as the source name (`#b1`) while the parse runs and are resolved
 onto item refs when the stream ends, because a citation normally names an
 entry that arrives after it; an identifier the document never defines keeps
