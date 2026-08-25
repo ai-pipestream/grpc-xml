@@ -701,17 +701,20 @@ fn xbrl_facts_fold_into_one_table_with_a_deterministic_row_per_fact() {
 fn the_fact_table_declares_its_column_types_and_types_its_cells() {
     let (_, document) = fold_default(XBRL);
     let data = document.tables[0].data.as_ref().expect("table data");
-    let declared: Vec<(&str, Option<&str>)> = data
+    let declared: Vec<(Option<&str>, Option<&str>)> = data
         .columns
         .iter()
-        .map(|column| (column.name.as_str(), column.declared_type.as_deref()))
+        .map(|column| (column.name.as_deref(), column.declared_type.as_deref()))
         .collect();
     assert_eq!(declared.len(), 11);
     assert!(
-        declared.contains(&("value", Some("decimal"))),
+        declared.contains(&(Some("value"), Some("decimal"))),
         "{declared:?}"
     );
-    assert!(declared.contains(&("nil", Some("boolean"))), "{declared:?}");
+    assert!(
+        declared.contains(&(Some("nil"), Some("boolean"))),
+        "{declared:?}"
+    );
 
     // The value cell is a number, not a string that looks like one.
     let value = data.grid[1].cells[6].value.as_ref().expect("a typed value");
@@ -1141,6 +1144,17 @@ fn a_cross_reference_the_document_never_defines_keeps_the_source_name() {
         target.r#ref, "#nowhere",
         "an unresolved target names the source identifier rather than lying about an item"
     );
+    let key = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|b| b.text.starts_with("See Rivera"))
+        .expect("the citing paragraph")
+        .spans
+        .iter()
+        .find_map(|span| span.reference.clone())
+        .expect("the key the source wrote survives resolution failing");
+    assert_eq!(key, "nowhere");
     assert!(
         document
             .anchors
@@ -1512,12 +1526,10 @@ fn a_claim_dependency_names_itself_a_claim_reference() {
     );
 }
 
-#[test]
-fn a_kind_this_schema_does_not_name_is_left_unstated() {
-    // The wire's vocabulary is the union of what the dialects say; this
-    // schema names the four a consumer treats differently. A figure
-    // reference is left unset rather than mislabelled as a citation.
-    let article = JATS.replace(r#"ref-type="bibr" rid="b1""#, r#"ref-type="fig" rid="f1""#);
+/// The folded article and the reference run of its citing paragraph, with
+/// the `xref` rewritten to a different `ref-type` and target.
+fn reference_run(xref_attributes: &str) -> (doc::Document, doc::InlineSpan) {
+    let article = JATS.replace(r#"ref-type="bibr" rid="b1""#, xref_attributes);
     let (_, document) = fold(
         &article,
         &ParseConfig {
@@ -1525,7 +1537,7 @@ fn a_kind_this_schema_does_not_name_is_left_unstated() {
             ..ParseConfig::default()
         },
     );
-    let span = document
+    let run = document
         .texts
         .iter()
         .map(base)
@@ -1534,13 +1546,61 @@ fn a_kind_this_schema_does_not_name_is_left_unstated() {
         .spans
         .iter()
         .find(|span| span.target.is_some())
-        .expect("the xref is still a target")
+        .expect("the xref is a target whatever it points at")
         .clone();
-    assert_eq!(span.reference_kind, None);
+    (document, run)
+}
+
+#[test]
+fn every_kind_the_source_states_lands_on_the_document_plane() {
+    // The two vocabularies match member for member now, so a figure
+    // reference is a figure reference rather than an unstated one.
+    for (attributes, kind) in [
+        (r#"ref-type="fig" rid="f1""#, doc::ReferenceKind::Figure),
+        (r#"ref-type="table" rid="t1""#, doc::ReferenceKind::Table),
+        (
+            r#"ref-type="disp-formula" rid="e1""#,
+            doc::ReferenceKind::Equation,
+        ),
+        (r#"ref-type="sec" rid="intro""#, doc::ReferenceKind::Section),
+        // A source that names no ref-type still names a cross-reference by
+        // writing an xref at all.
+        (r#"rid="anything""#, doc::ReferenceKind::CrossRef),
+    ] {
+        let (_, span) = reference_run(attributes);
+        assert_eq!(
+            span.reference_kind,
+            Some(kind as i32),
+            "xref {attributes} folds to {kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_reference_keeps_the_key_the_source_wrote() {
+    // A reference into the reference list resolves, and one into nothing
+    // does not; both keep the key, so a reader tells them apart without
+    // taking the ref string back apart.
+    let (document, resolved) = reference_run(r#"ref-type="bibr" rid="b1""#);
+    assert_eq!(resolved.reference.as_deref(), Some("b1"));
+    let target = resolved.target.expect("a resolved reference has a target");
+    let entry = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|b| b.self_ref == target.r#ref)
+        .expect("the target is an item of this fragment");
     assert_eq!(
-        span.target.map(|t| t.r#ref).as_deref(),
-        Some("#f1"),
-        "the target is still stated even when its kind is not"
+        entry.text, "Rivera A. Parsers. 2025.",
+        "the reference-list entry the citation names"
+    );
+
+    let (_, dangling) = reference_run(r#"ref-type="fig" rid="nowhere""#);
+    assert_eq!(dangling.reference.as_deref(), Some("nowhere"));
+    assert_eq!(
+        dangling.target.map(|t| t.r#ref).as_deref(),
+        Some("#nowhere"),
+        "an unresolved target still names the source identifier"
     );
 }
 

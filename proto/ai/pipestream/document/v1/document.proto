@@ -657,6 +657,11 @@ message Formatting {
   bool monospace = 7;
   bool small_caps = 8;
   bool math = 9;
+  bool mark = 10;
+  bool small = 11;
+  bool insertion = 12;
+  bool abbreviation = 13;
+  bool quote = 14;
 }
 
 // BaseTextItem is a union type representing any text-based item in the document.
@@ -1159,6 +1164,10 @@ message TableCell {
   // Character-level formatting and link runs inside `text` (extension
   // beyond the upstream dialect).
   repeated InlineSpan spans = 15;
+  // Per-cell alignment when the source declares it (extension beyond the
+  // upstream dialect).
+  optional Alignment align = 16;
+  optional VerticalAlignment valign = 17;
 }
 
 // KeyValueItem represents a key-value pair extracted from forms.
@@ -1354,6 +1363,14 @@ message InlineSpan {
   optional string field_code = 9;
   // What the span's target is, when the source distinguishes.
   optional ReferenceKind reference_kind = 10;
+  // The reference key exactly as the source wrote it, kept even when no
+  // declared anchor resolves it.
+  optional string reference = 11;
+  // The link's title attribute, when the source states one.
+  optional string link_title = 12;
+  // The span's raw payload where the rendered text is a projection (an
+  // abbreviation's expansion, inline math in its source syntax).
+  optional string raw = 13;
 }
 
 // ReferenceKind names what an inline reference points at.
@@ -1363,6 +1380,10 @@ enum ReferenceKind {
   REFERENCE_KIND_FOOTNOTE = 2;
   REFERENCE_KIND_CLAIM = 3;
   REFERENCE_KIND_SECTION = 4;
+  REFERENCE_KIND_CROSS_REF = 5;
+  REFERENCE_KIND_FIGURE = 6;
+  REFERENCE_KIND_TABLE = 7;
+  REFERENCE_KIND_EQUATION = 8;
 }
 
 // DocumentMeta carries the metadata the source declares about itself.
@@ -1447,6 +1468,23 @@ message SchemaLocation {
   string location = 2;
 }
 
+// Alignment is a horizontal alignment a source declares.
+enum Alignment {
+  ALIGNMENT_UNSPECIFIED = 0;
+  ALIGNMENT_LEFT = 1;
+  ALIGNMENT_CENTER = 2;
+  ALIGNMENT_RIGHT = 3;
+  ALIGNMENT_JUSTIFY = 4;
+}
+
+// VerticalAlignment is a vertical alignment a source declares.
+enum VerticalAlignment {
+  VERTICAL_ALIGNMENT_UNSPECIFIED = 0;
+  VERTICAL_ALIGNMENT_TOP = 1;
+  VERTICAL_ALIGNMENT_MIDDLE = 2;
+  VERTICAL_ALIGNMENT_BOTTOM = 3;
+}
+
 // CellValue is a table cell's typed value; the cell's `text` stays the
 // display string.
 message CellValue {
@@ -1483,7 +1521,9 @@ message CivilDateTime {
 // TableColumnSchema declares one column of a schema-carrying table
 // (spreadsheet types, fixed-record layouts).
 message TableColumnSchema {
-  string name = 1;
+  // Presence-tracked: a column that carries only geometry declares no name
+  // rather than a blank one.
+  optional string name = 1;
   // The source's own type name (copybook usage, cell type, SQL type).
   optional string declared_type = 2;
   // Copybook picture clause, when the source is a fixed-record layout.
@@ -1496,8 +1536,11 @@ message TableColumnSchema {
   // columns that occur once.
   optional int32 occurs_index = 7;
   // The column's display width in the page unit, when the source declares
-  // one.
+  // one; width_raw keeps spellings that are not page units (20%, 5cm).
   optional double width = 9;
+  optional string width_raw = 10;
+  optional Alignment align = 11;
+  optional VerticalAlignment valign = 12;
   // Named value conditions declared on the column (copybook level-88).
   repeated ValueCondition conditions = 8;
 }

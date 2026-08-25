@@ -1035,7 +1035,9 @@ impl DocumentFold {
                 columns: FACT_COLUMNS
                     .iter()
                     .map(|(name, declared)| doc::TableColumnSchema {
-                        name: (*name).to_owned(),
+                        // Presence-tracked upstream; every fact column has a
+                        // heading, so every one declares its name.
+                        name: Some((*name).to_owned()),
                         declared_type: Some((*declared).to_owned()),
                         ..doc::TableColumnSchema::default()
                     })
@@ -1275,6 +1277,11 @@ fn inline_spans(spans: &[pb::InlineSpan]) -> Vec<doc::InlineSpan> {
                 range: Some(charspan),
                 formatting: formatting.clone(),
                 hyperlink: hyperlink.clone(),
+                // The key the source wrote, alongside the ref that resolution
+                // may or may not rewrite. A reference no anchor answers keeps
+                // its key here, so a reader can tell an unresolved target
+                // from a resolved one without parsing the ref back apart.
+                reference: Some(name.clone()),
                 target: Some(fine(&format!("#{name}"))),
                 reference_kind,
                 ..doc::InlineSpan::default()
@@ -1317,22 +1324,21 @@ fn formatting_of(styles: &[i32]) -> Option<doc::Formatting> {
 
 /// The Document plane's `ReferenceKind` for the kind the source stated.
 ///
-/// The two vocabularies overlap rather than match: the wire's is the union
-/// of what the dialects say, and this schema names the four kinds a
-/// consumer treats differently. A kind with no member here is left unset,
-/// which says "the source did not distinguish" and is the honest reading of
-/// a target this plane cannot classify; the wire keeps the full answer.
+/// The vocabularies match now, member for member. `UNSPECIFIED` stays
+/// `None` rather than folding to the zero member: a source that wrote no
+/// `ref-type` did not distinguish, and saying so is not the same as saying
+/// nothing.
 fn doc_reference_kind(kind: i32) -> Option<i32> {
     let mapped = match pb::ReferenceKind::try_from(kind).ok()? {
         pb::ReferenceKind::Citation => doc::ReferenceKind::Citation,
         pb::ReferenceKind::Footnote => doc::ReferenceKind::Footnote,
         pb::ReferenceKind::Claim => doc::ReferenceKind::Claim,
         pb::ReferenceKind::Section => doc::ReferenceKind::Section,
-        pb::ReferenceKind::Unspecified
-        | pb::ReferenceKind::CrossRef
-        | pb::ReferenceKind::Figure
-        | pb::ReferenceKind::Table
-        | pb::ReferenceKind::Equation => return None,
+        pb::ReferenceKind::CrossRef => doc::ReferenceKind::CrossRef,
+        pb::ReferenceKind::Figure => doc::ReferenceKind::Figure,
+        pb::ReferenceKind::Table => doc::ReferenceKind::Table,
+        pb::ReferenceKind::Equation => doc::ReferenceKind::Equation,
+        pb::ReferenceKind::Unspecified => return None,
     };
     Some(mapped as i32)
 }
@@ -1743,6 +1749,35 @@ mod tests {
         fold.consume(&text(pb::XmlItemLabel::Paragraph, "one"));
         assert_eq!(fold.take().texts.len(), 1);
         assert_eq!(fold.take().texts.len(), 0);
+    }
+
+    #[test]
+    fn every_stated_reference_kind_maps_and_an_unstated_one_stays_unset() {
+        for (wire, expected) in [
+            (pb::ReferenceKind::Citation, doc::ReferenceKind::Citation),
+            (pb::ReferenceKind::Footnote, doc::ReferenceKind::Footnote),
+            (pb::ReferenceKind::Claim, doc::ReferenceKind::Claim),
+            (pb::ReferenceKind::Section, doc::ReferenceKind::Section),
+            (pb::ReferenceKind::CrossRef, doc::ReferenceKind::CrossRef),
+            (pb::ReferenceKind::Figure, doc::ReferenceKind::Figure),
+            (pb::ReferenceKind::Table, doc::ReferenceKind::Table),
+            (pb::ReferenceKind::Equation, doc::ReferenceKind::Equation),
+        ] {
+            assert_eq!(
+                doc_reference_kind(wire as i32),
+                Some(expected as i32),
+                "{wire:?} has a member of its own"
+            );
+        }
+        // A source that stated no kind did not distinguish, and folding
+        // that to the zero member would say it did.
+        assert_eq!(
+            doc_reference_kind(pb::ReferenceKind::Unspecified as i32),
+            None
+        );
+        // A kind from a future wire this build does not know is not guessed
+        // at either.
+        assert_eq!(doc_reference_kind(9999), None);
     }
 
     #[test]

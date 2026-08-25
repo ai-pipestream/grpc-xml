@@ -152,11 +152,13 @@ have no pages and no boxes, and the path is the honest locator.
 `TextItemBase.spans`: styles onto `Formatting` (including its `monospace`,
 `small_caps` and `math` bits), an `ext-link` href onto
 `InlineSpan.hyperlink`, and each `xref`/`claim-ref` identifier onto its own
-`InlineSpan.target` with `reference_kind` set when this schema names the
-kind. The two reference vocabularies overlap rather than match: the wire's
-is the union of what the dialects say, so `CROSS_REF`, `FIGURE`, `TABLE`
-and `EQUATION` leave `reference_kind` unset, which reads as "not
-distinguished" rather than as a wrong classification. Targets are
+`InlineSpan.target`, with `reference_kind` naming what it points at and
+`InlineSpan.reference` keeping the source's key verbatim. The two reference
+vocabularies match member for member, so every kind a dialect states lands;
+only a source that stated no kind leaves `reference_kind` unset, which
+reads as "not distinguished". The key is kept whether or not the target
+resolves, so an unresolved reference is legible without taking the ref
+string apart. Targets are
 written as the source name (`#b1`) while the parse runs and are resolved
 onto item refs when the stream ends, because a citation normally names an
 entry that arrives after it; an identifier the document never defines keeps
