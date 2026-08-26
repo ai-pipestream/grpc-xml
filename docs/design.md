@@ -337,11 +337,24 @@ collector gets. The *content* is what is not mapped, not the fact of it: the
 fold emits a placeholder `GroupItem` at the island's position, named
 `html-island` in `name` and `label_raw` (no `GroupLabel` fits an island, and
 claiming one would say what it is not) and carrying the same `xml.` locators
-every other item carries. Deliberately not a `TextItem`: an island's text is
-not this fold's to state, and putting a locator in `text` would be prose the
-source never wrote. Its place among the body's children is the reading-order
-fact, so a reader can tell a paragraph that followed an island from one that
-followed nothing.
+every other item carries. The group rather than a text item, because a
+container is what a group is for, and its place among the body's children is
+the reading-order fact: a reader can tell a paragraph that followed an
+island from one that followed nothing.
+
+Inside the group sits one `TextItem` holding what the island says.
+`TextItemBase.raw` is the fragment as the source wrote it, and `text` is its
+character data, which is the projection of that raw the schema documents the
+field as pairing with. Pulling text nodes out of XHTML is the same
+well-defined operation this parser performs on every other element, so an
+island's words are no longer absent from the plane. Its **structure** still
+is: which runs were headings, list items or cells is the HTML collector's
+answer to give, which is what the attachment below is for. The text carries
+one space at every element boundary, unconditionally, because this parser
+does not know which XHTML elements are inline: separating always puts a
+space where a renderer would not, joining always would invent words the
+document does not contain, and the second is the worse failure and the
+silent one.
 
 Each island also becomes a `SubDocumentRef` in `Document.attachments`, which
 the schema documents as a nested payload addressable for fan-out parsing,

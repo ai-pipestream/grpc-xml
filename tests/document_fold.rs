@@ -976,7 +976,7 @@ fn an_html_island_leaves_a_placeholder_naming_what_was_skipped() {
     assert_eq!(
         texts_labelled(&document, doc::DocItemLabel::Paragraph),
         vec!["Text before the island.", "Text after the island."],
-        "the island contributes no items of its own"
+        "the island contributes no paragraphs: its structure is not stated"
     );
     let meta = body(&document).meta.as_ref().expect("body meta");
     assert_eq!(
@@ -1040,6 +1040,55 @@ fn an_html_island_leaves_a_placeholder_naming_what_was_skipped() {
         attachment.size_bytes, bytes,
         "the size is the fragment the wire carried"
     );
+}
+
+#[test]
+fn the_island_placeholder_holds_the_markup_and_the_words_it_carries() {
+    let config = ParseConfig {
+        emit_html_islands: true,
+        ..ParseConfig::default()
+    };
+    let (_, document) = fold(JATS_WITH_ISLAND, &config);
+
+    // One item under the placeholder, and it is the island's own content.
+    let children = children_of(&document, "#/groups/0");
+    assert_eq!(children, ["#/texts/3"], "{children:?}");
+    let item = base(&document.texts[3]);
+    assert_eq!(
+        item.parent.as_ref().map(|p| p.r#ref.as_str()),
+        Some("#/groups/0")
+    );
+
+    // The markup verbatim, in the slot the schema grew for a raw source
+    // form, and the words as its projection.
+    let raw = item
+        .raw
+        .as_deref()
+        .expect("the fragment as the source wrote it");
+    assert!(raw.starts_with("<xhtml:div"), "{raw}");
+    assert!(raw.contains("<xhtml:em>HTML</xhtml:em>"), "{raw}");
+    assert!(raw.ends_with("</xhtml:div>"), "{raw}");
+    assert!(
+        raw.contains('\u{2019}') && raw.contains('\u{3bb}'),
+        "the multi-byte characters survive re-serialization: {raw}"
+    );
+
+    assert_eq!(
+        item.text,
+        "Rendu par le collecteur HTML . Fin de l\u{2019}encart : \u{3bb}."
+    );
+    assert_eq!(item.orig, item.text);
+
+    // Stated in the same slots every other item states them in.
+    assert_eq!(item.source_element_name.as_deref(), Some("xhtml:div"));
+    assert_eq!(
+        item.source_namespace.as_deref(),
+        Some("http://www.w3.org/1999/xhtml")
+    );
+    assert_eq!(collector(&item.source).model.as_deref(), Some("jats"));
+
+    // Still merge-safe with the extra item in it.
+    assert!(integrity_errors(&document).is_empty());
 }
 
 #[test]

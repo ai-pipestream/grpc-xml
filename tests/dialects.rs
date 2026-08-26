@@ -916,6 +916,16 @@ async fn xhtml_is_flattened_by_default_and_handed_off_on_request() {
     let html = String::from_utf8(island.html.clone()).expect("islands are UTF-8");
     assert!(html.starts_with("<xhtml:div"), "{html}");
     assert!(html.contains("<xhtml:em>HTML</xhtml:em>"), "{html}");
+    // The character data, whitespace collapsed and entities decoded. The
+    // space after `HTML` is the tradeoff stated in the field's comment: this
+    // parser does not know which XHTML elements are inline, so it separates
+    // at every boundary rather than risk joining two words into one that
+    // does not exist. A no-break space collapses like any other, which is
+    // what `collapse` does for every item in this collector.
+    assert_eq!(
+        island.text,
+        "Rendu par le collecteur HTML . Fin de l\u{2019}encart : \u{3bb}."
+    );
     assert!(html.ends_with("</xhtml:div>"), "{html}");
     assert_eq!(island.source.as_ref().unwrap().collector, "xml");
 

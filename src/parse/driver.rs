@@ -369,8 +369,12 @@ impl<R: BufRead> Driver<'_, R> {
     }
 
     pub(super) fn on_text(&mut self, text: &str, from_cdata: bool) {
-        if let Some(island) = self.island.as_mut() {
-            let _ = island.writer.write_event(Event::Text(BytesText::new(text)));
+        if self.island.is_some() {
+            let _ = self
+                .island
+                .as_mut()
+                .map(|island| island.writer.write_event(Event::Text(BytesText::new(text))));
+            self.write_island_text(text);
             return;
         }
         if let Some(capture) = self.capture.as_mut() {
@@ -420,10 +424,13 @@ impl<R: BufRead> Driver<'_, R> {
             );
             format!("&{name};")
         };
-        if let Some(island) = self.island.as_mut() {
-            let _ = island
-                .writer
-                .write_event(Event::Text(BytesText::from_escaped(text)));
+        if self.island.is_some() {
+            let _ = self.island.as_mut().map(|island| {
+                island
+                    .writer
+                    .write_event(Event::Text(BytesText::from_escaped(&text)))
+            });
+            self.write_island_text(&text);
             return;
         }
         if let Some(capture) = self.capture.as_mut() {

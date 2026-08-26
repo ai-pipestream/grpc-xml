@@ -1126,6 +1126,23 @@ message HtmlIsland {
 
   // Provenance, always set.
   CollectorSource source = 6;
+
+  // The island's character data, in document order, with runs of whitespace
+  // collapsed and one space at every element boundary.
+  //
+  // An island is XHTML inside XML, so pulling its text nodes out is the
+  // same well-defined operation this parser performs on every other
+  // element, and it is offered for that reason. Its *structure* is not:
+  // which runs are headings, list items or cells is the HTML collector's
+  // answer to give, and this field says nothing about it.
+  //
+  // The boundary space is unconditional because this parser does not know
+  // which XHTML elements are inline. Separating always puts a space where a
+  // renderer would not (`the <em>HTML</em>.` reads as `the HTML .`);
+  // joining always would invent words the document does not contain, which
+  // is the worse failure and a silent one. A consumer that needs the
+  // difference has `html` and the attachment that points at it.
+  string text = 7;
 }
 
 // WarningCode classifies a non-fatal finding of the parse.

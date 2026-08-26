@@ -856,6 +856,16 @@ impl DocumentFold {
     /// is exactly what an island is, and `item_ref` points back at the
     /// placeholder so a coordinator that parses the fragment knows where its
     /// result belongs.
+    ///
+    /// Inside the group sits one text item holding what the island actually
+    /// says: its markup verbatim in `TextItemBase.raw`, and its character
+    /// data in `text`, which is the projection of that raw the field is
+    /// documented as pairing with. Pulling text nodes out of XHTML is the
+    /// same well-defined operation this parser performs on every other
+    /// element, so the words are not lost the way they used to be. The
+    /// island's *structure* is still not stated: which runs were headings,
+    /// list items or cells is the HTML collector's answer, and the
+    /// attachment is how a coordinator asks for it.
     fn on_html_island(&mut self, island: &pb::HtmlIsland) {
         self.islands_skipped += 1;
         self.end_list_run();
@@ -888,6 +898,7 @@ impl DocumentFold {
             ..doc::GroupItem::default()
         });
         self.link_child(&parent, &self_ref);
+        self.push_island_source(&self_ref, island);
         self.document.attachments.push(doc::SubDocumentRef {
             // The path is the island's identity within this document, and it
             // is the only stable one it has: an island need not carry an id.
@@ -899,6 +910,49 @@ impl DocumentFold {
             class_id: None,
             kind: Some(HTML_ISLAND_KIND.to_owned()),
         });
+    }
+
+    /// The island's own content, under its placeholder: the markup verbatim
+    /// and the words it carries.
+    ///
+    /// An island with no character data at all still gets the item, because
+    /// its markup is the point and an empty `text` is the honest projection
+    /// of a fragment that renders nothing.
+    fn push_island_source(&mut self, group_ref: &str, island: &pb::HtmlIsland) {
+        let self_ref = format!("#/texts/{}", self.document.texts.len());
+        let mut fields = HashMap::new();
+        fields.insert("xml.html_island".to_owned(), flag(true));
+        if !island.path.is_empty() {
+            fields.insert("xml.path".to_owned(), string(&island.path));
+        }
+        self.document.texts.push(doc::BaseTextItem {
+            item: Some(doc::base_text_item::Item::Text(doc::TextItem {
+                base: Some(doc::TextItemBase {
+                    self_ref: self_ref.clone(),
+                    parent: Some(reference(group_ref)),
+                    content_layer: doc::ContentLayer::Body as i32,
+                    meta: Some(doc::BaseMeta {
+                        custom_fields: fields,
+                        ..doc::BaseMeta::default()
+                    }),
+                    label: doc::DocItemLabel::Text as i32,
+                    orig: island.text.clone(),
+                    text: island.text.clone(),
+                    source: vec![self.source_of(island.source.as_ref())],
+                    // The fragment as the source wrote it. `text` above is a
+                    // projection of exactly this, which is the pairing the
+                    // schema documents for the field.
+                    raw: Some(String::from_utf8_lossy(&island.html).into_owned()),
+                    // The element that roots the island, in the slots every
+                    // other item states it in.
+                    source_element_name: element_of(&island.path),
+                    source_namespace: (!island.namespace.is_empty())
+                        .then(|| island.namespace.clone()),
+                    ..doc::TextItemBase::default()
+                }),
+            })),
+        });
+        self.link_child(group_ref, &self_ref);
     }
 
     // --------------------------------------------------------------- pictures
@@ -1755,6 +1809,17 @@ fn text_fields(item: &pb::TextItem) -> HashMap<String, Value> {
         fields.insert("xml.from_cdata".to_owned(), flag(true));
     }
     fields
+}
+
+/// The last step of a positional path, without its index predicate.
+///
+/// An island event carries the path of the element that roots it but not
+/// that element's name on its own, and the last step is exactly the name:
+/// `/article/body/table-wrap[2]/xhtml:table` names `xhtml:table`.
+fn element_of(path: &str) -> Option<String> {
+    let step = path.rsplit('/').next()?;
+    let name = step.split('[').next()?;
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// The source element an item came from, for the schema's own two slots.

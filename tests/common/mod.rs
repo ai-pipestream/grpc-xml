@@ -715,7 +715,8 @@ pub const JATS_WITH_ISLAND: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
       <title>Embedded markup</title>
       <p>Text before the island.</p>
       <xhtml:div id="widget" class="callout">
-        <xhtml:p>Rendered by the <xhtml:em>HTML</xhtml:em> collector.</xhtml:p>
+        <xhtml:p>Rendu par le collecteur <xhtml:em>HTML</xhtml:em>.</xhtml:p>
+        <xhtml:p>Fin de l&#8217;encart&#160;: &#955;.</xhtml:p>
       </xhtml:div>
       <p>Text after the island.</p>
     </sec>
