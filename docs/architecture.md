@@ -29,7 +29,10 @@ the same streaming machinery.
 
 HTML islands inside JATS (or XHTML in XBRL labels) are **not**
 re-parsed with a second XML stack. They are handed to the HTML
-collector as opaque fragments, the same way email HTML bodies are.
+collector as opaque fragments, the same way email HTML bodies are. The
+Document projection marks where each one sat with a placeholder group and
+registers it in `Document.attachments`, so the fragment is addressable for
+that hand-off rather than merely absent.
 
 ## Live results
 
@@ -75,6 +78,7 @@ request, not a filesystem path, because this service is diskless.
 | HTML/CSS layout of JATS bodies | HTML collector |
 | PDF of the same paper | gRParse CV, a different collector on the same parse |
 | Taxonomy hosting | client sends the package; we do not fetch from the web |
+| XBRL label resolution | a stage that has the taxonomy; this process is diskless and fetches nothing, so `Fact.label` is the concept local name and the wire carries namespace, prefix and local name for a later stage to label |
 
 ## Language
 

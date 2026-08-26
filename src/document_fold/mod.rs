@@ -73,6 +73,14 @@ const BODY_REF: &str = "#/body";
 /// no page chrome to put there.
 const FURNITURE_REF: &str = "#/furniture";
 
+/// The name and kind of an XHTML island's placeholder, in both the group
+/// that marks its position and the attachment that makes it addressable.
+const HTML_ISLAND_KIND: &str = "html-island";
+
+/// Media type of an island's bytes, which is what the HTML collector will
+/// be handed.
+const XHTML_MEDIA_TYPE: &str = "application/xhtml+xml";
+
 /// `SummaryMetaField.created_by` for a summary the document wrote itself.
 /// Nothing here generates a summary; an abstract is quoted, not produced.
 const SUMMARY_CREATED_BY: &str = "source";
@@ -220,7 +228,7 @@ impl DocumentFold {
             Some(Event::Page(page)) => self.on_page(page),
             Some(Event::XbrlNote(note)) => self.on_xbrl_note(note),
             Some(Event::OutlineItem(entry)) => self.on_outline_item(entry),
-            Some(Event::HtmlIsland(_)) => self.islands_skipped += 1,
+            Some(Event::HtmlIsland(island)) => self.on_html_island(island),
             // The trailer is counts and warnings, both of which describe the
             // typed stream rather than the document; the fold sees it only so
             // it knows the stream is over.
@@ -818,6 +826,75 @@ impl DocumentFold {
     /// End the run of list items any non-list content interrupts.
     fn end_list_run(&mut self) {
         self.lists.clear();
+    }
+
+    // --------------------------------------------------------------- islands
+
+    /// Mark the place an XHTML island was skipped, and register it as a
+    /// payload something else can parse.
+    ///
+    /// The fold does not map an island: an XHTML fragment is the HTML
+    /// collector's job, and re-parsing it with an XML stack would produce a
+    /// worse result than that collector gets. It used to leave nothing at
+    /// all, so a reader of the Document could not tell a paragraph that
+    /// followed an island from one that followed nothing, and had no way to
+    /// ask for what was there.
+    ///
+    /// The placeholder is a `GroupItem`, which is what the schema has for a
+    /// container of document elements. Deliberately not a `TextItem`: an
+    /// island's text is not this fold's to state, and putting a locator in
+    /// `text` would be prose the source never wrote. It holds the source
+    /// locators the way every other item holds them, and its position in the
+    /// body's children is the reading-order fact.
+    ///
+    /// `Document.attachments` is the second half: a `SubDocumentRef` is
+    /// documented as a nested payload addressable for fan-out parsing, which
+    /// is exactly what an island is, and `item_ref` points back at the
+    /// placeholder so a coordinator that parses the fragment knows where its
+    /// result belongs.
+    fn on_html_island(&mut self, island: &pb::HtmlIsland) {
+        self.islands_skipped += 1;
+        self.end_list_run();
+        let parent = self.current_parent();
+        let self_ref = format!("#/groups/{}", self.document.groups.len());
+        let mut fields = HashMap::new();
+        fields.insert("xml.html_island".to_owned(), flag(true));
+        if !island.path.is_empty() {
+            fields.insert("xml.path".to_owned(), string(&island.path));
+        }
+        if !island.namespace.is_empty() {
+            fields.insert("xml.namespace".to_owned(), string(&island.namespace));
+        }
+        if let Some(id) = island.element_id.as_ref().filter(|id| !id.is_empty()) {
+            fields.insert("xml.element_id".to_owned(), string(id));
+        }
+        self.document.groups.push(doc::GroupItem {
+            self_ref: self_ref.clone(),
+            parent: Some(reference(&parent)),
+            content_layer: doc::ContentLayer::Body as i32,
+            meta: Some(doc::BaseMeta {
+                custom_fields: fields,
+                ..doc::BaseMeta::default()
+            }),
+            name: Some(HTML_ISLAND_KIND.to_owned()),
+            // No group label fits: an island is not a list, a chapter or a
+            // form area, and claiming one would say what it is not.
+            // `label_raw` is the forward-compatible slot for exactly this.
+            label_raw: Some(HTML_ISLAND_KIND.to_owned()),
+            ..doc::GroupItem::default()
+        });
+        self.link_child(&parent, &self_ref);
+        self.document.attachments.push(doc::SubDocumentRef {
+            // The path is the island's identity within this document, and it
+            // is the only stable one it has: an island need not carry an id.
+            id: island.path.clone(),
+            name: island.path.clone(),
+            media_type: XHTML_MEDIA_TYPE.to_owned(),
+            size_bytes: island.html.len() as u64,
+            item_ref: Some(self_ref),
+            class_id: None,
+            kind: Some(HTML_ISLAND_KIND.to_owned()),
+        });
     }
 
     // --------------------------------------------------------------- pictures

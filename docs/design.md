@@ -129,14 +129,14 @@ rather than any part of it.
 
 **Word boxes.** hOCR marks each word inside a line with its own box and its
 own `x_wconf` (`ocrx_word`), and those boxes are the only thing in the
-format that says where *inside* a line a word is — a consumer highlighting a
+format that says where *inside* a line a word is: a consumer highlighting a
 search hit on the page scan needs the word, and the line's box cannot give
 it. `TextItem.words` carries one `WordBox` per marked word: its run in the
 item's text (code points, translated onto the collapsed text the same way an
 inline run is), its box, and its own confidence when the source states one.
 A word with no `bbox` clause states no geometry rather than a fabricated
 one, and a word with no `x_wconf` leaves `confidence` unset rather than
-claiming certainty — unlike the *line*, which defaults to 1.0 as it always
+claiming certainty, unlike the *line*, which defaults to 1.0 as it always
 has. The fold turns each into its own `ProvenanceItem` after the line's,
 which is what `prov` being repeated is for: the line entry's `charspan`
 covers the item, each word entry's `charspan` is the word, and the pairing
@@ -195,9 +195,10 @@ statement each rather than two. The record is gated by
 undecoded is named on the trailer so the omission is visible.
 
 On the Document plane a statement lands in the typed slot `DocumentMeta` has
-for it — `title`, `authors` (a `creator` or a `contributor`), `keywords` (a
-catalogue `subject` is a topical term, and there may be several, which the
-single-string `subject` field could not hold), `language` — and in `extra`
+for it (`title`, `authors` for a `creator` or a `contributor`, `keywords`
+because a catalogue `subject` is a topical term and there may be several,
+which the single-string `subject` field could not hold, and `language`), and
+in `extra`
 only when the schema has no field at all, which today means `publisher` and
 `description`. `extra` is documented as being for genuinely open vocabulary,
 so nothing with a slot goes in it.
@@ -242,7 +243,7 @@ plane models what an item *is*, not what tag it was written as, and a
 consumer matching on the source vocabulary should not have to re-split a
 positional path to get the name back. `xml.namespace` is the item's own
 namespace, recorded **only when it differs from the root's**, which the body
-meta already states — a `mml:math` inside a JATS article is the case worth
+meta already states. A `mml:math` inside a JATS article is the case worth
 stating, and repeating one URI on every item of a single-namespace document
 would be noise. `xml.from_cdata` is written only when true, so its absence
 means ordinary character data rather than a false entry on every item.
@@ -286,7 +287,7 @@ created *first* and referenced from the table's `captions[]`.
 A cell is a capture like any other. Its markup flattens into the cell's text
 and the dialect's inline vocabulary leaves a run over it, so `TableCell.spans`
 folds onto `TableCell.spans` on the Document plane exactly as a paragraph's
-runs fold onto `TextItemBase.spans` — styles onto `Formatting`, an `ext-link`
+runs fold onto `TextItemBase.spans`: styles onto `Formatting`, an `ext-link`
 onto `hyperlink`, an `xref` onto a `target` with its `reference_kind` and its
 key. A cross-reference inside a cell resolves in the same end-of-stream pass
 a paragraph's does: a citation in a cell names the same reference list, and
@@ -305,7 +306,7 @@ The fold lands them on `TableData.columns`, one `TableColumnSchema` per
 declared column: the name when the source declares one (presence-tracked, so
 an unnamed column says nothing rather than `""`), the width verbatim in
 `width_raw` because a CALS `2*` is a share of the table and a `30%` a share
-of something else again — neither is the page unit `width` means — and the
+of something else again, and neither is the page unit `width` means, plus the
 two alignment axes in their own fields. A cell's own `@align`/`@valign`
 override the column's and land on the cell. `ALIGNMENT_CHAR`, which CALS
 declares and the Document plane has no member for, stays on the typed wire
@@ -322,10 +323,25 @@ only by the input, and the request byte cap is what bounds both.
 
 ### 4.2 Deliberately not mapped
 
-**`html_island` events.** An XHTML fragment is the HTML collector's job;
+**`html_island` content.** An XHTML fragment is the HTML collector's job;
 re-parsing it with an XML stack would produce a worse result than that
-collector gets. The fold counts what it skipped in
-`body.meta.custom_fields["xml.html_islands"]` so the omission is visible.
+collector gets. The *content* is what is not mapped, not the fact of it: the
+fold emits a placeholder `GroupItem` at the island's position, named
+`html-island` in `name` and `label_raw` (no `GroupLabel` fits an island, and
+claiming one would say what it is not) and carrying the same `xml.` locators
+every other item carries. Deliberately not a `TextItem`: an island's text is
+not this fold's to state, and putting a locator in `text` would be prose the
+source never wrote. Its place among the body's children is the reading-order
+fact, so a reader can tell a paragraph that followed an island from one that
+followed nothing.
+
+Each island also becomes a `SubDocumentRef` in `Document.attachments`, which
+the schema documents as a nested payload addressable for fan-out parsing,
+which is precisely what an island is. `item_ref` points back at the
+placeholder, so a coordinator that hands the fragment to the HTML collector
+knows where the result belongs, and `integrity_errors` holds that pointer to
+the same merge contract as every other ref. The count stays in
+`body.meta.custom_fields["xml.html_islands"]`.
 
 **Image payloads.** An XML picture is a filename or an `xlink:href`, never
 pixels: the `PictureItem` is a placeholder and its `image` stays unset. This
@@ -349,7 +365,7 @@ document.
 **Processing instructions.** An instruction is addressed to an application,
 and this service is not that application: acting on one is exactly the
 "resolve what the document asks for" the security policy refuses. It is
-still content the source put there, so it is no longer dropped in silence —
+still content the source put there, so it is no longer dropped in silence:
 `WARNING_CODE_UNMAPPED_ELEMENT` names its target on the trailer, in the
 prolog as well as in the body. Only the target is named: an instruction's
 data is arbitrarily long and the warning table aggregates by message, so
@@ -369,6 +385,23 @@ one KEY cell per axis linked to the VALUE cell holding its member, and the
 fact row's `context` cell points at it. An XBRL footnote is narrative a
 filer attached to a number, so it folds as a `FOOTNOTE` item; a label names
 a concept in a schema this service never reads and stays on the wire.
+
+### 4.3 A boundary, not a deferral: XBRL label linkbases
+
+`Fact.label` is the concept's local name and always will be in this service.
+Resolving a taxonomy label linkbase means reading the taxonomy: a set of
+schema and linkbase documents that live outside the instance, are referenced
+by URI, and in practice are fetched from the web or unpacked from a
+distribution. This service is diskless and fetches nothing (see the security
+posture in `architecture.md`), so it has nothing to resolve against, and a
+`taxonomy` blob on the request is accepted only to be reported as unused via
+`WARNING_CODE_TAXONOMY_IGNORED`.
+
+That is a boundary of what this process owns, not work postponed. Label
+resolution belongs to a stage that has the taxonomy: the wire carries the
+concept namespace, prefix and local name on every fact, which is everything
+such a stage needs to attach a label afterwards. Nothing here should grow a
+taxonomy reader.
 
 **USPTO claims as list items.** They stream as `TEXT` with `role = "claim"`
 and an ordinal, and that is what they fold to; the claim numbering is in

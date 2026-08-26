@@ -196,6 +196,19 @@ impl Walk {
                 ));
             }
         }
+        // An attachment points back at the item marking where its payload
+        // sat, and a pointer into the arena is a merge contract like any
+        // other.
+        for attachment in &document.attachments {
+            if let Some(item_ref) = attachment.item_ref.as_ref()
+                && !self.refs.contains(item_ref)
+            {
+                self.errors.push(format!(
+                    "attachment {} points at {item_ref}, which does not resolve",
+                    attachment.id
+                ));
+            }
+        }
         let captions = document
             .tables
             .iter()

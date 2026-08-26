@@ -919,7 +919,7 @@ fn a_code_block_folds_into_a_code_item_that_inlines_its_base_fields() {
 }
 
 #[test]
-fn html_islands_are_left_to_the_html_collector_and_counted_on_the_body() {
+fn an_html_island_leaves_a_placeholder_naming_what_was_skipped() {
     let config = ParseConfig {
         emit_html_islands: true,
         ..ParseConfig::default()
@@ -936,6 +936,85 @@ fn html_islands_are_left_to_the_html_collector_and_counted_on_the_body() {
         number(&meta.custom_fields, "xml.html_islands"),
         Some(1.0),
         "what the projection dropped is stated, not hidden"
+    );
+
+    // The island held a place in the document, and the placeholder holds it
+    // still: a reader can tell the second paragraph followed something.
+    assert_eq!(document.groups.len(), 1, "one placeholder per island");
+    let placeholder = &document.groups[0];
+    assert_eq!(placeholder.self_ref, "#/groups/0");
+    assert_eq!(placeholder.name.as_deref(), Some("html-island"));
+    assert_eq!(
+        placeholder.label_raw.as_deref(),
+        Some("html-island"),
+        "no group label fits an island, so it says so in the raw slot"
+    );
+    let fields = &placeholder
+        .meta
+        .as_ref()
+        .expect("placeholder meta")
+        .custom_fields;
+    assert_eq!(
+        field(fields, "xml.path"),
+        Some("/article/body/sec/xhtml:div")
+    );
+    assert_eq!(field(fields, "xml.element_id"), Some("widget"));
+    assert_eq!(
+        field(fields, "xml.namespace"),
+        Some("http://www.w3.org/1999/xhtml")
+    );
+    // In reading order, between the two paragraphs, under the same heading.
+    let heading = ref_of(&document, "Embedded markup");
+    let siblings = children_of(&document, &heading);
+    let placed = siblings
+        .iter()
+        .position(|r| r == "#/groups/0")
+        .expect("the placeholder is a child of the heading it sat under");
+    let before = siblings
+        .iter()
+        .position(|r| r == &ref_of(&document, "Text before the island."))
+        .expect("the first paragraph");
+    let after = siblings
+        .iter()
+        .position(|r| r == &ref_of(&document, "Text after the island."))
+        .expect("the second paragraph");
+    assert!(before < placed && placed < after, "{siblings:?}");
+
+    // And it is addressable: a coordinator that parses the fragment knows
+    // where the result belongs.
+    assert_eq!(document.attachments.len(), 1);
+    let attachment = &document.attachments[0];
+    assert_eq!(attachment.id, "/article/body/sec/xhtml:div");
+    assert_eq!(attachment.media_type, "application/xhtml+xml");
+    assert_eq!(attachment.kind.as_deref(), Some("html-island"));
+    assert_eq!(attachment.item_ref.as_deref(), Some("#/groups/0"));
+    let bytes = common::islands(&events)[0].html.len() as u64;
+    assert_eq!(
+        attachment.size_bytes, bytes,
+        "the size is the fragment the wire carried"
+    );
+}
+
+#[test]
+fn the_checker_catches_an_attachment_pointing_at_nothing() {
+    let config = ParseConfig {
+        emit_html_islands: true,
+        ..ParseConfig::default()
+    };
+    let (_, mut document) = fold(JATS_WITH_ISLAND, &config);
+    document.attachments[0].item_ref = Some("#/groups/9".to_owned());
+    let errors = integrity_errors(&document);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("#/groups/9"), "{errors:?}");
+}
+
+#[test]
+fn a_document_with_no_islands_registers_no_attachment() {
+    let (_, document) = fold_default(JATS);
+    assert!(document.attachments.is_empty());
+    assert!(
+        document.groups.is_empty(),
+        "and mints no placeholder for one that was never there"
     );
 }
 
