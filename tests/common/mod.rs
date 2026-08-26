@@ -678,6 +678,33 @@ pub const JATS_CALS_TABLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </article>
 "#;
 
+/// A `DocLang` document whose lists nest, so the depth the wire reports and
+/// the groups the fold builds have something to be right about.
+///
+/// The bulleted list inside the ordered one is a sibling of the item it
+/// follows, which is where a container-nested list is written; a nested list
+/// written *inside* an item is flattened into that item's text, as anything
+/// inside a capture is.
+pub const DOCLANG_NESTED_LISTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<doclang xmlns="http://docling-project.org/ns/doclang/v1" version="1">
+  <title>Ablauf</title>
+  <paragraph>Vor der Liste.</paragraph>
+  <list type="order">
+    <list-item>Erste Stufe</list-item>
+    <list-item>Zweite Stufe</list-item>
+    <list>
+      <list-item>Untereintrag α</list-item>
+      <list-item>Untereintrag β</list-item>
+    </list>
+    <list-item>Dritte Stufe</list-item>
+  </list>
+  <paragraph>Nach der Liste.</paragraph>
+  <ul>
+    <li>Ein zweiter Lauf</li>
+  </ul>
+</doclang>
+"#;
+
 /// A JATS article carrying an XHTML island, for the hand-off path.
 pub const JATS_WITH_ISLAND: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/"

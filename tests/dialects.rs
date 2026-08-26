@@ -10,9 +10,9 @@
 mod common;
 
 use common::{
-    DOCLANG, JATS, JATS_CALS_TABLE, JATS_WITH_ISLAND, USPTO, XBRL, client, facts, info, islands,
-    items_labelled, items_with_role, options, parse_ok, run_of, status, table_ends, table_rows,
-    text_items, texts, warned,
+    DOCLANG, DOCLANG_NESTED_LISTS, JATS, JATS_CALS_TABLE, JATS_WITH_ISLAND, USPTO, XBRL, client,
+    facts, info, islands, items_labelled, items_with_role, options, parse_ok, run_of, status,
+    table_ends, table_rows, text_items, texts, warned,
 };
 use grpc_xml::proto::v1 as pb;
 
@@ -1171,4 +1171,71 @@ async fn a_comment_stays_silent_because_it_is_a_note_to_an_author() {
             .any(|w| w.message.contains("processing instruction")),
         "a comment is not a processing instruction"
     );
+}
+
+#[tokio::test]
+async fn a_list_item_reports_the_depth_and_the_kind_of_the_list_it_is_in() {
+    let client = client().await;
+    let events = parse_ok(&client, DOCLANG_NESTED_LISTS, options()).await;
+    let items: Vec<(String, Option<u32>, bool)> =
+        items_labelled(&events, pb::XmlItemLabel::ListItem)
+            .iter()
+            .map(|i| (i.text.clone(), i.list_depth, i.enumerated))
+            .collect();
+    assert_eq!(
+        items,
+        [
+            ("Erste Stufe".to_owned(), Some(1), true),
+            ("Zweite Stufe".to_owned(), Some(1), true),
+            // The inner list is a container of its own, so its items are one
+            // level deeper, and it inherits nothing about being ordered.
+            ("Untereintrag α".to_owned(), Some(2), false),
+            ("Untereintrag β".to_owned(), Some(2), false),
+            ("Dritte Stufe".to_owned(), Some(1), true),
+            ("Ein zweiter Lauf".to_owned(), Some(1), false),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_paragraph_is_never_in_a_list_even_when_one_is_open() {
+    let client = client().await;
+    let events = parse_ok(&client, DOCLANG_NESTED_LISTS, options()).await;
+    for item in items_labelled(&events, pb::XmlItemLabel::Paragraph) {
+        assert_eq!(item.list_depth, None, "{}", item.text);
+        assert!(!item.enumerated, "{}", item.text);
+    }
+}
+
+#[tokio::test]
+async fn a_jats_list_declares_its_own_kind_rather_than_leaving_it_to_the_items() {
+    let source = r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <front><article-meta><title-group><article-title>Listen</article-title></title-group></article-meta></front>
+  <body><sec id="s1"><title>Schritte</title>
+    <list list-type="order-alpha-lower">
+      <list-item>Erster Schritt</list-item>
+    </list>
+    <list list-type="bullet">
+      <list-item>Ein Punkt</list-item>
+    </list>
+  </sec></body>
+</article>
+"#;
+    let client = client().await;
+    let events = parse_ok(&client, source, options()).await;
+    let items = items_labelled(&events, pb::XmlItemLabel::ListItem);
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| (i.text.clone(), i.enumerated))
+            .collect::<Vec<_>>(),
+        [
+            // No item here carries an ordinal, so before the list said so
+            // there was nothing to read the kind off at all.
+            ("Erster Schritt".to_owned(), true),
+            ("Ein Punkt".to_owned(), false),
+        ]
+    );
+    assert!(items.iter().all(|i| i.ordinal.is_none()));
 }

@@ -379,6 +379,53 @@ pub const COLUMN_SPEC_ELEMENTS: &[&str] = &["colspec", "col"];
 /// Element local names that may hold a caption for a table that follows.
 const CAPTION_WRAPPERS: &[&str] = &["table-wrap", "fig", "figure", "table-container"];
 
+/// Whether this element opens a list, and if so whether the list is ordered.
+///
+/// A list is declared by its container, not by its items: a JATS
+/// `list/@list-type` and an `ol` element both say "the items under me are
+/// numbered" without any item saying so. Counting the open containers is
+/// also what gives an item its nesting depth, which is why one function
+/// answers both questions.
+#[must_use]
+pub fn list_container(dialect: Dialect, ctx: &ElementCtx<'_>) -> Option<bool> {
+    match dialect {
+        // JATS spells the kind in `@list-type`, whose ordered values all
+        // begin `order` (`order`, `order-alpha-lower`, ...). A description
+        // list is a list whose items are not numbered.
+        Dialect::Jats => match ctx.local {
+            "list" => Some(
+                ctx.attrs
+                    .get("list-type")
+                    .is_some_and(|kind| kind.trim().starts_with("order")),
+            ),
+            "def-list" => Some(false),
+            _ => None,
+        },
+        Dialect::Uspto => match ctx.local {
+            "ol" => Some(true),
+            "ul" => Some(false),
+            _ => None,
+        },
+        Dialect::Doclang | Dialect::Dclx => match ctx.local {
+            "ol" => Some(true),
+            "ul" => Some(false),
+            "list" => Some(
+                ctx.attrs
+                    .get("ordered")
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"))
+                    || ctx
+                        .attrs
+                        .get("type")
+                        .is_some_and(|kind| kind.trim().starts_with("order")),
+            ),
+            _ => None,
+        },
+        // An XBRL instance has no prose, and a METS export's hOCR is lines
+        // on a page rather than a document tree.
+        Dialect::Xbrl | Dialect::MetsGbs => None,
+    }
+}
+
 /// Element local names that nest to imply a heading level.
 #[must_use]
 pub const fn section_containers(dialect: Dialect) -> &'static [&'static str] {

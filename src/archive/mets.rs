@@ -545,6 +545,9 @@ impl MetsDriver<'_> {
                 byte_start: None,
                 byte_end: None,
                 from_cdata: false,
+                // An OCR line is a line on a page, not an item of a list.
+                list_depth: None,
+                enumerated: false,
             };
             self.counts.text_items += 1;
             self.send(pb::parse_xml_response::Event::TextItem(item))?;

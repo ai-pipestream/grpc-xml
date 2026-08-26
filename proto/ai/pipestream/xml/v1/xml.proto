@@ -581,6 +581,20 @@ message TextItem {
   // is that the source declared it exempt from markup, which is worth
   // knowing about a fragment that contains angle brackets.
   bool from_cdata = 18;
+
+  // For `XML_ITEM_LABEL_LIST_ITEM`: how deeply the list this item belongs to
+  // is nested, starting at 1 for a list that is not inside another. Absent
+  // for every other label, and absent for a list item whose dialect has no
+  // list container to count.
+  optional uint32 list_depth = 19;
+
+  // For `XML_ITEM_LABEL_LIST_ITEM`: true when the list the item belongs to
+  // is an ordered one, as the source declares the *list* (a JATS
+  // `list/@list-type`, an `ol` element). This is a different statement from
+  // `ordinal`, which is the number the source gave this one item: a source
+  // may declare an ordered list and number none of its items, or number an
+  // item in a list it never called ordered.
+  bool enumerated = 20;
 }
 
 // TableStart opens a streamed table. Rows follow, then `TableEnd`.

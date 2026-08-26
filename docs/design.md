@@ -91,6 +91,31 @@ the nesting now says the same thing. Content that arrives before the first
 heading sits on `#/body`. **No section `GroupItem`s**: the levels come from
 the parser rather than from tag names, so there is nothing to fill.
 
+**Lists are groups.** A list is declared by its container, not by its items:
+a JATS `list/@list-type` and an `ol` element both say "the items under me
+are numbered" without any item saying so. The driver counts the open list
+containers on its element stack, so a `LIST_ITEM` carries `list_depth` (1
+for a list that is not inside another) and `enumerated` (the kind of the
+list it is in, which is a different statement from `ordinal`, the number the
+source gave one item). Nothing but a list item carries either.
+
+The fold turns that into one `GROUP_LABEL_LIST` / `GROUP_LABEL_ORDERED_LIST`
+`GroupItem` per contiguous list, nested lists as nested groups, each item
+parented to its own list. Any content that is not a list item closes the
+whole stack, which is what makes a group one contiguous list: a paragraph
+between two runs of bullets means two lists, not one. A same-depth list of
+the other kind also closes: a numbered list after a bulleted one is a new
+list. `ListItem.enumerated` reads the container first and falls back to the
+item's own ordinal, because an item the source numbered is in a numbered
+list even when the container never said so.
+
+A dialect with no list vocabulary sends no depth, and those items fold as
+one top-level list, which is the honest reading of a run of list items with
+nothing saying they nest. A list written *inside* an item rather than beside
+it (a JATS `list` within a `list-item`) still flattens into that item's
+text, because everything inside a capture does; that is the same rule as for
+any other nested block structure, not a rule about lists.
+
 **Pages and provenance.** A source is located in whatever space it actually
 has, which is what `ProvenanceItem`'s several coordinate slots are for.
 

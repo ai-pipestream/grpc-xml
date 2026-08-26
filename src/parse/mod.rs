@@ -308,6 +308,10 @@ struct Frame {
     position: usize,
     /// How many children of each name have been seen, for their positions.
     children: HashMap<String, usize>,
+    /// `Some(ordered)` when this element opens a list. Counting these gives
+    /// a list item its nesting depth, and the innermost one says whether its
+    /// list is numbered.
+    list: Option<bool>,
 }
 
 /// A text capture in progress.
@@ -333,6 +337,11 @@ struct Capture {
     attributes: Vec<pb::Attribute>,
     /// Inline runs recognized inside this capture, in the order they opened.
     spans: Vec<SpanBuild>,
+    /// Nesting depth of the list this item belongs to, and whether that list
+    /// is ordered. Both are read off the open-element stack when the capture
+    /// opens, and both are only meaningful for a list item.
+    list_depth: Option<u32>,
+    enumerated: bool,
     /// True when the capture feeds `pending_caption` instead of the stream.
     is_caption: bool,
     /// True when the previous child event was an element end, which is where

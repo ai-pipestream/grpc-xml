@@ -131,6 +131,11 @@ pub struct DocumentFold {
     /// worth recording when it differs from this one, which is the fact that
     /// says the item came from somewhere else.
     root_namespace: String,
+    /// The open list groups, outermost first: the depth the wire gave each
+    /// one, whether it is ordered, and the self ref its items name as their
+    /// parent. Any content that is not a list item closes the whole stack,
+    /// which is what makes a group one contiguous list.
+    lists: Vec<(u32, bool, String)>,
 }
 
 /// A table being assembled from `table_start` / `table_row` / `table_end`.
@@ -187,6 +192,7 @@ impl DocumentFold {
             source_meta: doc::DocumentMeta::default(),
             summary: Vec::new(),
             root_namespace: String::new(),
+            lists: Vec::new(),
         }
     }
 
@@ -249,6 +255,7 @@ impl DocumentFold {
         self.source_meta = doc::DocumentMeta::default();
         self.summary.clear();
         self.root_namespace.clear();
+        self.lists.clear();
         std::mem::replace(&mut self.document, Self::new().document)
     }
 
@@ -587,7 +594,14 @@ impl DocumentFold {
         if label == pb::XmlItemLabel::SectionHeader {
             self.close_headings(level);
         }
-        let parent = self.current_parent();
+        let parent = if label == pb::XmlItemLabel::ListItem {
+            self.list_parent(item)
+        } else {
+            // Anything that is not a list item ends the run of list items,
+            // which is what makes one group one contiguous list.
+            self.lists.clear();
+            self.current_parent()
+        };
         let self_ref = format!("#/texts/{}", self.document.texts.len());
         let fields = text_fields(item, &self.root_namespace);
         let source = self.source_of(item.source.as_ref());
@@ -646,10 +660,12 @@ impl DocumentFold {
                 pb::XmlItemLabel::ListItem => {
                     doc::base_text_item::Item::ListItem(doc::ListItem {
                         base: Some(base),
-                        // The source numbered it, so the list is ordered. The
-                        // marker itself is not on the wire: the parser strips
-                        // it into `ordinal`.
-                        enumerated: item.ordinal.is_some(),
+                        // The list says whether it is ordered; failing that,
+                        // an item the source numbered is in a numbered list
+                        // even when the container never said so. The marker
+                        // itself is not on the wire: the parser strips it
+                        // into `ordinal`.
+                        enumerated: item.enumerated || item.ordinal.is_some(),
                         marker: None,
                     })
                 }
@@ -679,6 +695,69 @@ impl DocumentFold {
         self_ref
     }
 
+    // ------------------------------------------------------------------ lists
+
+    /// The group a list item belongs to, opening one when the item starts a
+    /// list the fold has not seen yet.
+    ///
+    /// A flat run of `ListItem`s said nothing about which list each belonged
+    /// to, so a nested list read exactly like a continuation of the one
+    /// around it. `GroupItem` with `GROUP_LABEL_LIST` /
+    /// `GROUP_LABEL_ORDERED_LIST` is what the schema has for this, and the
+    /// wire now carries the depth to build it from.
+    ///
+    /// A dialect with no list vocabulary sends no depth; those items are
+    /// treated as a single top-level list, which is the honest reading of "a
+    /// run of list items with nothing saying they nest".
+    fn list_parent(&mut self, item: &pb::TextItem) -> String {
+        let depth = item.list_depth.unwrap_or(1).max(1);
+        let enumerated = item.enumerated || item.ordinal.is_some();
+        // Close every list deeper than this item, and a list at the same
+        // depth of the other kind: a numbered list after a bulleted one at
+        // the same depth is a new list, not a continuation.
+        while self.lists.last().is_some_and(|(open, ordered, _)| {
+            *open > depth || (*open == depth && *ordered != enumerated)
+        }) {
+            self.lists.pop();
+        }
+        if self.lists.last().is_none_or(|(open, _, _)| *open < depth) {
+            self.open_list_group(depth, enumerated);
+        }
+        self.lists
+            .last()
+            .map(|(_, _, self_ref)| self_ref.clone())
+            .expect("a group was just ensured")
+    }
+
+    /// Open one list group at `depth`, parented to the group above it, or to
+    /// the heading or body a top-level list sits under.
+    fn open_list_group(&mut self, depth: u32, enumerated: bool) {
+        let parent = self.lists.last().map_or_else(
+            || self.current_parent(),
+            |(_, _, group_ref)| group_ref.clone(),
+        );
+        let self_ref = format!("#/groups/{}", self.document.groups.len());
+        self.document.groups.push(doc::GroupItem {
+            self_ref: self_ref.clone(),
+            parent: Some(reference(&parent)),
+            content_layer: doc::ContentLayer::Body as i32,
+            name: Some("list".to_owned()),
+            label: if enumerated {
+                doc::GroupLabel::OrderedList as i32
+            } else {
+                doc::GroupLabel::List as i32
+            },
+            ..doc::GroupItem::default()
+        });
+        self.link_child(&parent, &self_ref);
+        self.lists.push((depth, enumerated, self_ref));
+    }
+
+    /// End the run of list items any non-list content interrupts.
+    fn end_list_run(&mut self) {
+        self.lists.clear();
+    }
+
     // --------------------------------------------------------------- pictures
 
     /// Append one picture as a placeholder `PictureItem`.
@@ -694,6 +773,7 @@ impl DocumentFold {
     /// goes where the other locators go. A figure's real caption reaches the
     /// fold as its own CAPTION event and folds as its own item.
     fn push_picture(&mut self, item: &pb::TextItem) {
+        self.end_list_run();
         let parent = self.current_parent();
         let self_ref = format!("#/pictures/{}", self.document.pictures.len());
         let source = self.source_of(item.source.as_ref());
@@ -726,6 +806,7 @@ impl DocumentFold {
     // ----------------------------------------------------------------- tables
 
     fn on_table_start(&mut self, start: &pb::TableStart) {
+        self.end_list_run();
         // An unclosed predecessor cannot happen on a conformant stream, but
         // dropping its rows silently if it did would be worse than keeping
         // them.
@@ -890,6 +971,7 @@ impl DocumentFold {
     /// input: a large instance makes a large table, and the byte cap on the
     /// request is what bounds both.
     fn on_fact(&mut self, fact: &pb::Fact) {
+        self.end_list_run();
         let index = if let Some(index) = self.facts_table {
             index
         } else {
@@ -1112,13 +1194,20 @@ impl DocumentFold {
     /// Both halves of the parent link: the item names its parent, and the
     /// parent lists the item. An integrity check fails on either one alone.
     ///
-    /// The only parents this fold makes are the body and section headers, so
-    /// a ref that is neither is a bug in the caller rather than something to
-    /// resolve generically.
+    /// The only parents this fold makes are the body, section headers and
+    /// list groups, so a ref that is none of those is a bug in the caller
+    /// rather than something to resolve generically.
     fn link_child(&mut self, parent: &str, child: &str) {
         if parent == BODY_REF {
             if let Some(body) = self.document.body.as_mut() {
                 body.children.push(reference(child));
+            }
+        } else if let Some(index) = parent
+            .strip_prefix("#/groups/")
+            .and_then(|index| index.parse::<usize>().ok())
+        {
+            if let Some(group) = self.document.groups.get_mut(index) {
+                group.children.push(reference(child));
             }
         } else if let Some(base) = self.heading_base(parent) {
             base.children.push(reference(child));

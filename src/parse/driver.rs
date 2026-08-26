@@ -263,7 +263,12 @@ impl<R: BufRead> Driver<'_, R> {
             attrs,
         };
         match dialect::action(self.dialect, &ctx) {
-            Action::Descend => self.push_frame(local, qname),
+            // A list container is structurally a descent; what makes it
+            // worth naming is that the items under it count it.
+            Action::Descend => {
+                let list = dialect::list_container(self.dialect, &ctx);
+                self.push_frame_list(local, qname, list);
+            }
             Action::Skip => self.skip_subtree(local, qname)?,
             Action::Meta(shape) => {
                 if self.config.emit_source_metadata {
@@ -453,6 +458,13 @@ impl<R: BufRead> Driver<'_, R> {
         let level = spec.level.or_else(|| {
             (spec.label == pb::XmlItemLabel::SectionHeader).then(|| self.section_level())
         });
+        // Only a list item belongs to a list. A paragraph inside one is a
+        // paragraph, and claiming a depth for it would say otherwise.
+        let (list_depth, enumerated) = if spec.label == pb::XmlItemLabel::ListItem {
+            self.open_list()
+        } else {
+            (None, false)
+        };
         self.capture = Some(Capture {
             depth: self.stack.len(),
             spec: dialect::Capture { level, ..spec },
@@ -468,6 +480,8 @@ impl<R: BufRead> Driver<'_, R> {
             from_cdata: false,
             attributes: self.reportable_attributes(attrs),
             spans: Vec::new(),
+            list_depth,
+            enumerated,
             is_caption,
             after_child: false,
         });
@@ -634,6 +648,8 @@ impl<R: BufRead> Driver<'_, R> {
             byte_start: Some(capture.byte_start),
             byte_end: Some(byte_end),
             from_cdata: capture.from_cdata,
+            list_depth: capture.list_depth,
+            enumerated: capture.enumerated,
         };
         self.counts.text_items += 1;
         self.send(pb::parse_xml_response::Event::TextItem(item))
@@ -664,6 +680,9 @@ impl<R: BufRead> Driver<'_, R> {
             byte_start: Some(pending.byte_start),
             byte_end: Some(pending.byte_end),
             from_cdata: pending.from_cdata,
+            // A caption is never a list item.
+            list_depth: None,
+            enumerated: false,
         };
         self.counts.text_items += 1;
         self.send(pb::parse_xml_response::Event::TextItem(item))
@@ -774,13 +793,38 @@ impl<R: BufRead> Driver<'_, R> {
     }
 
     pub(super) fn push_frame(&mut self, local: &str, qname: &str) {
+        self.push_frame_list(local, qname, None);
+    }
+
+    /// Push a frame that may be a list container, so the items under it can
+    /// count their nesting.
+    pub(super) fn push_frame_list(&mut self, local: &str, qname: &str, list: Option<bool>) {
         let position = self.count_child(local, qname);
         self.stack.push(Frame {
             local: local.to_owned(),
             qname: qname.to_owned(),
             position,
             children: HashMap::new(),
+            list,
         });
+    }
+
+    /// The list this element sits in, as its nesting depth and whether it is
+    /// ordered. Depth starts at 1 for a list that is not inside another;
+    /// `None` means no list container is open at all, which is what a
+    /// dialect with no list vocabulary always reports.
+    fn open_list(&self) -> (Option<u32>, bool) {
+        let depth = self.stack.iter().filter(|f| f.list.is_some()).count();
+        let enumerated = self
+            .stack
+            .iter()
+            .rev()
+            .find_map(|f| f.list)
+            .unwrap_or_default();
+        (
+            (depth > 0).then(|| u32::try_from(depth).unwrap_or(u32::MAX)),
+            enumerated,
+        )
     }
 
     /// Record that a child with this name was seen and return its 1-based
@@ -877,6 +921,9 @@ impl<R: BufRead> Driver<'_, R> {
             byte_start: None,
             byte_end: None,
             from_cdata: false,
+            // An `AttrText` item is a picture reference, never a list item.
+            list_depth: None,
+            enumerated: false,
         }
     }
 

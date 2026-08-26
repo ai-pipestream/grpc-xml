@@ -19,7 +19,8 @@ mod common;
 use std::collections::HashMap;
 
 use common::{
-    DOCLANG, JATS, JATS_CALS_TABLE, JATS_WITH_ISLAND, USPTO, XBRL, client, options, parse_ok,
+    DOCLANG, DOCLANG_NESTED_LISTS, JATS, JATS_CALS_TABLE, JATS_WITH_ISLAND, USPTO, XBRL, client,
+    options, parse_ok,
 };
 use grpc_xml::document::v1 as doc;
 use grpc_xml::document_fold::{DocumentFold, MIMETYPE, SCHEMA_NAME, integrity_errors};
@@ -199,15 +200,26 @@ fn arena_index(self_ref: &str) -> usize {
         .expect("a dense index")
 }
 
-/// The `children` of any ref this fold can parent to: the body, or a section
-/// header in the text arena.
+/// The `children` of any ref this fold can parent to: the body, a list
+/// group, or a section header in the text arena.
 fn children_of(document: &doc::Document, self_ref: &str) -> Vec<String> {
     let children = if self_ref == "#/body" {
         &body(document).children
+    } else if let Some(index) = self_ref.strip_prefix("#/groups/") {
+        &document.groups[index.parse::<usize>().expect("a dense index")].children
     } else {
         &base(&document.texts[arena_index(self_ref)]).children
     };
     children.iter().map(|child| child.r#ref.clone()).collect()
+}
+
+/// The texts of the items a list of refs names, skipping refs that are not
+/// text items.
+fn texts_of(document: &doc::Document, refs: &[String]) -> Vec<String> {
+    refs.iter()
+        .filter(|r| r.starts_with("#/texts/"))
+        .map(|r| base(&document.texts[arena_index(r)]).text.clone())
+        .collect()
 }
 
 /// Assert the two halves of one parent link, which is what the merge needs.
@@ -1823,5 +1835,79 @@ fn a_foreign_namespace_and_a_cdata_section_reach_the_item_meta() {
         fields.get("xml.from_cdata"),
         None,
         "ordinary character data says nothing rather than saying false"
+    );
+}
+
+#[test]
+fn list_items_fold_into_the_groups_of_the_lists_they_belong_to() {
+    let (_, document) = fold_default(DOCLANG_NESTED_LISTS);
+
+    // Two runs of lists, and the nested one, which is three groups. The
+    // ordered outer list and the bulleted inner one are labelled apart.
+    let labels: Vec<i32> = document.groups.iter().map(|g| g.label).collect();
+    assert_eq!(
+        labels,
+        [
+            doc::GroupLabel::OrderedList as i32,
+            doc::GroupLabel::List as i32,
+            doc::GroupLabel::List as i32,
+        ],
+        "an ordered list and a bulleted one are not the same group"
+    );
+
+    // The inner group hangs off the outer one, not off the section, and the
+    // outer one off the body, since nothing has opened a heading.
+    assert_eq!(
+        document.groups[1].parent.as_ref().map(|p| p.r#ref.as_str()),
+        Some("#/groups/0")
+    );
+    assert_eq!(
+        document.groups[0].parent.as_ref().map(|p| p.r#ref.as_str()),
+        Some("#/body")
+    );
+
+    // Each item names its own list as its parent, and each list lists it.
+    let outer = children_of(&document, "#/groups/0");
+    let inner = children_of(&document, "#/groups/1");
+    assert_eq!(
+        texts_of(&document, &inner),
+        ["Untereintrag α", "Untereintrag β"],
+        "the nested list holds its own items"
+    );
+    assert_eq!(
+        texts_of(&document, &outer),
+        ["Erste Stufe", "Zweite Stufe", "Dritte Stufe"],
+        "and the outer one keeps the items that surround it"
+    );
+    assert!(
+        outer.contains(&"#/groups/1".to_owned()),
+        "the nested list is a child of the list it sits in: {outer:?}"
+    );
+
+    // The paragraph between the two runs is not in either list, and it is
+    // what ends the first run: the second `ul` opens a group of its own
+    // rather than continuing the ordered list.
+    assert_eq!(parent_of(&document, "Nach der Liste."), "#/body");
+    assert_eq!(
+        texts_of(&document, &children_of(&document, "#/groups/2")),
+        ["Ein zweiter Lauf"]
+    );
+}
+
+#[test]
+fn a_list_group_knows_it_is_ordered_from_the_list_rather_than_from_an_ordinal() {
+    let (_, document) = fold_default(DOCLANG_NESTED_LISTS);
+    let ordered: Vec<bool> = document
+        .texts
+        .iter()
+        .filter_map(|item| match item.item.as_ref() {
+            Some(doc::base_text_item::Item::ListItem(list)) => Some(list.enumerated),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ordered,
+        [true, true, false, false, true, false],
+        "no item here carries an ordinal; the container is what says so"
     );
 }
