@@ -142,6 +142,9 @@ struct PendingTable {
     /// under a `rowspan` starts at the first free column.
     occupied: BTreeSet<(i32, i32)>,
     num_cols: i32,
+    /// The column geometry the source declared, which arrives on the closing
+    /// event and so is empty until then.
+    columns: Vec<doc::TableColumnSchema>,
 }
 
 impl Default for DocumentFold {
@@ -415,6 +418,11 @@ impl DocumentFold {
     /// is the source name written as `#<id>`, which stays as it is for an
     /// identifier the document never defines. Item refs begin `#/`, which no
     /// XML name can, so the two never collide.
+    ///
+    /// Every run reaches this pass, wherever it sits: a `xref` inside a table
+    /// cell points at the same reference list a `xref` in a paragraph does,
+    /// and resolving only the paragraph's would make a cell's citation a
+    /// second-class one for no reason the source states.
     fn publish_anchors(&mut self) {
         self.document.anchors = self
             .anchors
@@ -426,14 +434,20 @@ impl DocumentFold {
             .collect();
         for item in &mut self.document.texts {
             let Some(base) = base_of(item) else { continue };
-            for span in &mut base.spans {
-                let Some(target) = span.target.as_mut() else {
-                    continue;
-                };
-                if let Some(name) = target.r#ref.strip_prefix('#')
-                    && let Some(self_ref) = self.anchors.get(name)
-                {
-                    target.r#ref.clone_from(self_ref);
+            resolve_targets(&self.anchors, &mut base.spans);
+        }
+        for table in &mut self.document.tables {
+            let Some(data) = table.data.as_mut() else {
+                continue;
+            };
+            // `grid` and `table_cells` hold clones of the same cells, so both
+            // are walked: a consumer reading either one sees the same graph.
+            for cell in &mut data.table_cells {
+                resolve_targets(&self.anchors, &mut cell.spans);
+            }
+            for row in &mut data.grid {
+                for cell in &mut row.cells {
+                    resolve_targets(&self.anchors, &mut cell.spans);
                 }
             }
         }
@@ -755,6 +769,7 @@ impl DocumentFold {
             cells: Vec::new(),
             occupied: BTreeSet::new(),
             num_cols: 0,
+            columns: Vec::new(),
         });
     }
 
@@ -794,6 +809,12 @@ impl DocumentFold {
                 // A cell is a header when its row is one or when the source
                 // marked the cell itself (`th` outside a `thead`).
                 column_header: row.is_header || cell.is_header,
+                // A cell's markup is a fact about the cell, so it folds the
+                // same way a paragraph's does. Cross-references inside one
+                // resolve in the same end-of-stream pass.
+                spans: inline_spans(&cell.spans),
+                align: doc_alignment(cell.align),
+                valign: doc_vertical_alignment(cell.valign),
                 ..doc::TableCell::default()
             });
             table.num_cols = table.num_cols.max(end_col);
@@ -804,12 +825,16 @@ impl DocumentFold {
     }
 
     fn on_table_end(&mut self, end: &pb::TableEnd) {
-        let Some(table) = self.table.as_ref() else {
+        let Some(table) = self.table.as_mut() else {
             return;
         };
         if table.reference != end.table_ref {
             return;
         }
+        // The declared geometry rides on the closing event because a
+        // `colspec` is a child of the table; the fold has the whole table in
+        // hand by now, so it lands on the same `TableData` either way.
+        table.columns = end.columns.iter().map(column_schema).collect();
         let pending = self.table.take().expect("checked just above");
         self.append_table(pending);
     }
@@ -825,6 +850,7 @@ impl DocumentFold {
             // renderers walk, `table_cells` the flat list the analyzers read.
             table_cells: pending.cells,
             grid: pending.grid,
+            columns: pending.columns,
             ..doc::TableData::default()
         });
         let self_ref = item.self_ref.clone();
@@ -1291,6 +1317,70 @@ fn inline_spans(spans: &[pb::InlineSpan]) -> Vec<doc::InlineSpan> {
         }
     }
     folded
+}
+
+/// Point every run in one list at the item that answers to its key.
+///
+/// A run whose key no item declared keeps the `#<id>` the source wrote,
+/// which is what makes an unresolved reference legible rather than silently
+/// dangling.
+fn resolve_targets(anchors: &BTreeMap<String, String>, spans: &mut [doc::InlineSpan]) {
+    for span in spans {
+        let Some(target) = span.target.as_mut() else {
+            continue;
+        };
+        if let Some(name) = target.r#ref.strip_prefix('#')
+            && let Some(self_ref) = anchors.get(name)
+        {
+            target.r#ref.clone_from(self_ref);
+        }
+    }
+}
+
+/// One declared column as the Document plane's own column schema.
+///
+/// The width is whatever the source wrote, and `width_raw` is where it goes:
+/// a CALS `2*` is a share of the table and a `30%` a share of something else,
+/// so neither is the page-unit `width` the schema's other field means. A
+/// column the source did not name declares no name rather than an empty one,
+/// which is what the presence-tracked field is for.
+fn column_schema(column: &pb::ColumnSpec) -> doc::TableColumnSchema {
+    let width = column.width.trim();
+    doc::TableColumnSchema {
+        name: (!column.name.is_empty()).then(|| column.name.clone()),
+        width_raw: (!width.is_empty()).then(|| width.to_owned()),
+        align: doc_alignment(column.align),
+        valign: doc_vertical_alignment(column.valign),
+        ..doc::TableColumnSchema::default()
+    }
+}
+
+/// The Document plane's horizontal alignment for the one the source stated.
+///
+/// `ALIGNMENT_CHAR` has no member there: a source that aligns on a nominated
+/// character said something this plane cannot express, and leaving the slot
+/// unset says "not stated here" rather than claiming a different alignment.
+/// The wire keeps the full answer.
+fn doc_alignment(align: i32) -> Option<i32> {
+    let mapped = match pb::Alignment::try_from(align).ok()? {
+        pb::Alignment::Left => doc::Alignment::Left,
+        pb::Alignment::Center => doc::Alignment::Center,
+        pb::Alignment::Right => doc::Alignment::Right,
+        pb::Alignment::Justify => doc::Alignment::Justify,
+        pb::Alignment::Unspecified | pb::Alignment::Char => return None,
+    };
+    Some(mapped as i32)
+}
+
+/// The Document plane's vertical alignment for the one the source stated.
+fn doc_vertical_alignment(valign: i32) -> Option<i32> {
+    let mapped = match pb::VerticalAlignment::try_from(valign).ok()? {
+        pb::VerticalAlignment::Top => doc::VerticalAlignment::Top,
+        pb::VerticalAlignment::Middle => doc::VerticalAlignment::Middle,
+        pb::VerticalAlignment::Bottom => doc::VerticalAlignment::Bottom,
+        pb::VerticalAlignment::Unspecified => return None,
+    };
+    Some(mapped as i32)
 }
 
 /// The Document plane's `Formatting` for a run's styles, or `None` when the

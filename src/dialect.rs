@@ -372,6 +372,10 @@ pub const HEADER_CELL_ELEMENTS: &[&str] = &["th"];
 /// Element local names whose rows are header rows.
 pub const HEADER_SECTION_ELEMENTS: &[&str] = &["thead"];
 
+/// Element local names that declare one column's geometry rather than any
+/// cell in it: the CALS `colspec` and the XHTML `col`.
+pub const COLUMN_SPEC_ELEMENTS: &[&str] = &["colspec", "col"];
+
 /// Element local names that may hold a caption for a table that follows.
 const CAPTION_WRAPPERS: &[&str] = &["table-wrap", "fig", "figure", "table-container"];
 

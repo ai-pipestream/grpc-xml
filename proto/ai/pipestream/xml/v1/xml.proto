@@ -374,6 +374,74 @@ message InlineSpan {
   repeated Attribute attributes = 8;
 }
 
+// Alignment names how a table column or cell places its content
+// horizontally, as the source declares it. It is never inferred from the
+// content.
+enum Alignment {
+  // The source declares none.
+  ALIGNMENT_UNSPECIFIED = 0;
+
+  // Flush left (`align="left"`).
+  ALIGNMENT_LEFT = 1;
+
+  // Centered (`align="center"`).
+  ALIGNMENT_CENTER = 2;
+
+  // Flush right (`align="right"`).
+  ALIGNMENT_RIGHT = 3;
+
+  // Justified (`align="justify"`).
+  ALIGNMENT_JUSTIFY = 4;
+
+  // Aligned on a nominated character, which CALS spells `align="char"` and
+  // qualifies with `@char`. Kept because a CALS table really does declare it
+  // and reading it as "unspecified" would misreport the source; the Document
+  // plane has no member for it, so the projection leaves the slot unset.
+  ALIGNMENT_CHAR = 5;
+}
+
+// VerticalAlignment names how a table column or cell places its content
+// vertically. Separate from `Alignment` because a source declares the two
+// axes in two attributes and a merged enum lets a vertical value land in a
+// horizontal slot.
+enum VerticalAlignment {
+  // The source declares none.
+  VERTICAL_ALIGNMENT_UNSPECIFIED = 0;
+
+  // Flush to the top of the cell (`valign="top"`).
+  VERTICAL_ALIGNMENT_TOP = 1;
+
+  // Centered in the cell (`valign="middle"`).
+  VERTICAL_ALIGNMENT_MIDDLE = 2;
+
+  // Flush to the bottom of the cell (`valign="bottom"`).
+  VERTICAL_ALIGNMENT_BOTTOM = 3;
+}
+
+// ColumnSpec is one column's declared geometry, in column order.
+//
+// A CALS `colspec` and an XHTML `col` both declare the column rather than any
+// cell in it, and both are children of the table element, which is why these
+// ride on `TableEnd` rather than on `TableStart`: the table has already
+// opened by the time the source states them.
+message ColumnSpec {
+  // The column's name as the source declares it (`colspec/@colname`), which
+  // a cell addresses it by. Empty when the source names no column.
+  string name = 1;
+
+  // The column's declared width, verbatim in the source's own units (`2*`,
+  // `5cm`, `30%`). Empty when the source declares none. Kept as written: a
+  // CALS proportional width is a share of the table, not a length, and
+  // resolving it here would be inventing a page.
+  string width = 2;
+
+  // Horizontal alignment the source declares for the column.
+  Alignment align = 3;
+
+  // Vertical alignment the source declares for the column.
+  VerticalAlignment valign = 4;
+}
+
 // BoundingBox is a rectangle in the source's own page coordinates.
 //
 // The origin is the top left corner and `bottom` is the larger of the two
@@ -527,6 +595,20 @@ message TableCell {
   // True when the source marks the cell as a header (`th`, or a cell inside
   // `thead`).
   bool is_header = 5;
+
+  // Character-level runs inside `text`, the same vocabulary
+  // `TextItem.spans` carries: emphasis, hyperlinks and cross-references that
+  // flattening would otherwise destroy. Ranges index this cell's `text`.
+  // Only populated when `ParseOptions.emit_inline_spans` is set.
+  repeated InlineSpan spans = 6;
+
+  // Horizontal alignment the source declares on the cell itself, which
+  // overrides the column's. `ALIGNMENT_UNSPECIFIED` when it declares none.
+  Alignment align = 7;
+
+  // Vertical alignment the source declares on the cell itself, which
+  // overrides the column's.
+  VerticalAlignment valign = 8;
 }
 
 // TableRow is one row of a table, emitted as soon as its end tag is read.
@@ -555,6 +637,15 @@ message TableEnd {
 
   // Widest row of the table, in columns after span expansion.
   uint32 column_count = 3;
+
+  // The column geometry the source declares, in column order: a CALS
+  // `colspec` sequence, an XHTML `colgroup`. Empty when the source declares
+  // none, and shorter than `column_count` when it declares only some. This
+  // rides on the closing event rather than on `TableStart` because both
+  // spellings are children of the table element: the table has already
+  // opened by the time the source states them, and holding the table back
+  // until they are read would trade the live stream for one attribute.
+  repeated ColumnSpec columns = 4;
 }
 
 // XbrlPeriod is the reporting period of an XBRL context.

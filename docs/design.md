@@ -184,6 +184,35 @@ honoring the spans already in flight, so a row under a `rowspan` starts at
 the first free column. A `table_start` caption becomes a `CAPTION` text item
 created *first* and referenced from the table's `captions[]`.
 
+A cell is a capture like any other. Its markup flattens into the cell's text
+and the dialect's inline vocabulary leaves a run over it, so `TableCell.spans`
+folds onto `TableCell.spans` on the Document plane exactly as a paragraph's
+runs fold onto `TextItemBase.spans` — styles onto `Formatting`, an `ext-link`
+onto `hyperlink`, an `xref` onto a `target` with its `reference_kind` and its
+key. A cross-reference inside a cell resolves in the same end-of-stream pass
+a paragraph's does: a citation in a cell names the same reference list, and
+both `grid` and `table_cells` are rewritten so a reader of either sees the
+same graph. Runs are gated by `emit_inline_spans` in a cell as everywhere
+else.
+
+**Column geometry.** A CALS `colspec` and an XHTML `col` declare the column
+rather than any cell in it, and both are children of the table element, so
+they are read *after* `TableStart` has streamed. They ride on `TableEnd`
+instead: holding the table back until the geometry is complete would trade
+the live stream for one attribute. An XHTML `col span="3"` is expanded so
+index N of the list is column N either way, under a bound (4096) that a real
+table is orders of magnitude below and a hostile `span` attribute is not.
+The fold lands them on `TableData.columns`, one `TableColumnSchema` per
+declared column: the name when the source declares one (presence-tracked, so
+an unnamed column says nothing rather than `""`), the width verbatim in
+`width_raw` because a CALS `2*` is a share of the table and a `30%` a share
+of something else again — neither is the page unit `width` means — and the
+two alignment axes in their own fields. A cell's own `@align`/`@valign`
+override the column's and land on the cell. `ALIGNMENT_CHAR`, which CALS
+declares and the Document plane has no member for, stays on the typed wire
+and leaves the projection's slot unset rather than becoming a different
+alignment.
+
 **XBRL facts.** One `TableItem` (`meta.custom_fields["xml.table"] = "facts"`)
 created lazily on the first fact: header row `concept | context | period |
 unit | value | decimals`, one row per fact. Concept is `prefix:localName`,

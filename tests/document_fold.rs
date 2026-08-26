@@ -18,7 +18,9 @@ mod common;
 
 use std::collections::HashMap;
 
-use common::{DOCLANG, JATS, JATS_WITH_ISLAND, USPTO, XBRL, client, options, parse_ok};
+use common::{
+    DOCLANG, JATS, JATS_CALS_TABLE, JATS_WITH_ISLAND, USPTO, XBRL, client, options, parse_ok,
+};
 use grpc_xml::document::v1 as doc;
 use grpc_xml::document_fold::{DocumentFold, MIMETYPE, SCHEMA_NAME, integrity_errors};
 use grpc_xml::parse::{InputStats, ParseConfig};
@@ -55,6 +57,18 @@ fn fold(document: &str, config: &ParseConfig) -> (Vec<pb::ParseXmlResponse>, doc
 /// Parse and fold with the default options (sniff the dialect, flatten XHTML).
 fn fold_default(document: &str) -> (Vec<pb::ParseXmlResponse>, doc::Document) {
     fold(document, &ParseConfig::default())
+}
+
+/// Parse and fold with the inline runs switched on, which is the only way
+/// the spans of an item or a cell reach the projection at all.
+fn fold_with_spans(document: &str) -> (Vec<pb::ParseXmlResponse>, doc::Document) {
+    fold(
+        document,
+        &ParseConfig {
+            emit_inline_spans: true,
+            ..ParseConfig::default()
+        },
+    )
 }
 
 /// The shared base of a text item, for every variant that has one.
@@ -1638,5 +1652,93 @@ fn monospace_small_caps_and_math_runs_have_their_own_bits() {
             (false, false, true)
         ],
         "three styles the upstream Formatting cannot express, each in its own field"
+    );
+}
+
+#[test]
+fn a_table_cell_carries_its_runs_and_its_declared_alignment() {
+    let (_, document) = fold_with_spans(JATS_CALS_TABLE);
+    let data = document.tables[0].data.as_ref().expect("table data");
+
+    let emphasized = &data.grid[1].cells[0];
+    assert_eq!(emphasized.text, "Für λόγος gemessen");
+    assert_eq!(emphasized.spans.len(), 1, "{:?}", emphasized.spans);
+    let run = &emphasized.spans[0];
+    // Code points, not bytes: the run covers the Greek word exactly.
+    let range = run.range.as_ref().expect("a run states its range");
+    let covered: String = emphasized
+        .text
+        .chars()
+        .skip(range.start as usize)
+        .take((range.end - range.start) as usize)
+        .collect();
+    assert_eq!(covered, "λόγος");
+    assert!(
+        run.formatting.as_ref().is_some_and(|f| f.italic),
+        "the style folds onto Formatting"
+    );
+    assert_eq!(
+        emphasized.align,
+        Some(doc::Alignment::Center as i32),
+        "the cell declared its own alignment"
+    );
+    assert_eq!(
+        data.grid[2].cells[1].valign,
+        Some(doc::VerticalAlignment::Top as i32)
+    );
+    assert_eq!(data.grid[1].cells[1].align, None, "nothing declared");
+
+    // The flat list and the grid carry the same cells, runs included.
+    let flat = data
+        .table_cells
+        .iter()
+        .find(|cell| cell.text == "Für λόγος gemessen")
+        .expect("the flat list holds the same cell");
+    assert_eq!(flat.spans.len(), 1);
+}
+
+#[test]
+fn a_cross_reference_inside_a_cell_resolves_like_one_in_a_paragraph() {
+    let (_, document) = fold_with_spans(JATS_CALS_TABLE);
+    let entry = ref_of(&document, "Rivera A. Parsers. 2025.");
+    let data = document.tables[0].data.as_ref().expect("table data");
+    let citing = &data.grid[2].cells[0];
+    assert_eq!(citing.text, "Wie Rivera für μ zeigt");
+    let span = citing.spans.first().expect("the cell carries its run");
+    assert_eq!(
+        span.reference.as_deref(),
+        Some("b1"),
+        "the key the source wrote survives"
+    );
+    assert_eq!(
+        span.target.as_ref().map(|t| t.r#ref.as_str()),
+        Some(entry.as_str()),
+        "and it points at the reference-list item"
+    );
+    assert_eq!(
+        span.reference_kind,
+        Some(doc::ReferenceKind::Citation as i32)
+    );
+}
+
+#[test]
+fn the_declared_column_geometry_reaches_the_table_data() {
+    let (_, document) = fold_default(JATS_CALS_TABLE);
+    let data = document.tables[0].data.as_ref().expect("table data");
+    assert_eq!(data.columns.len(), 2);
+    assert_eq!(data.columns[0].name.as_deref(), Some("dialekt"));
+    assert_eq!(
+        data.columns[0].width_raw.as_deref(),
+        Some("2*"),
+        "a proportional width keeps its spelling rather than becoming a length"
+    );
+    assert_eq!(data.columns[0].width, None, "and claims no page unit");
+    assert_eq!(data.columns[0].align, Some(doc::Alignment::Left as i32));
+    assert_eq!(data.columns[0].valign, None);
+    assert_eq!(data.columns[1].name.as_deref(), Some("wert"));
+    assert_eq!(data.columns[1].align, Some(doc::Alignment::Right as i32));
+    assert_eq!(
+        data.columns[1].valign,
+        Some(doc::VerticalAlignment::Bottom as i32)
     );
 }

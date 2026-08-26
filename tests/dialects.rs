@@ -10,8 +10,9 @@
 mod common;
 
 use common::{
-    DOCLANG, JATS, JATS_WITH_ISLAND, USPTO, XBRL, client, facts, info, islands, items_labelled,
-    items_with_role, options, parse_ok, status, table_rows, text_items, texts, warned,
+    DOCLANG, JATS, JATS_CALS_TABLE, JATS_WITH_ISLAND, USPTO, XBRL, client, facts, info, islands,
+    items_labelled, items_with_role, options, parse_ok, run_of, status, table_ends, table_rows,
+    text_items, texts, warned,
 };
 use grpc_xml::proto::v1 as pb;
 
@@ -961,5 +962,88 @@ async fn service_info_reports_the_policy_that_is_compiled_in() {
     assert_eq!(
         ui.description,
         "Declarative XML to the gRParse Document data plane"
+    );
+}
+
+#[tokio::test]
+async fn a_table_cell_keeps_the_markup_inside_it_as_runs() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS_CALS_TABLE, with_spans()).await;
+    let rows = table_rows(&events);
+    assert_eq!(rows.len(), 3, "one header row and two body rows");
+
+    // The emphasized run covers the Greek word and nothing around it. The
+    // range counts code points, so slicing by them is the only way this
+    // assertion holds for a cell whose text is not ASCII.
+    let emphasized = &rows[1].cells[0];
+    assert_eq!(emphasized.text, "Für λόγος gemessen");
+    assert_eq!(emphasized.spans.len(), 1, "{:?}", emphasized.spans);
+    let run = &emphasized.spans[0];
+    assert_eq!(run_of(&emphasized.text, run), "λόγος");
+    assert_eq!(run.styles, [pb::SpanStyle::Italic as i32]);
+    assert_eq!(run.element_name, "italic");
+    let range = run.range.as_ref().expect("a run states its range");
+    assert!(
+        emphasized.text.len() > range.end as usize,
+        "the byte length exceeds the code point one, so the two cannot be confused"
+    );
+
+    // A cross-reference inside a cell is the same reference graph a
+    // paragraph's is: the key survives, and so does what it points at.
+    let citing = &rows[2].cells[0];
+    assert_eq!(citing.text, "Wie Rivera für μ zeigt");
+    assert_eq!(citing.spans.len(), 1);
+    assert_eq!(run_of(&citing.text, &citing.spans[0]), "Rivera");
+    assert_eq!(citing.spans[0].references, ["b1"]);
+    assert_eq!(
+        citing.spans[0].reference_kind,
+        pb::ReferenceKind::Citation as i32
+    );
+
+    // A cell with no markup says nothing extra about itself.
+    assert!(rows[1].cells[1].spans.is_empty());
+}
+
+#[tokio::test]
+async fn clearing_the_span_switch_leaves_a_cell_flat() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS_CALS_TABLE, options()).await;
+    let rows = table_rows(&events);
+    assert_eq!(rows[1].cells[0].text, "Für λόγος gemessen");
+    for row in &rows {
+        for cell in &row.cells {
+            assert!(cell.spans.is_empty(), "spans are gated by the option");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_cals_colspec_reaches_the_closing_event_with_the_cell_alignments() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS_CALS_TABLE, options()).await;
+    let ends = table_ends(&events);
+    assert_eq!(ends.len(), 1);
+    let columns = &ends[0].columns;
+    assert_eq!(columns.len(), 2, "one entry per declared column");
+    assert_eq!(columns[0].name, "dialekt");
+    assert_eq!(columns[0].width, "2*", "a proportional width is verbatim");
+    assert_eq!(columns[0].align, pb::Alignment::Left as i32);
+    assert_eq!(
+        columns[0].valign,
+        pb::VerticalAlignment::Unspecified as i32,
+        "the source declared no vertical alignment for this column"
+    );
+    assert_eq!(columns[1].name, "wert");
+    assert_eq!(columns[1].align, pb::Alignment::Right as i32);
+    assert_eq!(columns[1].valign, pb::VerticalAlignment::Bottom as i32);
+
+    // A cell states its own alignment, which overrides the column's.
+    let rows = table_rows(&events);
+    assert_eq!(rows[1].cells[0].align, pb::Alignment::Center as i32);
+    assert_eq!(rows[2].cells[1].valign, pb::VerticalAlignment::Top as i32);
+    assert_eq!(
+        rows[1].cells[1].align,
+        pb::Alignment::Unspecified as i32,
+        "a cell that declares nothing declares nothing"
     );
 }

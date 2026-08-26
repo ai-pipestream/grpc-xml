@@ -241,7 +241,7 @@ impl<R: BufRead> Driver<'_, R> {
             return Ok(());
         }
         if self.table.is_some() {
-            self.table_start(local, qname, attrs);
+            self.table_start(namespace, local, qname, attrs);
             return Ok(());
         }
         if self.dialect == Dialect::Xbrl {
@@ -376,6 +376,8 @@ impl<R: BufRead> Driver<'_, R> {
             && let Some(cell) = table.cell.as_mut()
         {
             cell.text.push_str(text);
+            cell.chars += text.chars().count();
+            cell.after_child = false;
             return;
         }
         if !text.trim().is_empty() {
@@ -426,6 +428,8 @@ impl<R: BufRead> Driver<'_, R> {
             && let Some(cell) = table.cell.as_mut()
         {
             cell.text.push_str(&text);
+            cell.chars += text.chars().count();
+            cell.after_child = false;
         }
     }
 
@@ -474,13 +478,21 @@ impl<R: BufRead> Driver<'_, R> {
         capture.after_child = false;
     }
 
-    /// Record an inline run for an element the dialect recognizes, opening
-    /// at the capture's current length.
+    /// Build the inline run an element the dialect recognizes contributes,
+    /// starting at `start` code points into the text it is being measured
+    /// against, or `None` when the element contributes only its text.
     ///
     /// The run's end is filled in by the matching end tag; a run whose
     /// element never closes cannot happen, because the reader rejects an
     /// unbalanced tree before the driver sees it.
-    fn open_inline_span(&mut self, namespace: &str, local: &str, qname: &str, attrs: &Attrs) {
+    pub(super) fn build_inline_span(
+        &self,
+        namespace: &str,
+        local: &str,
+        qname: &str,
+        attrs: &Attrs,
+        start: usize,
+    ) -> Option<SpanBuild> {
         let ancestors: Vec<String> = self.stack.iter().map(|f| f.local.clone()).collect();
         let ctx = ElementCtx {
             namespace,
@@ -488,32 +500,42 @@ impl<R: BufRead> Driver<'_, R> {
             ancestors: &ancestors,
             attrs,
         };
-        let Some(inline) = dialect::inline(self.dialect, &ctx) else {
+        let inline = dialect::inline(self.dialect, &ctx)?;
+        Some(SpanBuild {
+            // The frame for this element is pushed by the caller after this
+            // returns, so its depth is one deeper than the stack stands now.
+            depth: self.stack.len() + 1,
+            start,
+            end: None,
+            inline,
+            element_name: qname.to_owned(),
+            namespace: namespace.to_owned(),
+            attributes: self.reportable_attributes(attrs),
+        })
+    }
+
+    /// Record an inline run inside the open capture, at its current length.
+    fn open_inline_span(&mut self, namespace: &str, local: &str, qname: &str, attrs: &Attrs) {
+        let Some(start) = self.capture.as_ref().map(|capture| capture.chars) else {
             return;
         };
-        let attributes = self.reportable_attributes(attrs);
-        // The frame for this element is pushed by the caller after this
-        // returns, so its depth is one deeper than the stack stands now.
-        let depth = self.stack.len() + 1;
-        if let Some(capture) = self.capture.as_mut() {
-            if capture.spans.len() >= MAX_INLINE_SPANS {
-                return;
-            }
-            capture.spans.push(SpanBuild {
-                depth,
-                start: capture.chars,
-                end: None,
-                inline,
-                element_name: qname.to_owned(),
-                namespace: namespace.to_owned(),
-                attributes,
-            });
+        let Some(span) = self.build_inline_span(namespace, local, qname, attrs, start) else {
+            return;
+        };
+        if let Some(capture) = self.capture.as_mut()
+            && capture.spans.len() < MAX_INLINE_SPANS
+        {
+            capture.spans.push(span);
         }
     }
 
     /// Translate the runs recorded against the raw captured string onto the
     /// collapsed text the item carries.
-    fn finish_spans(spans: Vec<SpanBuild>, text: &str, map: &[Option<u32>]) -> Vec<pb::InlineSpan> {
+    pub(super) fn finish_spans(
+        spans: Vec<SpanBuild>,
+        text: &str,
+        map: &[Option<u32>],
+    ) -> Vec<pb::InlineSpan> {
         spans
             .into_iter()
             .filter_map(|span| {

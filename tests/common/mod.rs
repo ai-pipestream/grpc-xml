@@ -356,15 +356,32 @@ pub fn status(events: &[pb::ParseXmlResponse]) -> &pb::ParseStatus {
         .expect("stream has a ParseStatus")
 }
 
-/// The inline spans of an item, by the text it covers, so an assertion
-/// reads as the source does rather than as a pair of integers.
-pub fn span_text(item: &pb::TextItem, span: &pb::InlineSpan) -> String {
+/// Every `TableEnd` in a stream.
+pub fn table_ends(events: &[pb::ParseXmlResponse]) -> Vec<&pb::TableEnd> {
+    events
+        .iter()
+        .filter_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::TableEnd(end)) => Some(end),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The text one run covers, sliced by code points because that is what the
+/// contract says a range counts. A fixture with multi-byte text and a range
+/// that is right in bytes yields the wrong string here rather than passing.
+pub fn run_of(text: &str, span: &pb::InlineSpan) -> String {
     let range = span.range.as_ref().expect("every span carries its range");
-    item.text
-        .chars()
+    text.chars()
         .skip(range.start as usize)
         .take((range.end - range.start) as usize)
         .collect()
+}
+
+/// The inline spans of an item, by the text it covers, so an assertion
+/// reads as the source does rather than as a pair of integers.
+pub fn span_text(item: &pb::TextItem, span: &pb::InlineSpan) -> String {
+    run_of(&item.text, span)
 }
 
 /// Every `MetaItem` in a stream.
@@ -613,6 +630,52 @@ pub const DOCLANG: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
     </section>
   </section>
 </doclang>
+"#;
+
+/// A JATS article whose table is in the OASIS CALS model the standard also
+/// admits: declared column geometry, per-cell alignment, and cell text that
+/// carries emphasis and a citation into the reference list.
+///
+/// Every cell that carries a run carries multi-byte text as well, so a span
+/// range that is right in bytes and wrong in Unicode scalar values fails
+/// here rather than passing quietly.
+pub const JATS_CALS_TABLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/"
+         xmlns:xlink="http://www.w3.org/1999/xlink">
+  <front><article-meta><title-group><article-title>Durchsatz</article-title></title-group></article-meta></front>
+  <body>
+    <sec id="messung">
+      <title>Messung</title>
+      <table-wrap id="t1">
+        <caption><p>Durchsatz je Dialekt.</p></caption>
+        <table>
+          <tgroup cols="2">
+            <colspec colname="dialekt" colwidth="2*" align="left"/>
+            <colspec colname="wert" colwidth="1*" align="right" valign="bottom"/>
+            <thead>
+              <row><entry>Dialekt</entry><entry>MB/s</entry></row>
+            </thead>
+            <tbody>
+              <row>
+                <entry align="center">Für <italic>λόγος</italic> gemessen</entry>
+                <entry>180</entry>
+              </row>
+              <row>
+                <entry>Wie <xref ref-type="bibr" rid="b1">Rivera</xref> für μ zeigt</entry>
+                <entry valign="top">240</entry>
+              </row>
+            </tbody>
+          </tgroup>
+        </table>
+      </table-wrap>
+    </sec>
+  </body>
+  <back>
+    <ref-list>
+      <ref id="b1"><mixed-citation>Rivera A. Parsers. 2025.</mixed-citation></ref>
+    </ref-list>
+  </back>
+</article>
 "#;
 
 /// A JATS article carrying an XHTML island, for the hand-off path.
