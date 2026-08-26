@@ -533,6 +533,18 @@ impl MetsDriver<'_> {
                 spans: Vec::new(),
                 bbox: Some(line.bbox),
                 page_no: Some(order),
+                // hOCR writes a line as a `span`, in HTML's namespace or in
+                // none at all depending on how the file was serialized; the
+                // class is what says it is a line, and that is already in
+                // `role`.
+                element_name: "span".to_owned(),
+                namespace: String::new(),
+                // One parse spans many member documents, so an offset into
+                // the payload the caller uploaded would name a byte in a
+                // different file.
+                byte_start: None,
+                byte_end: None,
+                from_cdata: false,
             };
             self.counts.text_items += 1;
             self.send(pb::parse_xml_response::Event::TextItem(item))?;

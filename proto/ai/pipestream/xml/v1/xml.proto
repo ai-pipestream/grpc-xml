@@ -551,6 +551,36 @@ message TextItem {
 
   // Page the item is on, matching a `Page.page_no`. Set with `bbox`.
   optional uint32 page_no = 13;
+
+  // Qualified name of the source element that produced the item, as written
+  // (`article-title`, `mml:math`). `path` locates the element and this names
+  // it, which is what a consumer matching on the source vocabulary needs
+  // without re-splitting a path. Empty for an item the archive drivers
+  // synthesize rather than read from one element.
+  string element_name = 14;
+
+  // Resolved namespace URI of that element, empty when it is unqualified.
+  string namespace = 15;
+
+  // Where the item's element sits in the byte stream the parser read: the
+  // offset of the first byte of its start tag, and the offset one past the
+  // last byte of its end tag. Both count bytes of the UTF-8 the parser
+  // consumed, which is the source itself for a UTF-8 document and the
+  // decoded form of it for any other, so a document in another encoding
+  // gives a faithful position in the decoded stream rather than a wrong one
+  // in the source. Absent for the archive dialects, whose items come from
+  // many member documents and have no offset into the payload the caller
+  // uploaded.
+  optional uint64 byte_start = 16;
+
+  // One past the last byte of the item's element. Set with `byte_start`.
+  optional uint64 byte_end = 17;
+
+  // True when any part of `text` came from a CDATA section rather than from
+  // ordinary character data. The text is identical either way; what differs
+  // is that the source declared it exempt from markup, which is worth
+  // knowing about a fragment that contains angle brackets.
+  bool from_cdata = 18;
 }
 
 // TableStart opens a streamed table. Rows follow, then `TableEnd`.

@@ -91,14 +91,29 @@ the nesting now says the same thing. Content that arrives before the first
 heading sits on `#/body`. **No section `GroupItem`s**: the levels come from
 the parser rather than from tag names, so there is nothing to fill.
 
-**Pages and provenance.** A `page` event becomes a `PageItem` in
-`Document.pages`, keyed by the manifest `ORDER`, with the extent the hOCR
-states and `unit = "px"`. A `TextItem` that carries a `bbox` and a `page_no`
-gets one `ProvenanceItem` with that box, `COORD_ORIGIN_TOPLEFT` (which is
-how hOCR writes coordinates) and a `charspan` covering the whole item, since
-a line's box bounds the line rather than any part of it. The
-single-document dialects still carry no `prov`: they have no geometry, and
-an invented coordinate would be worse than none.
+**Pages and provenance.** A source is located in whatever space it actually
+has, which is what `ProvenanceItem`'s several coordinate slots are for.
+
+A `page` event becomes a `PageItem` in `Document.pages`, keyed by the
+manifest `ORDER`, with the extent the hOCR states and `unit = "px"`. A
+`TextItem` that carries a `bbox` and a `page_no` gets one `ProvenanceItem`
+with that box, `COORD_ORIGIN_TOPLEFT` (which is how hOCR writes coordinates)
+and a `charspan` covering the whole item, since a line's box bounds the line
+rather than any part of it.
+
+The single-document dialects have no page and no box, and they do have the
+byte range their element occupies: `TextItem.byte_start` / `byte_end` name
+the first byte of the start tag and the byte past the end tag, and they fold
+into `ProvenanceItem.byte_range` with `page_no` left at zero, which is the
+truth about a document with no pages. Offsets count bytes of the UTF-8 the
+parser consumed, which is the source itself for a UTF-8 document and its
+decoded form for any other, so a document in another encoding gives a
+faithful position in the decoded stream rather than a wrong one in the
+source. An item whose text came from an attribute (a `graphic/@href`) claims
+no range: its text is not a run of source bytes, and the element's own range
+would name bytes the text is not in. The archive dialects claim none either:
+their items come from many member documents, so an offset into the uploaded
+payload would name a byte in a different file.
 
 **Structured metadata** (`emit_source_metadata`). A `meta_item` event folds
 into whatever the Document schema has a field for: a publication date
@@ -145,8 +160,19 @@ the coordinator's merge, so treat those as a hint; the per-item
 `FORMULA` → `FormulaItem`, everything else → `TextItem` with the matching
 `DocItemLabel`. Both `text` and `orig` are set. Per item,
 `meta.custom_fields` carries `xml.path`, plus `xml.role`, `xml.element_id`
-and `xml.ordinal` when the event has them. **No `prov`**: these dialects
-have no pages and no boxes, and the path is the honest locator.
+and `xml.ordinal` when the event has them.
+
+Three more source facts join them there, under the same `xml.` namespace
+this collector has always used for locators the Document plane has no typed
+slot for. `xml.element_name` is the element's qualified name as written: the
+plane models what an item *is*, not what tag it was written as, and a
+consumer matching on the source vocabulary should not have to re-split a
+positional path to get the name back. `xml.namespace` is the item's own
+namespace, recorded **only when it differs from the root's**, which the body
+meta already states — a `mml:math` inside a JATS article is the case worth
+stating, and repeating one URI on every item of a single-namespace document
+would be noise. `xml.from_cdata` is written only when true, so its absence
+means ordinary character data rather than a false entry on every item.
 
 **Inline runs** (`emit_inline_spans`). `TextItem.spans` folds onto
 `TextItemBase.spans`: styles onto `Formatting` (including its `monospace`,
@@ -246,6 +272,17 @@ inspection aid on the typed stream, not document structure.
 
 **Warnings and counts** from the trailer. They describe the stream, not the
 document.
+
+**Processing instructions.** An instruction is addressed to an application,
+and this service is not that application: acting on one is exactly the
+"resolve what the document asks for" the security policy refuses. It is
+still content the source put there, so it is no longer dropped in silence —
+`WARNING_CODE_UNMAPPED_ELEMENT` names its target on the trailer, in the
+prolog as well as in the body. Only the target is named: an instruction's
+data is arbitrarily long and the warning table aggregates by message, so
+carrying the body would let one document mint a warning kind per
+instruction. A comment stays silent, because a comment is an author's note
+to another author rather than a construct with a mapping.
 
 **XBRL facts.** One table, created when the first fact arrives. Eleven
 columns — `concept`, `entity_scheme`, `entity`, `context`, `period`, `unit`,

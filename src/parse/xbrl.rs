@@ -216,13 +216,15 @@ impl<R: BufRead> Driver<'_, R> {
                         _ => {}
                     }
                 }
-                Step::Text(chunk) => text.push_str(&chunk),
+                Step::Text(chunk) | Step::CData(chunk) => text.push_str(&chunk),
                 Step::GeneralRef { resolved, .. } => {
                     if let Some(resolved) = resolved {
                         text.push_str(&resolved);
                     }
                 }
-                Step::Ignorable => {}
+                // A comment or a processing instruction inside one of these
+                // records is not part of the record.
+                Step::Ignorable | Step::ProcessingInstruction(_) => {}
                 Step::Declaration { .. } | Step::DocType(_) => {
                     return Err(ParseError::Malformed(
                         "a declaration inside an element".to_owned(),
@@ -271,13 +273,15 @@ impl<R: BufRead> Driver<'_, R> {
                         }
                     }
                 }
-                Step::Text(chunk) => text.push_str(&chunk),
+                Step::Text(chunk) | Step::CData(chunk) => text.push_str(&chunk),
                 Step::GeneralRef { resolved, .. } => {
                     if let Some(resolved) = resolved {
                         text.push_str(&resolved);
                     }
                 }
-                Step::Ignorable => {}
+                // A comment or a processing instruction inside one of these
+                // records is not part of the record.
+                Step::Ignorable | Step::ProcessingInstruction(_) => {}
                 Step::Declaration { .. } | Step::DocType(_) => {
                     return Err(ParseError::Malformed(
                         "a declaration inside an element".to_owned(),
@@ -409,7 +413,7 @@ impl<R: BufRead> Driver<'_, R> {
                         link.notes.push(note);
                     }
                 }
-                Step::Text(chunk) => {
+                Step::Text(chunk) | Step::CData(chunk) => {
                     if let Some((note, _)) = open.as_mut() {
                         note.text.push_str(&chunk);
                     }
@@ -419,7 +423,9 @@ impl<R: BufRead> Driver<'_, R> {
                         note.text.push_str(&resolved);
                     }
                 }
-                Step::Ignorable => {}
+                // A comment or a processing instruction inside one of these
+                // records is not part of the record.
+                Step::Ignorable | Step::ProcessingInstruction(_) => {}
                 Step::Declaration { .. } | Step::DocType(_) => {
                     return Err(ParseError::Malformed(
                         "a declaration inside an element".to_owned(),

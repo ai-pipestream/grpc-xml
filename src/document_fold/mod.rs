@@ -127,6 +127,10 @@ pub struct DocumentFold {
     source_meta: doc::DocumentMeta,
     /// Abstract paragraphs in document order, for the body's summary.
     summary: Vec<String>,
+    /// Namespace URI of the root element. An item's own namespace is only
+    /// worth recording when it differs from this one, which is the fact that
+    /// says the item came from somewhere else.
+    root_namespace: String,
 }
 
 /// A table being assembled from `table_start` / `table_row` / `table_end`.
@@ -182,6 +186,7 @@ impl DocumentFold {
             anchors: BTreeMap::new(),
             source_meta: doc::DocumentMeta::default(),
             summary: Vec::new(),
+            root_namespace: String::new(),
         }
     }
 
@@ -243,6 +248,7 @@ impl DocumentFold {
         self.anchors.clear();
         self.source_meta = doc::DocumentMeta::default();
         self.summary.clear();
+        self.root_namespace.clear();
         std::mem::replace(&mut self.document, Self::new().document)
     }
 
@@ -522,6 +528,7 @@ impl DocumentFold {
         {
             self.source_meta.schema_location = Some(location.value.clone());
         }
+        self.root_namespace.clone_from(&info.root_namespace);
         let mut fields = BTreeMap::new();
         fields.insert("xml.dialect", string(model));
         if !info.root_namespace.is_empty() {
@@ -582,7 +589,7 @@ impl DocumentFold {
         }
         let parent = self.current_parent();
         let self_ref = format!("#/texts/{}", self.document.texts.len());
-        let fields = text_fields(item);
+        let fields = text_fields(item, &self.root_namespace);
         let source = self.source_of(item.source.as_ref());
         let variant = if label == pb::XmlItemLabel::Code {
             // TRAP, and the reason this branch exists: CodeItem does not wrap
@@ -598,6 +605,7 @@ impl DocumentFold {
                     ..doc::FloatingMeta::default()
                 }),
                 label: doc::DocItemLabel::Code as i32,
+                prov: provenance(item),
                 orig: item.text.clone(),
                 text: item.text.clone(),
                 source: vec![source],
@@ -689,7 +697,7 @@ impl DocumentFold {
         let parent = self.current_parent();
         let self_ref = format!("#/pictures/{}", self.document.pictures.len());
         let source = self.source_of(item.source.as_ref());
-        let mut fields = text_fields(item);
+        let mut fields = text_fields(item, &self.root_namespace);
         if !item.text.is_empty() {
             fields.insert("xml.href".to_owned(), string(&item.text));
         }
@@ -1151,28 +1159,44 @@ impl DocumentFold {
 
 /// Where the item sits in the source, when the source says.
 ///
-/// hOCR states the box in image pixels with the origin at the top left,
-/// which is what `COORD_ORIGIN_TOPLEFT` means; the unit is on the page.
-/// The character span covers the whole item, because a line's box bounds
-/// the line rather than any part of it.
+/// A source is located in whatever space it actually has, which is what
+/// `ProvenanceItem`'s several coordinate slots are for. The archive dialects
+/// have a page and a box: hOCR states it in image pixels with the origin at
+/// the top left, which is what `COORD_ORIGIN_TOPLEFT` means, and the unit is
+/// on the page. The single-document dialects have no page and no box, but
+/// they do have the byte range their element occupies, and a byte range is a
+/// real coordinate rather than a fabricated one. Either way the character
+/// span covers the whole item, because both bound the item rather than any
+/// part of it.
 fn provenance(item: &pb::TextItem) -> Vec<doc::ProvenanceItem> {
-    let (Some(bbox), Some(page_no)) = (item.bbox.as_ref(), item.page_no) else {
+    let charspan = Some(doc::IntSpan {
+        start: 0,
+        end: int_from_usize(item.text.chars().count()),
+    });
+    if let (Some(bbox), Some(page_no)) = (item.bbox.as_ref(), item.page_no) {
+        return vec![doc::ProvenanceItem {
+            page_no: int(page_no),
+            bbox: Some(doc::BoundingBox {
+                l: bbox.left,
+                t: bbox.top,
+                r: bbox.right,
+                b: bbox.bottom,
+                coord_origin: Some(doc::CoordOrigin::Topleft as i32),
+                coord_origin_raw: None,
+            }),
+            charspan,
+            ..doc::ProvenanceItem::default()
+        }];
+    }
+    let (Some(start), Some(end)) = (item.byte_start, item.byte_end) else {
         return Vec::new();
     };
     vec![doc::ProvenanceItem {
-        page_no: int(page_no),
-        bbox: Some(doc::BoundingBox {
-            l: bbox.left,
-            t: bbox.top,
-            r: bbox.right,
-            b: bbox.bottom,
-            coord_origin: Some(doc::CoordOrigin::Topleft as i32),
-            coord_origin_raw: None,
-        }),
-        charspan: Some(doc::IntSpan {
-            start: 0,
-            end: int_from_usize(item.text.chars().count()),
-        }),
+        // Zero, and honestly so: an XML document has no pages, and the byte
+        // range is the coordinate this item actually has.
+        page_no: 0,
+        byte_range: Some(doc::ByteSpan { start, end }),
+        charspan,
         ..doc::ProvenanceItem::default()
     }]
 }
@@ -1437,7 +1461,20 @@ fn doc_reference_kind(kind: i32) -> Option<i32> {
 
 /// Per-item `meta.custom_fields`: everything the wire item says that the
 /// Document plane has no typed slot for.
-fn text_fields(item: &pb::TextItem) -> HashMap<String, Value> {
+///
+/// The `xml.` keys are this collector's own namespace for source locators,
+/// which is where the path, the role and the element id have always gone.
+/// The element's name belongs with them: the Document plane models what an
+/// item *is*, not what tag it was written as, and a consumer matching on the
+/// source vocabulary should not have to re-split a positional path to get
+/// the name back.
+///
+/// The item's own namespace is recorded only when it differs from the root's,
+/// which is already on the body meta. Repeating the same URI on every item of
+/// a single-namespace document would be noise; a `mml:math` inside a JATS
+/// article is the case worth stating, and stating it is exactly what a
+/// difference from the root means.
+fn text_fields(item: &pb::TextItem, root_namespace: &str) -> HashMap<String, Value> {
     let mut fields = HashMap::new();
     if !item.path.is_empty() {
         fields.insert("xml.path".to_owned(), string(&item.path));
@@ -1451,7 +1488,26 @@ fn text_fields(item: &pb::TextItem) -> HashMap<String, Value> {
     if let Some(ordinal) = item.ordinal {
         fields.insert("xml.ordinal".to_owned(), number(ordinal));
     }
+    if !item.element_name.is_empty() {
+        fields.insert("xml.element_name".to_owned(), string(&item.element_name));
+    }
+    if !item.namespace.is_empty() && item.namespace != root_namespace {
+        fields.insert("xml.namespace".to_owned(), string(&item.namespace));
+    }
+    if item.from_cdata {
+        // Only when true: the absence of the key means "ordinary character
+        // data", and a false entry on every other item would say the same
+        // thing at the cost of a field per item.
+        fields.insert("xml.from_cdata".to_owned(), flag(true));
+    }
     fields
+}
+
+/// A `google.protobuf.Value` holding a boolean.
+fn flag(value: bool) -> Value {
+    Value {
+        kind: Some(Kind::BoolValue(value)),
+    }
 }
 
 /// The Document label for a wire label.

@@ -1047,3 +1047,128 @@ async fn a_cals_colspec_reaches_the_closing_event_with_the_cell_alignments() {
         "a cell that declares nothing declares nothing"
     );
 }
+
+#[tokio::test]
+async fn an_item_names_the_element_and_the_bytes_it_was_read_from() {
+    let client = client().await;
+    let events = parse_ok(&client, JATS, options()).await;
+    let title = items_labelled(&events, pb::XmlItemLabel::Title)
+        .first()
+        .copied()
+        .expect("the article title");
+    assert_eq!(title.element_name, "article-title");
+    assert_eq!(
+        title.namespace, "http://jats.nlm.nih.gov/ns/archiving/1.3/",
+        "the resolved namespace, not the prefix the document happened to bind"
+    );
+    let start = title.byte_start.expect("a byte range") as usize;
+    let end = title.byte_end.expect("a byte range") as usize;
+    assert_eq!(
+        &JATS[start..end],
+        "<article-title>Streaming XML Without a DOM</article-title>",
+        "the range is the element, start tag through end tag"
+    );
+    assert!(!title.from_cdata);
+
+    // A picture's text is an attribute value, so the element is named and no
+    // byte range is claimed for a run of bytes the text is not in.
+    let picture = items_labelled(&events, pb::XmlItemLabel::Picture)
+        .first()
+        .copied()
+        .expect("the figure");
+    assert_eq!(picture.element_name, "graphic");
+    assert_eq!(picture.byte_start, None);
+    assert_eq!(picture.byte_end, None);
+}
+
+#[tokio::test]
+async fn a_cdata_section_is_marked_and_a_foreign_namespace_is_named() {
+    let source = r#"<?xml version="1.0"?>
+<doclang xmlns="http://docling-project.org/ns/doclang/v1"
+         xmlns:mml="http://www.w3.org/1998/Math/MathML">
+  <paragraph><![CDATA[if a < b && b > c then « oui »]]></paragraph>
+  <mml:formula>α + β</mml:formula>
+</doclang>
+"#;
+    let client = client().await;
+    let events = parse_ok(&client, source, options()).await;
+
+    let paragraph = items_labelled(&events, pb::XmlItemLabel::Paragraph)
+        .first()
+        .copied()
+        .expect("the paragraph");
+    assert_eq!(paragraph.text, "if a < b && b > c then « oui »");
+    assert!(
+        paragraph.from_cdata,
+        "the source declared the text exempt from markup"
+    );
+
+    let formula = items_labelled(&events, pb::XmlItemLabel::Formula)
+        .first()
+        .copied()
+        .expect("the formula");
+    assert_eq!(formula.text, "α + β");
+    assert_eq!(formula.element_name, "mml:formula");
+    assert_eq!(formula.namespace, "http://www.w3.org/1998/Math/MathML");
+    assert!(!formula.from_cdata);
+}
+
+#[tokio::test]
+async fn a_processing_instruction_is_warned_about_rather_than_dropped_in_silence() {
+    let source = r#"<?xml version="1.0"?>
+<?xml-stylesheet type="text/xsl" href="render.xsl"?>
+<doclang xmlns="http://docling-project.org/ns/doclang/v1">
+  <?acme-renderer page-break?>
+  <paragraph>Text the instruction sits beside.</paragraph>
+  <?acme-renderer page-break?>
+</doclang>
+"#;
+    let client = client().await;
+    let events = parse_ok(&client, source, options()).await;
+    // The instruction is not acted on and the text around it is untouched.
+    assert_eq!(
+        texts(&items_labelled(&events, pb::XmlItemLabel::Paragraph)),
+        ["Text the instruction sits beside."]
+    );
+
+    let warnings: Vec<&pb::ParseWarning> = status(&events)
+        .warnings
+        .iter()
+        .filter(|w| w.message.contains("processing instruction"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        2,
+        "one warning kind per target, not one per occurrence: {warnings:?}"
+    );
+    let stylesheet = warnings
+        .iter()
+        .find(|w| w.message.contains("xml-stylesheet"))
+        .expect("the prolog instruction is warned about too");
+    assert_eq!(stylesheet.code, pb::WarningCode::UnmappedElement as i32);
+    assert_eq!(stylesheet.count, 1);
+    let renderer = warnings
+        .iter()
+        .find(|w| w.message.contains("acme-renderer"))
+        .expect("the body instructions are warned about");
+    assert_eq!(renderer.count, 2, "aggregated per (code, message)");
+}
+
+#[tokio::test]
+async fn a_comment_stays_silent_because_it_is_a_note_to_an_author() {
+    let source = r#"<?xml version="1.0"?>
+<doclang xmlns="http://docling-project.org/ns/doclang/v1">
+  <!-- reviewed 2026-08-25 -->
+  <paragraph>Body text.</paragraph>
+</doclang>
+"#;
+    let client = client().await;
+    let events = parse_ok(&client, source, options()).await;
+    assert!(
+        !status(&events)
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("processing instruction")),
+        "a comment is not a processing instruction"
+    );
+}

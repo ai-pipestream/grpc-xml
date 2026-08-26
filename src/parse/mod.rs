@@ -286,6 +286,7 @@ pub(crate) fn parse_xml<R: BufRead>(
         counts: pb::ParseCounts::default(),
         warnings: BTreeMap::new(),
         stack: Vec::new(),
+        event_start: 0,
         capture: None,
         table: None,
         island: None,
@@ -321,6 +322,14 @@ struct Capture {
     chars: usize,
     path: String,
     element_id: Option<String>,
+    /// Qualified name and resolved namespace of the element being captured.
+    element_name: String,
+    namespace: String,
+    /// Offset of the first byte of the element's start tag in the stream the
+    /// parser read.
+    byte_start: u64,
+    /// True once any part of `text` has come from a CDATA section.
+    from_cdata: bool,
     attributes: Vec<pb::Attribute>,
     /// Inline runs recognized inside this capture, in the order they opened.
     spans: Vec<SpanBuild>,
@@ -353,6 +362,11 @@ struct PendingCaption {
     text: String,
     path: String,
     element_id: Option<String>,
+    element_name: String,
+    namespace: String,
+    byte_start: u64,
+    byte_end: u64,
+    from_cdata: bool,
     spans: Vec<pb::InlineSpan>,
     /// Stack length of the wrapper element; an unconsumed caption is emitted
     /// on its own when that wrapper closes.
@@ -375,6 +389,10 @@ enum Step {
     },
     End,
     Text(String),
+    /// Character data the source wrapped in a CDATA section. The text is
+    /// ordinary text; only the source's exemption from markup differs, and
+    /// only the item mapping records it.
+    CData(String),
     GeneralRef {
         /// The reference as written, without `&` and `;`.
         name: String,
@@ -388,8 +406,15 @@ enum Step {
         encoding: Option<String>,
     },
     DocType(String),
-    /// A comment or processing instruction: consumed, never mapped.
+    /// A comment: consumed, never mapped, and not worth a warning either.
+    /// A comment is an author's note to another author.
     Ignorable,
+    /// A processing instruction, carrying its target and the rest verbatim.
+    /// An instruction is addressed to an application this service is not,
+    /// so it is not acted on, but it is content the source put there and
+    /// dropping it silently is what `WARNING_CODE_UNMAPPED_ELEMENT` exists
+    /// to stop.
+    ProcessingInstruction(String),
     Eof,
 }
 
@@ -409,6 +434,10 @@ struct Driver<'a, R: BufRead> {
     counts: pb::ParseCounts,
     warnings: BTreeMap<(i32, String), u64>,
     stack: Vec<Frame>,
+    /// Offset of the first byte of the event [`Driver::next_step`] most
+    /// recently read. The reader reports where it has got *to*, so the
+    /// position is taken before the read to get where an event starts.
+    event_start: u64,
     capture: Option<Capture>,
     table: Option<Table>,
     island: Option<Island>,

@@ -301,7 +301,7 @@ fn jats_labels_become_their_document_variants_in_document_order() {
 }
 
 #[test]
-fn a_jats_item_carries_its_locators_in_meta_and_no_provenance() {
+fn a_jats_item_carries_its_locators_in_meta_and_the_bytes_it_came_from() {
     let (_, document) = fold_default(JATS);
     let item = document
         .texts
@@ -316,9 +316,34 @@ fn a_jats_item_carries_its_locators_in_meta_and_no_provenance() {
         "the positional path is the locator, in place of a page"
     );
     assert_eq!(field(fields, "xml.role"), None, "a body paragraph has none");
-    assert!(
-        item.prov.is_empty(),
-        "XML has no pages and no boxes; prov stays empty"
+    assert_eq!(
+        field(fields, "xml.element_name"),
+        Some("p"),
+        "the source's own name for the element, beside its position"
+    );
+    assert_eq!(
+        field(fields, "xml.namespace"),
+        None,
+        "the item is in the root's namespace, which the body meta already states"
+    );
+
+    // XML has no pages and no boxes, and it does have byte offsets: the
+    // range names the element the item was read from, in the bytes the
+    // parser read.
+    assert_eq!(item.prov.len(), 1, "{:?}", item.prov);
+    let prov = &item.prov[0];
+    assert_eq!(prov.page_no, 0, "an XML document has no pages");
+    assert!(prov.bbox.is_none(), "and no boxes");
+    let range = prov.byte_range.as_ref().expect("a byte range instead");
+    assert_eq!(
+        &JATS[range.start as usize..range.end as usize],
+        "<p>A pull parser yields events in document order.</p>",
+        "the range names the element the item was read from"
+    );
+    assert_eq!(
+        prov.charspan.as_ref().map(|s| (s.start, s.end)),
+        Some((0, item.text.chars().count() as i32)),
+        "the span covers the whole item, as the element bounds the whole item"
     );
     assert_eq!(item.orig, item.text, "orig is set alongside text");
     assert_eq!(
@@ -860,7 +885,14 @@ fn a_code_block_folds_into_a_code_item_that_inlines_its_base_fields() {
     assert_eq!(code.text, "cargo test --offline");
     assert_eq!(code.orig, code.text);
     assert_eq!(code.content_layer, doc::ContentLayer::Body as i32);
-    assert!(code.prov.is_empty());
+    let range = code.prov[0]
+        .byte_range
+        .as_ref()
+        .expect("a code block is located by its bytes like any other item");
+    assert_eq!(
+        &source[range.start as usize..range.end as usize],
+        "<code id=\"snippet-1\">cargo test --offline</code>"
+    );
     assert_eq!(collector(&code.source).model.as_deref(), Some("doclang"));
     let fields = &code.meta.as_ref().expect("code meta").custom_fields;
     assert_eq!(field(fields, "xml.element_id"), Some("snippet-1"));
@@ -1740,5 +1772,56 @@ fn the_declared_column_geometry_reaches_the_table_data() {
     assert_eq!(
         data.columns[1].valign,
         Some(doc::VerticalAlignment::Bottom as i32)
+    );
+}
+
+#[test]
+fn a_foreign_namespace_and_a_cdata_section_reach_the_item_meta() {
+    let source = r#"<?xml version="1.0"?>
+<doclang xmlns="http://docling-project.org/ns/doclang/v1"
+         xmlns:mml="http://www.w3.org/1998/Math/MathML">
+  <paragraph><![CDATA[if a < b then « oui »]]></paragraph>
+  <mml:formula>α + β</mml:formula>
+</doclang>
+"#;
+    let (_, document) = fold_default(source);
+    let paragraph = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|item| item.label == doc::DocItemLabel::Paragraph as i32)
+        .expect("the paragraph");
+    let fields = &paragraph.meta.as_ref().expect("meta").custom_fields;
+    assert_eq!(field(fields, "xml.element_name"), Some("paragraph"));
+    assert_eq!(
+        fields.get("xml.from_cdata").and_then(|v| match v.kind {
+            Some(Kind::BoolValue(flag)) => Some(flag),
+            _ => None,
+        }),
+        Some(true)
+    );
+    assert_eq!(
+        field(fields, "xml.namespace"),
+        None,
+        "the root's own namespace is on the body meta, not repeated per item"
+    );
+
+    let formula = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|item| item.label == doc::DocItemLabel::Formula as i32)
+        .expect("the formula");
+    let fields = &formula.meta.as_ref().expect("meta").custom_fields;
+    assert_eq!(field(fields, "xml.element_name"), Some("mml:formula"));
+    assert_eq!(
+        field(fields, "xml.namespace"),
+        Some("http://www.w3.org/1998/Math/MathML"),
+        "an item from another namespace says which one, because it differs"
+    );
+    assert_eq!(
+        fields.get("xml.from_cdata"),
+        None,
+        "ordinary character data says nothing rather than saying false"
     );
 }

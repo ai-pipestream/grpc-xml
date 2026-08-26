@@ -133,7 +133,7 @@ impl<R: BufRead> Driver<'_, R> {
                         tree.leaves.push((local, attrs, text));
                     }
                 }
-                Step::Text(chunk) => {
+                Step::Text(chunk) | Step::CData(chunk) => {
                     if let Some((_, _, text)) = open.last_mut() {
                         text.push_str(&chunk);
                     } else {
@@ -148,7 +148,9 @@ impl<R: BufRead> Driver<'_, R> {
                         text.push_str(&resolved);
                     }
                 }
-                Step::Ignorable => {}
+                // A comment or a processing instruction inside one of these
+                // records is not part of the record.
+                Step::Ignorable | Step::ProcessingInstruction(_) => {}
                 Step::Declaration { .. } | Step::DocType(_) => {
                     return Err(ParseError::Malformed(
                         "a declaration inside an element".to_owned(),

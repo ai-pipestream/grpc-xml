@@ -68,8 +68,8 @@ impl<R: BufRead> Driver<'_, R> {
                         );
                     }
                 }
-                Step::Text(text) if text.trim().is_empty() => {}
-                Step::Text(_) => {
+                Step::Text(text) | Step::CData(text) if text.trim().is_empty() => {}
+                Step::Text(_) | Step::CData(_) => {
                     return Err(ParseError::Malformed(
                         "character data before the root element".to_owned(),
                     ));
@@ -79,6 +79,7 @@ impl<R: BufRead> Driver<'_, R> {
                         "entity reference &{name}; before the root element"
                     )));
                 }
+                Step::ProcessingInstruction(target) => self.warn_processing_instruction(&target),
                 Step::Ignorable => {}
                 Step::End => {
                     return Err(ParseError::Malformed(
@@ -175,7 +176,8 @@ impl<R: BufRead> Driver<'_, R> {
                         return Ok(());
                     }
                 }
-                Step::Text(text) => self.on_text(&text),
+                Step::Text(text) => self.on_text(&text, false),
+                Step::CData(text) => self.on_text(&text, true),
                 Step::GeneralRef { name, resolved } => {
                     self.on_general_ref(&name, resolved.as_deref());
                 }
@@ -189,6 +191,7 @@ impl<R: BufRead> Driver<'_, R> {
                         "a DOCTYPE may only appear before the root element".to_owned(),
                     ));
                 }
+                Step::ProcessingInstruction(target) => self.warn_processing_instruction(&target),
                 Step::Ignorable => {}
                 Step::Eof => {
                     let open = self
@@ -280,20 +283,23 @@ impl<R: BufRead> Driver<'_, R> {
                 self.push_frame(local, qname);
                 self.begin_capture(
                     dialect::Capture::new(pb::XmlItemLabel::Caption, ""),
+                    namespace,
+                    qname,
                     attrs,
                     true,
                 );
             }
             Action::Capture(spec) => {
                 self.push_frame(local, qname);
-                self.begin_capture(spec, attrs, false);
+                self.begin_capture(spec, namespace, qname, attrs, false);
             }
             Action::AttrText(spec) => {
                 self.push_frame(local, qname);
                 if let Some(value) = attrs.get(spec.attr) {
                     let text = collapse(value);
                     if !text.is_empty() {
-                        let item = self.text_item(spec.label, &spec.role, text, None, None, attrs);
+                        let item =
+                            self.text_item(spec.label, &spec.role, text, namespace, qname, attrs);
                         self.send(pb::parse_xml_response::Event::TextItem(item))?;
                         self.counts.text_items += 1;
                     }
@@ -357,7 +363,7 @@ impl<R: BufRead> Driver<'_, R> {
         Ok(self.stack.is_empty())
     }
 
-    pub(super) fn on_text(&mut self, text: &str) {
+    pub(super) fn on_text(&mut self, text: &str, from_cdata: bool) {
         if let Some(island) = self.island.as_mut() {
             let _ = island.writer.write_event(Event::Text(BytesText::new(text)));
             return;
@@ -366,6 +372,7 @@ impl<R: BufRead> Driver<'_, R> {
             capture.text.push_str(text);
             capture.chars += text.chars().count();
             capture.after_child = false;
+            capture.from_cdata |= from_cdata;
             return;
         }
         if let Some(fact) = self.fact.as_mut() {
@@ -438,6 +445,8 @@ impl<R: BufRead> Driver<'_, R> {
     pub(super) fn begin_capture(
         &mut self,
         spec: dialect::Capture,
+        namespace: &str,
+        qname: &str,
         attrs: &Attrs,
         is_caption: bool,
     ) {
@@ -451,6 +460,12 @@ impl<R: BufRead> Driver<'_, R> {
             chars: 0,
             path: self.path(),
             element_id: attrs.get("id").map(str::to_owned),
+            element_name: qname.to_owned(),
+            namespace: namespace.to_owned(),
+            // The caller pushed this element's frame before opening the
+            // capture, so the event the driver last read is its start tag.
+            byte_start: self.event_start,
+            from_cdata: false,
             attributes: self.reportable_attributes(attrs),
             spans: Vec::new(),
             is_caption,
@@ -578,6 +593,9 @@ impl<R: BufRead> Driver<'_, R> {
             return Ok(());
         }
         let spans = Self::finish_spans(capture.spans, &text, &positions);
+        // The end tag has just been read, so the reader's position is one
+        // past the last byte of the element.
+        let byte_end = self.xml.buffer_position();
         if capture.is_caption {
             // The caption belongs to the table that follows it inside the
             // same wrapper; `wrapper_depth` is where it gives up waiting.
@@ -585,6 +603,11 @@ impl<R: BufRead> Driver<'_, R> {
                 text,
                 path: capture.path,
                 element_id: capture.element_id,
+                element_name: capture.element_name,
+                namespace: capture.namespace,
+                byte_start: capture.byte_start,
+                byte_end,
+                from_cdata: capture.from_cdata,
                 spans,
                 wrapper_depth: capture.depth.saturating_sub(1),
             });
@@ -606,6 +629,11 @@ impl<R: BufRead> Driver<'_, R> {
             bbox: None,
             page_no: None,
             spans,
+            element_name: capture.element_name,
+            namespace: capture.namespace,
+            byte_start: Some(capture.byte_start),
+            byte_end: Some(byte_end),
+            from_cdata: capture.from_cdata,
         };
         self.counts.text_items += 1;
         self.send(pb::parse_xml_response::Event::TextItem(item))
@@ -631,6 +659,11 @@ impl<R: BufRead> Driver<'_, R> {
             bbox: None,
             page_no: None,
             spans: pending.spans,
+            element_name: pending.element_name,
+            namespace: pending.namespace,
+            byte_start: Some(pending.byte_start),
+            byte_end: Some(pending.byte_end),
+            from_cdata: pending.from_cdata,
         };
         self.counts.text_items += 1;
         self.send(pb::parse_xml_response::Event::TextItem(item))
@@ -683,6 +716,10 @@ impl<R: BufRead> Driver<'_, R> {
     /// Read one XML event and copy it into owned data.
     pub(super) fn next_step(&mut self) -> Result<Step, ParseError> {
         self.buf.clear();
+        // Where this event begins. The reader reports where it has read to,
+        // so the offset of a start tag is the position before the read, and
+        // the offset past an end tag is the position after it.
+        self.event_start = self.xml.buffer_position();
         let (resolved, event) = self
             .xml
             .read_resolved_event_into(&mut self.buf)
@@ -714,7 +751,7 @@ impl<R: BufRead> Driver<'_, R> {
             Event::Empty(_) => unreachable!("empty elements are expanded"),
             Event::End(_) => Step::End,
             Event::Text(text) => Step::Text(text.xml10_content().into_owned()),
-            Event::CData(cdata) => Step::Text(cdata.into_inner().into_owned()),
+            Event::CData(cdata) => Step::CData(cdata.into_inner().into_owned()),
             Event::GeneralRef(reference) => {
                 let name = reference.into_inner().into_owned();
                 let resolved = resolve_reference(&name);
@@ -729,7 +766,8 @@ impl<R: BufRead> Driver<'_, R> {
                 Step::Declaration { version, encoding }
             }
             Event::DocType(doctype) => Step::DocType(doctype.into_inner().into_owned()),
-            Event::Comment(_) | Event::PI(_) => Step::Ignorable,
+            Event::Comment(_) => Step::Ignorable,
+            Event::PI(pi) => Step::ProcessingInstruction(pi_target(&pi.into_inner())),
             Event::Eof => Step::Eof,
         };
         Ok(step)
@@ -810,8 +848,8 @@ impl<R: BufRead> Driver<'_, R> {
         label: pb::XmlItemLabel,
         role: &str,
         text: String,
-        level: Option<u32>,
-        ordinal: Option<u64>,
+        namespace: &str,
+        qname: &str,
         attrs: &Attrs,
     ) -> pb::TextItem {
         pb::TextItem {
@@ -819,8 +857,8 @@ impl<R: BufRead> Driver<'_, R> {
             label: label as i32,
             role: role.to_owned(),
             text,
-            level,
-            ordinal,
+            level: None,
+            ordinal: None,
             path: self.path(),
             element_id: attrs.get("id").map(str::to_owned),
             attributes: self.reportable_attributes(attrs),
@@ -830,7 +868,36 @@ impl<R: BufRead> Driver<'_, R> {
             // An item whose text came from an attribute has no inline
             // markup by construction: there is no element content to mark.
             spans: Vec::new(),
+            element_name: qname.to_owned(),
+            namespace: namespace.to_owned(),
+            // And no byte range either: the item's text is an attribute
+            // value, so there is no run of source bytes it is the text of,
+            // and the element's own range would name bytes this text is not
+            // in.
+            byte_start: None,
+            byte_end: None,
+            from_cdata: false,
         }
+    }
+
+    /// Record a processing instruction on the trailer rather than dropping
+    /// it in silence.
+    ///
+    /// An instruction is addressed to an application, and this service is
+    /// not that application: it does not act on one, and acting on one would
+    /// be exactly the "resolve what the document asks for" the security
+    /// policy refuses. But it is content the source put in the document, and
+    /// `WARNING_CODE_UNMAPPED_ELEMENT` is documented as meaning "this was
+    /// skipped", which is the truth about it.
+    fn warn_processing_instruction(&mut self, target: &str) {
+        let target = if target.is_empty() { "?" } else { target };
+        self.warn(
+            pb::WarningCode::UnmappedElement,
+            &format!(
+                "processing instruction <?{target}?> has no mapping and was not acted on; this \
+                 service resolves nothing a document asks it to"
+            ),
+        );
     }
 
     pub(super) fn next_index(&mut self) -> u64 {
@@ -875,6 +942,17 @@ impl<R: BufRead> Driver<'_, R> {
         };
         self.send(pb::parse_xml_response::Event::Status(status))
     }
+}
+
+/// The target of a processing instruction: everything up to the first
+/// whitespace, which is what the XML grammar defines a target to be.
+///
+/// The instruction's data is deliberately not carried into the warning: it
+/// is addressed to an application, it can be arbitrarily long, and the
+/// warning table aggregates by message, so a document with a thousand
+/// distinct instruction bodies would mint a thousand warning kinds.
+fn pi_target(inner: &str) -> String {
+    inner.split_whitespace().next().unwrap_or("").to_owned()
 }
 
 /// Every attribute of the root element except its namespace declarations.
