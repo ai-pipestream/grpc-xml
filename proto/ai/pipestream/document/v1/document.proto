@@ -156,6 +156,10 @@ message DocumentOrigin {
 
   // The source's own file identifier (a PDF /ID), hex-encoded.
   optional string source_id = 6;
+
+  // What the mimetype claim rests on (extension, sniffed magic, declared
+  // header), when the producer records it.
+  optional string mimetype_evidence = 7;
 }
 
 // ContentLayer defines the semantic layer where content appears in the document.
@@ -738,6 +742,15 @@ message TextItemBase {
 
   // Index attribution when this item heads a generated index.
   optional IndexMeta index_meta = 21;
+
+  // The item's raw source form where `text` is a projection (a passed-
+  // through markup block), the block-level twin of InlineSpan.raw.
+  optional string raw = 22;
+
+  // The source element this item came from, for markup sources that keep
+  // that identity.
+  optional string source_element_name = 23;
+  optional string source_namespace = 24;
 }
 
 // TitleItem represents a document title or major heading.
@@ -837,6 +850,16 @@ message ProvenanceItem {
   // The exact quadrilateral for rotated or skewed text; bbox stays the
   // axis-aligned hull.
   repeated Point polygon = 7;
+
+  // Where the content sits in the source text, by line (1-based,
+  // half-open), for line-addressed sources.
+  optional LineSpan line_range = 8;
+}
+
+// LineSpan is a half-open 1-based source line range.
+message LineSpan {
+  uint32 start = 1;
+  uint32 end = 2;
 }
 
 // BoundingBox defines a rectangular region in page coordinates.
@@ -856,6 +879,9 @@ message ImageRef {
   int32 dpi = 2;
   Size size = 3;
   string uri = 4;
+  // The size as the source spelled it when it is not a bare number pair
+  // (20%, 5cm, 0.8 of the text width); `size` stays unset then.
+  optional string size_raw = 5;
 }
 
 // Size represents 2D dimensions (width and height).
@@ -1449,6 +1475,8 @@ message InlineSpan {
   optional string style_name = 14;
   // Highlight color as #rrggbb, when the source states one.
   optional string highlight_color = 15;
+  // Interlinear annotation over the run (ruby text).
+  optional string annotation = 16;
 }
 
 // ReferenceKind names what an inline reference points at.
