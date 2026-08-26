@@ -69,7 +69,7 @@ The mapping follows the document model, not a 1:1 XML clone:
 | XBRL | fact table(s): concept, context, unit, value; taxonomy labels when provided |
 | DocLang | already-close-to-Document; mostly a typed decode |
 | DCLX | the zip's root `document.xml`, mapped exactly as DocLang; images stay compressed |
-| METS_GBS | one text item per hOCR `ocr_line`, pages in manifest order, `x_wconf` as source confidence; no geometry, no pixels |
+| METS_GBS | one text item per hOCR `ocr_line`, pages in manifest order, `x_wconf` as source confidence, per-line and per-word boxes; no pixels |
 
 Every item: `CollectorSource.collector = "xml"`, `model` = dialect
 name, `version` = this server's version, `confidence` unset, because a
@@ -125,6 +125,21 @@ manifest `ORDER`, with the extent the hOCR states and `unit = "px"`. A
 with that box, `COORD_ORIGIN_TOPLEFT` (which is how hOCR writes coordinates)
 and a `charspan` covering the whole item, since a line's box bounds the line
 rather than any part of it.
+
+**Word boxes.** hOCR marks each word inside a line with its own box and its
+own `x_wconf` (`ocrx_word`), and those boxes are the only thing in the
+format that says where *inside* a line a word is — a consumer highlighting a
+search hit on the page scan needs the word, and the line's box cannot give
+it. `TextItem.words` carries one `WordBox` per marked word: its run in the
+item's text (code points, translated onto the collapsed text the same way an
+inline run is), its box, and its own confidence when the source states one.
+A word with no `bbox` clause states no geometry rather than a fabricated
+one, and a word with no `x_wconf` leaves `confidence` unset rather than
+claiming certainty — unlike the *line*, which defaults to 1.0 as it always
+has. The fold turns each into its own `ProvenanceItem` after the line's,
+which is what `prov` being repeated is for: the line entry's `charspan`
+covers the item, each word entry's `charspan` is the word, and the pairing
+of that span with that box is the whole content of the entry.
 
 The single-document dialects have no page and no box, and they do have the
 byte range their element occupies: `TextItem.byte_start` / `byte_end` name

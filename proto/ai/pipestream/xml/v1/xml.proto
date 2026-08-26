@@ -461,6 +461,27 @@ message BoundingBox {
   double bottom = 4;
 }
 
+// WordBox is one recognized word of an OCR line and where it sits.
+//
+// hOCR marks each word with its own box and its own confidence
+// (`ocrx_word`), and a line's box bounds the whole line, so the word boxes
+// are the only thing in the format that says where inside a line a word is.
+// A consumer that wants to highlight a search hit on the page scan needs
+// exactly this and can get it nowhere else.
+message WordBox {
+  // The word's run in the owning `TextItem.text`, counted in Unicode scalar
+  // values so a consumer slices the string it already has. Measured against
+  // the collapsed text the item carries, not against the source.
+  IntRange range = 1;
+
+  // The word's box, in the coordinates the preceding `Page` event names.
+  BoundingBox bbox = 2;
+
+  // The word's own OCR confidence, 0.0 to 1.0, when the source states one
+  // for the word rather than only for the line.
+  optional double confidence = 3;
+}
+
 // Page announces one page of an archive dialect, before the items on it.
 //
 // Only the archive dialects have pages: a single XML document has none, and
@@ -595,6 +616,11 @@ message TextItem {
   // may declare an ordered list and number none of its items, or number an
   // item in a list it never called ordered.
   bool enumerated = 20;
+
+  // Per-word boxes inside this item, in reading order. Only the archive
+  // dialects have these, and only when the source marks words: hOCR does,
+  // with `ocrx_word`. Empty everywhere else.
+  repeated WordBox words = 21;
 }
 
 // TableStart opens a streamed table. Rows follow, then `TableEnd`.

@@ -549,7 +549,7 @@ pub fn collapse(text: &str) -> String {
 /// collapsed away. It is the bridge between the offsets an inline run was
 /// measured at — into the raw captured string — and the offsets a consumer
 /// can use against the `text` it receives.
-fn collapse_positions(text: &str) -> (String, Vec<Option<u32>>) {
+pub(crate) fn collapse_positions(text: &str) -> (String, Vec<Option<u32>>) {
     let mut out = String::with_capacity(text.len());
     let mut map = Vec::new();
     let mut pending_space = false;
@@ -578,7 +578,11 @@ fn collapse_positions(text: &str) -> (String, Vec<Option<u32>>) {
 /// surviving code point at or after `start` and ends after the last one
 /// before `end`. A run that was nothing but whitespace has no position in
 /// the collapsed string and returns `None`.
-fn collapsed_range(map: &[Option<u32>], start: usize, end: usize) -> Option<pb::IntRange> {
+pub(crate) fn collapsed_range(
+    map: &[Option<u32>],
+    start: usize,
+    end: usize,
+) -> Option<pb::IntRange> {
     let end = end.min(map.len());
     if start >= end {
         return None;

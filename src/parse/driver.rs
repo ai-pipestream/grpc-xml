@@ -650,6 +650,9 @@ impl<R: BufRead> Driver<'_, R> {
             from_cdata: capture.from_cdata,
             list_depth: capture.list_depth,
             enumerated: capture.enumerated,
+            // Word boxes come from OCR, and a single XML document is not
+            // OCR: there is nothing marking a word inside a paragraph.
+            words: Vec::new(),
         };
         self.counts.text_items += 1;
         self.send(pb::parse_xml_response::Event::TextItem(item))
@@ -683,6 +686,7 @@ impl<R: BufRead> Driver<'_, R> {
             // A caption is never a list item.
             list_depth: None,
             enumerated: false,
+            words: Vec::new(),
         };
         self.counts.text_items += 1;
         self.send(pb::parse_xml_response::Event::TextItem(item))
@@ -924,6 +928,7 @@ impl<R: BufRead> Driver<'_, R> {
             // An `AttrText` item is a picture reference, never a list item.
             list_depth: None,
             enumerated: false,
+            words: Vec::new(),
         }
     }
 

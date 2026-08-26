@@ -678,3 +678,159 @@ async fn a_page_without_coordocr_is_skipped_with_a_warning_not_a_failure() {
     assert_eq!(counts.text_items, 1);
     assert!(warned(&events, pb::WarningCode::ArchiveMemberIgnored));
 }
+
+#[tokio::test]
+async fn every_ocr_word_carries_its_own_box_and_its_own_confidence() {
+    // Multi-byte words, so a range that is right in bytes and wrong in
+    // Unicode scalar values slices the wrong word rather than passing.
+    let page = hocr_page(&[("Kapitel", "Über"), ("λόγος", "τέλος")]);
+    let archive = targz_of(&[
+        ("UOM_39015012345678.mets.xml", GBS_METS.as_bytes()),
+        ("00000001.html", page.as_bytes()),
+    ]);
+    let client = client().await;
+    let events = parse_bytes_ok(&client, &archive, options()).await;
+    let lines = items_with_role(&events, "ocr-line");
+    assert_eq!(texts(&lines), ["Kapitel Über", "λόγος τέλος"]);
+
+    for (line, expected) in lines.iter().zip([["Kapitel", "Über"], ["λόγος", "τέλος"]]) {
+        assert_eq!(line.words.len(), 2, "one entry per ocrx_word");
+        let covered: Vec<String> = line
+            .words
+            .iter()
+            .map(|word| {
+                let range = word.range.as_ref().expect("a word states its range");
+                line.text
+                    .chars()
+                    .skip(range.start as usize)
+                    .take((range.end - range.start) as usize)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(covered, expected, "the ranges count code points");
+    }
+
+    // The word boxes are the source's own, and they are not the line's: a
+    // line's box bounds the line, which is the whole reason to carry these.
+    let line = lines[0];
+    let first = line.words[0].bbox.as_ref().expect("a word box");
+    let second = line.words[1].bbox.as_ref().expect("a word box");
+    assert!((first.right - 400.0).abs() < f64::EPSILON, "{first:?}");
+    assert!((second.left - 420.0).abs() < f64::EPSILON, "{second:?}");
+    assert!(second.left > first.right, "the words do not overlap");
+    let line_box = line.bbox.as_ref().expect("the line box");
+    assert!(first.right < line_box.right, "the word is inside the line");
+
+    // Per-word confidence, which the line's own does not carry.
+    assert!((line.words[0].confidence.expect("x_wconf 97") - 0.97).abs() < 1e-9);
+    assert!((line.words[1].confidence.expect("x_wconf 95") - 0.95).abs() < 1e-9);
+    assert!(
+        (line.source.as_ref().unwrap().confidence.unwrap() - 0.96).abs() < 1e-9,
+        "the line keeps its own"
+    );
+}
+
+#[tokio::test]
+async fn a_word_without_a_box_states_no_geometry_and_the_line_still_maps() {
+    let page = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+        <html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\n\
+        <div class=\"ocr_page\" id=\"page_1\" title=\"bbox 0 0 640 480\">\n\
+        <span class=\"ocr_line\" id=\"a\" title=\"bbox 10 20 300 40\">\n\
+        <span class=\"ocrx_word\" title=\"x_wconf 90\">Ohne</span>\n\
+        <span class=\"ocrx_word\" title=\"bbox 80 20 300 40\">Kästchen</span>\n\
+        </span>\n\
+        </div></body></html>\n";
+    let archive = targz_of(&[
+        ("UOM_39015012345678.mets.xml", GBS_METS.as_bytes()),
+        ("00000001.html", page.as_bytes()),
+    ]);
+    let client = client().await;
+    let events = parse_bytes_ok(&client, &archive, options()).await;
+    let lines = items_with_role(&events, "ocr-line");
+    assert_eq!(texts(&lines), ["Ohne Kästchen"]);
+    assert_eq!(
+        lines[0].words.len(),
+        1,
+        "a word with no box states no geometry rather than a fabricated one"
+    );
+    let range = lines[0].words[0].range.as_ref().expect("its range");
+    let covered: String = lines[0]
+        .text
+        .chars()
+        .skip(range.start as usize)
+        .take((range.end - range.start) as usize)
+        .collect();
+    assert_eq!(covered, "Kästchen");
+    assert_eq!(
+        lines[0].words[0].confidence, None,
+        "the source stated none for this word, so neither does the wire"
+    );
+}
+
+#[tokio::test]
+async fn the_document_locates_a_line_and_each_word_inside_it() {
+    let page = hocr_page(&[("λόγος", "τέλος")]);
+    let archive = targz_of(&[
+        ("UOM_39015012345678.mets.xml", GBS_METS.as_bytes()),
+        ("00000001.html", page.as_bytes()),
+    ]);
+    let client = client().await;
+    let events = parse_bytes_ok(
+        &client,
+        &archive,
+        pb::ParseOptions {
+            emit_document: true,
+            ..options()
+        },
+    )
+    .await;
+    let document = events
+        .iter()
+        .find_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::Document(d)) => Some(d),
+            _ => None,
+        })
+        .expect("emit_document produces a document event");
+    let base = match document.texts[0].item.as_ref().expect("a variant") {
+        grpc_xml::document::v1::base_text_item::Item::Text(item) => {
+            item.base.as_ref().expect("a base")
+        }
+        _ => panic!("an OCR line folds as a text item"),
+    };
+    assert_eq!(base.text, "λόγος τέλος");
+    assert_eq!(
+        base.prov.len(),
+        3,
+        "the line's own box, then one entry per word"
+    );
+    let line = &base.prov[0];
+    assert_eq!(
+        line.charspan.as_ref().map(|s| (s.start, s.end)),
+        Some((0, 11)),
+        "the line's span is the whole line, in code points"
+    );
+    let words: Vec<(i32, i32)> = base.prov[1..]
+        .iter()
+        .map(|prov| {
+            let span = prov.charspan.as_ref().expect("a word span");
+            (span.start, span.end)
+        })
+        .collect();
+    assert_eq!(
+        words,
+        [(0, 5), (6, 11)],
+        "each word's span is the word, not the line"
+    );
+    for prov in &base.prov[1..] {
+        assert_eq!(prov.page_no, 1);
+        let bbox = prov.bbox.as_ref().expect("every word entry has its box");
+        assert_eq!(
+            bbox.coord_origin,
+            Some(grpc_xml::document::v1::CoordOrigin::Topleft as i32)
+        );
+        assert!(bbox.b > bbox.t);
+    }
+    let first_word = base.prov[1].bbox.as_ref().unwrap();
+    let second_word = base.prov[2].bbox.as_ref().unwrap();
+    assert!(second_word.l > first_word.r, "the boxes are the source's");
+}

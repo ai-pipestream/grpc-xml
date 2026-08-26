@@ -17,7 +17,10 @@ use quick_xml::reader::NsReader;
 
 use super::{NS_METS, budget_for, read_inflated, stream_error};
 use crate::dialect::Attrs;
-use crate::parse::{self, EmitFn, InputStats, ParseConfig, ParseError, collapse};
+use crate::parse::{
+    self, EmitFn, InputStats, ParseConfig, ParseError, collapse, collapse_positions,
+    collapsed_range,
+};
 use crate::proto::v1 as pb;
 use crate::security;
 use crate::sniff::{Dialect, Evidence};
@@ -361,17 +364,65 @@ struct OcrLine {
     /// is dropped, so this is always set on a line that reaches the wire.
     bbox: pb::BoundingBox,
     attributes: Vec<pb::Attribute>,
+    /// The boxes of the words inside the line, in reading order.
+    words: Vec<pb::WordBox>,
 }
 
 /// An `ocr_line` span being captured, with the nesting count that finds its
 /// matching end tag through the `ocrx_word` spans inside it.
 struct OcrCapture {
     text: String,
+    /// Code points appended to `text` so far, so a word boundary costs a
+    /// read rather than a walk of the whole line.
+    chars: usize,
     span_depth: usize,
     element_id: Option<String>,
     confidence: f64,
     bbox: Option<pb::BoundingBox>,
     attributes: Vec<pb::Attribute>,
+    /// Words closed so far, measured against the raw captured text.
+    words: Vec<WordBuild>,
+    /// The word currently open, if any.
+    open_word: Option<WordBuild>,
+}
+
+/// One `ocrx_word` being measured against the line's growing raw text.
+///
+/// The offsets are into the raw string, because that is the one the driver
+/// is appending to; they are translated onto the collapsed text the item
+/// carries when the line closes, exactly as an inline run is.
+struct WordBuild {
+    start: usize,
+    end: usize,
+    bbox: pb::BoundingBox,
+    confidence: Option<f64>,
+}
+
+impl OcrCapture {
+    /// Append text to the line, keeping the code point count beside it.
+    fn push(&mut self, text: &str) {
+        self.text.push_str(text);
+        self.chars += text.chars().count();
+    }
+}
+
+/// Translate the word runs recorded against the raw captured line onto the
+/// collapsed text the item carries.
+///
+/// A word whose characters all collapsed away has no position in the text a
+/// consumer receives, so it carries no box either: a box pointing at nothing
+/// is worse than the absence of one.
+fn finish_words(words: &[WordBuild], map: &[Option<u32>]) -> Vec<pb::WordBox> {
+    words
+        .iter()
+        .filter_map(|word| {
+            Some(pb::WordBox {
+                range: Some(collapsed_range(map, word.start, word.end)?),
+                bbox: Some(word.bbox),
+                confidence: word.confidence,
+            })
+        })
+        .collect()
 }
 
 /// One hOCR page: its lines and, when the `ocr_page` element states it, the
@@ -548,6 +599,7 @@ impl MetsDriver<'_> {
                 // An OCR line is a line on a page, not an item of a list.
                 list_depth: None,
                 enumerated: false,
+                words: line.words,
             };
             self.counts.text_items += 1;
             self.send(pb::parse_xml_response::Event::TextItem(item))?;
@@ -590,6 +642,22 @@ impl MetsDriver<'_> {
                         continue;
                     }
                     if let Some(capture) = capture.as_mut() {
+                        // A word span sits directly inside the line; the
+                        // deeper ones hOCR nests inside a word are the
+                        // engine's own subdivisions, not words.
+                        if capture.span_depth == 0
+                            && capture.open_word.is_none()
+                            && has_class(&start, "ocrx_word")
+                            && capture.words.len() < parse::MAX_INLINE_SPANS
+                        {
+                            let title = attr(&start, "title").unwrap_or_default();
+                            capture.open_word = parse_bbox(&title).map(|bbox| WordBuild {
+                                start: capture.chars,
+                                end: capture.chars,
+                                bbox,
+                                confidence: stated_confidence(&title),
+                            });
+                        }
                         capture.span_depth += 1;
                     } else if has_class(&start, "ocr_line") {
                         let title = attr(&start, "title").unwrap_or_default();
@@ -600,11 +668,14 @@ impl MetsDriver<'_> {
                         };
                         capture = Some(OcrCapture {
                             text: String::new(),
+                            chars: 0,
                             span_depth: 0,
                             element_id: attr(&start, "id"),
                             confidence: extract_confidence(&title),
                             bbox: parse_bbox(&title),
                             attributes,
+                            words: Vec::new(),
+                            open_word: None,
                         });
                     }
                 }
@@ -616,10 +687,18 @@ impl MetsDriver<'_> {
                     if let Some(open) = capture.as_mut() {
                         if open.span_depth > 0 {
                             open.span_depth -= 1;
+                            if open.span_depth == 0
+                                && let Some(mut word) = open.open_word.take()
+                            {
+                                word.end = open.chars;
+                                open.words.push(word);
+                            }
                         } else if let Some(done) = capture.take() {
-                            let text = collapse(&done.text);
+                            let (text, positions) = collapse_positions(&done.text);
+                            debug_assert_eq!(text, collapse(&done.text));
                             if let Some(bbox) = done.bbox.filter(|_| !text.is_empty()) {
                                 page.lines.push(OcrLine {
+                                    words: finish_words(&done.words, &positions),
                                     text,
                                     element_id: done.element_id,
                                     confidence: done.confidence,
@@ -632,12 +711,12 @@ impl MetsDriver<'_> {
                 }
                 Event::Text(text) => {
                     if let Some(capture) = capture.as_mut() {
-                        capture.text.push_str(&text.xml10_content());
+                        capture.push(&text.xml10_content());
                     }
                 }
                 Event::CData(cdata) => {
                     if let Some(capture) = capture.as_mut() {
-                        capture.text.push_str(&cdata);
+                        capture.push(&cdata);
                     }
                 }
                 Event::GeneralRef(reference) => {
@@ -669,12 +748,9 @@ impl MetsDriver<'_> {
             );
         }
         if let Some(capture) = capture {
-            if let Some(text) = resolved {
-                capture.text.push_str(&text);
-            } else {
-                capture.text.push('&');
-                capture.text.push_str(name);
-                capture.text.push(';');
+            match resolved {
+                Some(text) => capture.push(&text),
+                None => capture.push(&format!("&{name};")),
             }
         }
     }
@@ -833,6 +909,24 @@ fn parse_bbox(title: &str) -> Option<pb::BoundingBox> {
             #[allow(clippy::cast_precision_loss)]
             bottom: values[3] as f64,
         })
+    })
+}
+
+/// The `x_wconf` confidence a `title` attribute states, or `None` when it
+/// states none.
+///
+/// A line defaults to 1.0 when it says nothing, matching what a line-level
+/// confidence has always meant here. A word does not: a word with no
+/// `x_wconf` has no confidence of its own, and claiming certainty for it
+/// would be inventing a measurement the engine did not make.
+fn stated_confidence(title: &str) -> Option<f64> {
+    title.split(';').find_map(|part| {
+        let value = part.trim().strip_prefix("x_wconf")?;
+        value
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|parsed| parsed / 100.0)
     })
 }
 

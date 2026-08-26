@@ -1263,19 +1263,34 @@ fn provenance(item: &pb::TextItem) -> Vec<doc::ProvenanceItem> {
         end: int_from_usize(item.text.chars().count()),
     });
     if let (Some(bbox), Some(page_no)) = (item.bbox.as_ref(), item.page_no) {
-        return vec![doc::ProvenanceItem {
+        // The line's own box first, covering the whole item, then one entry
+        // per word the source boxed. `prov` is repeated precisely so an item
+        // can be located at more than one grain, and a word box is the only
+        // thing in hOCR that says where *inside* a line a word is: a
+        // consumer highlighting a search hit on the page scan needs the
+        // word, and the line cannot give it.
+        let mut prov = Vec::with_capacity(1 + item.words.len());
+        prov.push(doc::ProvenanceItem {
             page_no: int(page_no),
-            bbox: Some(doc::BoundingBox {
-                l: bbox.left,
-                t: bbox.top,
-                r: bbox.right,
-                b: bbox.bottom,
-                coord_origin: Some(doc::CoordOrigin::Topleft as i32),
-                coord_origin_raw: None,
-            }),
+            bbox: Some(box_of(bbox)),
             charspan,
             ..doc::ProvenanceItem::default()
-        }];
+        });
+        prov.extend(item.words.iter().filter_map(|word| {
+            let (range, bbox) = (word.range.as_ref()?, word.bbox.as_ref()?);
+            Some(doc::ProvenanceItem {
+                page_no: int(page_no),
+                bbox: Some(box_of(bbox)),
+                // Unlike the line's, a word's span is the word: that pairing
+                // of a range with a box is the whole point of the entry.
+                charspan: Some(doc::IntSpan {
+                    start: int(range.start),
+                    end: int(range.end),
+                }),
+                ..doc::ProvenanceItem::default()
+            })
+        }));
+        return prov;
     }
     let (Some(start), Some(end)) = (item.byte_start, item.byte_end) else {
         return Vec::new();
@@ -1288,6 +1303,20 @@ fn provenance(item: &pb::TextItem) -> Vec<doc::ProvenanceItem> {
         charspan,
         ..doc::ProvenanceItem::default()
     }]
+}
+
+/// One wire box as the Document plane's own. hOCR states coordinates in
+/// image pixels with the origin at the top left, which is what
+/// `COORD_ORIGIN_TOPLEFT` means; the unit is on the page.
+fn box_of(bbox: &pb::BoundingBox) -> doc::BoundingBox {
+    doc::BoundingBox {
+        l: bbox.left,
+        t: bbox.top,
+        r: bbox.right,
+        b: bbox.bottom,
+        coord_origin: Some(doc::CoordOrigin::Topleft as i32),
+        coord_origin_raw: None,
+    }
 }
 
 /// The local part of an attribute name, whatever prefix the document bound.
