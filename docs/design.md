@@ -218,7 +218,11 @@ qualified names resolvable from the Document alone.
 
 **Identity.** `schema_name` is set from the `SCHEMA_NAME` constant in
 `src/document_fold.rs`, the upstream v2 document schema identifier this
-plane stays compatible with. `origin.mimetype = "application/xml"`, `name`
+plane stays compatible with. `origin.mimetype = "application/xml"` (the
+archive dialects state the archive's own type), with
+`origin.mimetype_evidence` naming the signal that resolved the dialect the
+mimetype is derived from: `requested`, `root-namespace`, `public-id`,
+`root-element` or `archive-magic`. `name`
 = `XmlInfo.title` when the dialect exposed one, otherwise the first `TITLE`
 item's text (none of the four dialects currently fill `XmlInfo.title`, so
 in practice it is the title item). Root namespace, root local name and

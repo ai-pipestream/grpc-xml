@@ -241,9 +241,13 @@ fn assert_parented(document: &doc::Document, child: &str, parent: &str) {
 fn a_jats_article_folds_into_a_named_document_with_its_own_root_meta() {
     let (_, document) = fold_default(JATS);
     assert_eq!(document.schema_name.as_deref(), Some(SCHEMA_NAME));
+    let origin = document.origin.as_ref().expect("an origin");
+    assert_eq!(origin.mimetype, MIMETYPE);
     assert_eq!(
-        document.origin.as_ref().map(|o| o.mimetype.as_str()),
-        Some(MIMETYPE)
+        origin.mimetype_evidence.as_deref(),
+        Some("root-namespace"),
+        "the mimetype is derived from the dialect, so it rests on what \
+         resolved the dialect"
     );
     // XmlInfo carries no title for these dialects — it goes out before the
     // parser reaches one — so the document is named after its TITLE item.
@@ -1039,6 +1043,25 @@ fn an_html_island_leaves_a_placeholder_naming_what_was_skipped() {
     assert_eq!(
         attachment.size_bytes, bytes,
         "the size is the fragment the wire carried"
+    );
+}
+
+#[test]
+fn a_requested_dialect_says_so_rather_than_naming_a_signal_that_never_fired() {
+    let (_, document) = fold(
+        JATS,
+        &ParseConfig {
+            dialect: Some(grpc_xml::sniff::Dialect::Jats),
+            ..ParseConfig::default()
+        },
+    );
+    assert_eq!(
+        document
+            .origin
+            .as_ref()
+            .and_then(|o| o.mimetype_evidence.as_deref()),
+        Some("requested"),
+        "no sniffing ran, and the origin says that instead of claiming a match"
     );
 }
 

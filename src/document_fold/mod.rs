@@ -564,6 +564,9 @@ impl DocumentFold {
         self.fallback_source.model = Some(model.to_owned());
         if let Some(origin) = self.document.origin.as_mut() {
             mimetype(dialect).clone_into(&mut origin.mimetype);
+            // The mimetype above is derived from the dialect, so what the
+            // dialect was decided by is what the mimetype claim rests on.
+            origin.mimetype_evidence = evidence_name(info.evidence).map(str::to_owned);
         }
         if let Some(title) = info.title.as_ref().filter(|t| !t.is_empty()) {
             self.document.name.clone_from(title);
@@ -1892,6 +1895,22 @@ const fn model_name(dialect: pb::XmlDialect) -> &'static str {
         pb::XmlDialect::Doclang => "doclang",
         pb::XmlDialect::Dclx => "dclx",
         pb::XmlDialect::MetsGbs => "mets-gbs",
+    }
+}
+
+/// What the mimetype claim rests on, in the sniff's own vocabulary.
+///
+/// The origin mimetype is derived from the dialect, and the dialect was
+/// resolved by one named signal, so the signal is the answer. `UNSPECIFIED`
+/// states nothing rather than naming a signal that did not fire.
+fn evidence_name(evidence: i32) -> Option<&'static str> {
+    match pb::DialectEvidence::try_from(evidence) {
+        Ok(pb::DialectEvidence::Requested) => Some("requested"),
+        Ok(pb::DialectEvidence::RootNamespace) => Some("root-namespace"),
+        Ok(pb::DialectEvidence::PublicId) => Some("public-id"),
+        Ok(pb::DialectEvidence::RootElement) => Some("root-element"),
+        Ok(pb::DialectEvidence::ArchiveMagic) => Some("archive-magic"),
+        Ok(pb::DialectEvidence::Unspecified) | Err(_) => None,
     }
 }
 
