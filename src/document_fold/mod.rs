@@ -673,13 +673,15 @@ impl DocumentFold {
             self.current_parent()
         };
         let self_ref = format!("#/texts/{}", self.document.texts.len());
-        let fields = text_fields(item, &self.root_namespace);
+        let mut fields = text_fields(item);
+        let (element_name, namespace) = identity_of(item, &self.root_namespace);
         let source = self.source_of(item.source.as_ref());
         let variant = if label == pb::XmlItemLabel::Code {
             // TRAP, and the reason this branch exists: CodeItem does not wrap
             // a TextItemBase. Its base fields are inlined so that its single
             // `meta` slot is a FloatingMeta; see the comment on CodeItem in
             // document.proto.
+            identity_fields(item, &self.root_namespace, &mut fields);
             doc::base_text_item::Item::Code(doc::CodeItem {
                 self_ref: self_ref.clone(),
                 parent: Some(reference(&parent)),
@@ -713,6 +715,8 @@ impl DocumentFold {
                 text: item.text.clone(),
                 source: vec![source],
                 spans: inline_spans(&item.spans),
+                source_element_name: element_name,
+                source_namespace: namespace,
                 ..doc::TextItemBase::default()
             };
             match label {
@@ -916,7 +920,8 @@ impl DocumentFold {
         let parent = self.current_parent();
         let self_ref = format!("#/pictures/{}", self.document.pictures.len());
         let source = self.source_of(item.source.as_ref());
-        let mut fields = text_fields(item, &self.root_namespace);
+        let mut fields = text_fields(item);
+        identity_fields(item, &self.root_namespace, &mut fields);
         if !item.text.is_empty() {
             fields.insert("xml.href".to_owned(), string(&item.text));
         }
@@ -1720,18 +1725,19 @@ fn doc_reference_kind(kind: i32) -> Option<i32> {
 /// Document plane has no typed slot for.
 ///
 /// The `xml.` keys are this collector's own namespace for source locators,
-/// which is where the path, the role and the element id have always gone.
-/// The element's name belongs with them: the Document plane models what an
-/// item *is*, not what tag it was written as, and a consumer matching on the
-/// source vocabulary should not have to re-split a positional path to get
-/// the name back.
+/// which is where the path, the role and the element id go. A positional
+/// path, a dialect's own role vocabulary and an ordinal are genuinely this
+/// collector's terms; the schema has no slot for any of them and inventing
+/// one would be claiming the fleet knows their shape.
 ///
-/// The item's own namespace is recorded only when it differs from the root's,
-/// which is already on the body meta. Repeating the same URI on every item of
-/// a single-namespace document would be noise; a `mml:math` inside a JATS
-/// article is the case worth stating, and stating it is exactly what a
-/// difference from the root means.
-fn text_fields(item: &pb::TextItem, root_namespace: &str) -> HashMap<String, Value> {
+/// The element's name and namespace are no longer among them: the schema
+/// grew `source_element_name` and `source_namespace` for exactly this, and
+/// they are set on the item itself by [`identity_of`]. `from_cdata` stays,
+/// being a fact about how the parser read the text rather than about the
+/// document, and only when true: the absence of the key means ordinary
+/// character data, and a false entry on every other item would say the same
+/// thing at the cost of a field per item.
+fn text_fields(item: &pb::TextItem) -> HashMap<String, Value> {
     let mut fields = HashMap::new();
     if !item.path.is_empty() {
         fields.insert("xml.path".to_owned(), string(&item.path));
@@ -1745,19 +1751,39 @@ fn text_fields(item: &pb::TextItem, root_namespace: &str) -> HashMap<String, Val
     if let Some(ordinal) = item.ordinal {
         fields.insert("xml.ordinal".to_owned(), number(ordinal));
     }
-    if !item.element_name.is_empty() {
-        fields.insert("xml.element_name".to_owned(), string(&item.element_name));
-    }
-    if !item.namespace.is_empty() && item.namespace != root_namespace {
-        fields.insert("xml.namespace".to_owned(), string(&item.namespace));
-    }
     if item.from_cdata {
-        // Only when true: the absence of the key means "ordinary character
-        // data", and a false entry on every other item would say the same
-        // thing at the cost of a field per item.
         fields.insert("xml.from_cdata".to_owned(), flag(true));
     }
     fields
+}
+
+/// The source element an item came from, for the schema's own two slots.
+///
+/// The namespace is recorded only when it differs from the root's, which is
+/// already on the body meta. Repeating the same URI on every item of a
+/// single-namespace document would be noise; a `mml:math` inside a JATS
+/// article is the case worth stating, and a difference from the root is
+/// exactly what states it.
+fn identity_of(item: &pb::TextItem, root_namespace: &str) -> (Option<String>, Option<String>) {
+    let name = (!item.element_name.is_empty()).then(|| item.element_name.clone());
+    let namespace = (!item.namespace.is_empty() && item.namespace != root_namespace)
+        .then(|| item.namespace.clone());
+    (name, namespace)
+}
+
+/// The same identity as `xml.` custom fields, for the two item kinds whose
+/// messages inline their own base-field set and so never grew the typed
+/// slots: `CodeItem` and `PictureItem`. Neither wraps a `TextItemBase`, so
+/// the fold has nowhere typed to put the element on those two and keeping
+/// the locators together is better than dropping them.
+fn identity_fields(item: &pb::TextItem, root_namespace: &str, fields: &mut HashMap<String, Value>) {
+    let (name, namespace) = identity_of(item, root_namespace);
+    if let Some(name) = name {
+        fields.insert("xml.element_name".to_owned(), string(&name));
+    }
+    if let Some(namespace) = namespace {
+        fields.insert("xml.namespace".to_owned(), string(&namespace));
+    }
 }
 
 /// A `google.protobuf.Value` holding a boolean.

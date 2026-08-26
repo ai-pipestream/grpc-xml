@@ -330,12 +330,15 @@ fn a_jats_item_carries_its_locators_in_meta_and_the_bytes_it_came_from() {
     assert_eq!(field(fields, "xml.role"), None, "a body paragraph has none");
     assert_eq!(
         field(fields, "xml.element_name"),
-        Some("p"),
-        "the source's own name for the element, beside its position"
-    );
-    assert_eq!(
-        field(fields, "xml.namespace"),
         None,
+        "the element identity has a typed home now, and is not written twice"
+    );
+
+    // The source's own name for the element, in the slot the schema grew
+    // for it rather than beside the positional path in a custom field.
+    assert_eq!(item.source_element_name.as_deref(), Some("p"));
+    assert_eq!(
+        item.source_namespace, None,
         "the item is in the root's namespace, which the body meta already states"
     );
 
@@ -916,6 +919,50 @@ fn a_code_block_folds_into_a_code_item_that_inlines_its_base_fields() {
             .any(|child| child.r#ref == "#/texts/1"),
         "the body lists the code item like any other"
     );
+    assert_eq!(
+        field(fields, "xml.element_name"),
+        Some("code"),
+        "CodeItem inlines its own base fields and never grew the typed slot, \
+         so its element identity stays with its other locators"
+    );
+}
+
+#[test]
+fn the_two_messages_without_the_typed_slot_keep_their_identity_in_meta() {
+    // CodeItem and PictureItem do not wrap a TextItemBase: both inline their
+    // own base-field set, which the schema did not extend with
+    // source_element_name. The fold has nowhere typed to put the element on
+    // those two, and keeping the locators together beats dropping them.
+    let (_, document) = fold_default(USPTO);
+    let picture = &document.pictures[0];
+    let fields = &picture.meta.as_ref().expect("picture meta").custom_fields;
+    assert_eq!(
+        field(fields, "xml.element_name"),
+        Some("img"),
+        "a picture keeps the element that named it"
+    );
+
+    // Every item that does wrap a TextItemBase states its element in the
+    // typed slot and nowhere else, so no item says it twice. An item an
+    // archive driver synthesized rather than read from one element states
+    // it in neither, which is what an empty element name on the wire means.
+    let mut typed = 0;
+    for item in &document.texts {
+        if matches!(item.item, Some(doc::base_text_item::Item::Code(_))) {
+            continue;
+        }
+        let base = base(item);
+        assert!(
+            !base
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.custom_fields.contains_key("xml.element_name")),
+            "{} states its element in both places",
+            base.self_ref
+        );
+        typed += usize::from(base.source_element_name.is_some());
+    }
+    assert!(typed > 0, "the items read from elements do state one");
 }
 
 #[test]
@@ -1867,7 +1914,7 @@ fn the_declared_column_geometry_reaches_the_table_data() {
 }
 
 #[test]
-fn a_foreign_namespace_and_a_cdata_section_reach_the_item_meta() {
+fn a_foreign_namespace_reaches_the_typed_slot_and_a_cdata_section_the_meta() {
     let source = r#"<?xml version="1.0"?>
 <doclang xmlns="http://docling-project.org/ns/doclang/v1"
          xmlns:mml="http://www.w3.org/1998/Math/MathML">
@@ -1883,17 +1930,22 @@ fn a_foreign_namespace_and_a_cdata_section_reach_the_item_meta() {
         .find(|item| item.label == doc::DocItemLabel::Paragraph as i32)
         .expect("the paragraph");
     let fields = &paragraph.meta.as_ref().expect("meta").custom_fields;
-    assert_eq!(field(fields, "xml.element_name"), Some("paragraph"));
+    assert_eq!(paragraph.source_element_name.as_deref(), Some("paragraph"));
+    assert_eq!(
+        field(fields, "xml.element_name"),
+        None,
+        "the identity is not written twice"
+    );
     assert_eq!(
         fields.get("xml.from_cdata").and_then(|v| match v.kind {
             Some(Kind::BoolValue(flag)) => Some(flag),
             _ => None,
         }),
-        Some(true)
+        Some(true),
+        "how the parser read the text is a parse fact, and stays a custom field"
     );
     assert_eq!(
-        field(fields, "xml.namespace"),
-        None,
+        paragraph.source_namespace, None,
         "the root's own namespace is on the body meta, not repeated per item"
     );
 
@@ -1904,9 +1956,9 @@ fn a_foreign_namespace_and_a_cdata_section_reach_the_item_meta() {
         .find(|item| item.label == doc::DocItemLabel::Formula as i32)
         .expect("the formula");
     let fields = &formula.meta.as_ref().expect("meta").custom_fields;
-    assert_eq!(field(fields, "xml.element_name"), Some("mml:formula"));
+    assert_eq!(formula.source_element_name.as_deref(), Some("mml:formula"));
     assert_eq!(
-        field(fields, "xml.namespace"),
+        formula.source_namespace.as_deref(),
         Some("http://www.w3.org/1998/Math/MathML"),
         "an item from another namespace says which one, because it differs"
     );

@@ -236,17 +236,25 @@ the coordinator's merge, so treat those as a hint; the per-item
 `meta.custom_fields` carries `xml.path`, plus `xml.role`, `xml.element_id`
 and `xml.ordinal` when the event has them.
 
-Three more source facts join them there, under the same `xml.` namespace
-this collector has always used for locators the Document plane has no typed
-slot for. `xml.element_name` is the element's qualified name as written: the
-plane models what an item *is*, not what tag it was written as, and a
-consumer matching on the source vocabulary should not have to re-split a
-positional path to get the name back. `xml.namespace` is the item's own
-namespace, recorded **only when it differs from the root's**, which the body
-meta already states. A `mml:math` inside a JATS article is the case worth
-stating, and repeating one URI on every item of a single-namespace document
-would be noise. `xml.from_cdata` is written only when true, so its absence
-means ordinary character data rather than a false entry on every item.
+The element the item was read from has its own slots and is **not** among
+those custom fields. `TextItemBase.source_element_name` is its qualified
+name as written, and `source_namespace` its resolved namespace URI,
+recorded **only when it differs from the root's**, which the body meta
+already states. A `mml:math` inside a JATS article is the case worth
+stating; repeating one URI on every item of a single-namespace document
+would be noise. No item writes the identity in both places.
+
+Two messages are the exception, and deliberately so: `CodeItem` and
+`PictureItem` inline their own base-field set rather than wrapping a
+`TextItemBase`, and the schema did not extend either with those slots. For
+those two the identity stays in `xml.element_name` / `xml.namespace`
+alongside the other locators, because the fold has nowhere typed to put it
+and dropping it would be worse than the asymmetry.
+
+`xml.from_cdata` stays a custom field on every item kind. It is a fact
+about how the parser read the text rather than about the document, and it
+is written only when true, so its absence means ordinary character data
+rather than a false entry on every item.
 
 **Inline runs** (`emit_inline_spans`). `TextItem.spans` folds onto
 `TextItemBase.spans`: styles onto `Formatting` (including its `monospace`,
