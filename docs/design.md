@@ -48,7 +48,8 @@ Events:
    Document directly; these dialects are declarative and usually
    smaller than office files)
 3. `HtmlIsland`: xpath/id + XHTML bytes, for the HTML collector
-4. `ParseStatus`
+4. `OutlineItem`: one entry of the source's own table of contents
+5. `ParseStatus`
 
 ## 4. Mapping to Document
 
@@ -69,7 +70,7 @@ The mapping follows the document model, not a 1:1 XML clone:
 | XBRL | fact table(s): concept, context, unit, value; taxonomy labels when provided |
 | DocLang | already-close-to-Document; mostly a typed decode |
 | DCLX | the zip's root `document.xml`, mapped exactly as DocLang; images stay compressed |
-| METS_GBS | one text item per hOCR `ocr_line`, pages in manifest order, `x_wconf` as source confidence, per-line and per-word boxes; no pixels |
+| METS_GBS | one text item per hOCR `ocr_line`, pages in manifest order, `x_wconf` as source confidence, per-line and per-word boxes, the `structMap` as the outline and the `dmdSec` as the catalogue record; no pixels |
 
 Every item: `CollectorSource.collector = "xml"`, `model` = dialect
 name, `version` = this server's version, `confidence` unset, because a
@@ -168,6 +169,38 @@ bibliography entry. Identifiers, classification codes, licence terms and
 funding awards land on `source_meta.identifiers`, `.classifications`,
 `.license` and `.funding` field for field. Nothing here goes through
 `custom_fields`: a CPC code is a scheme and a code, not a string.
+
+**The volume's own contents page.** A METS `structMap` is a labelled tree
+over the pages: the divisions a cataloguer identified and the page each
+begins on. That is the book's own table of contents, stated in the manifest
+rather than recovered from the text, so it streams as its own `OutlineItem`
+event and folds into `Document.outline`. A division the source labelled is
+an entry; one it did not label is structure holding the labelled ones, and
+inventing a title for it would put a name in the contents page the book
+never had. Entries carry no `target`: an entry names a *page*, and a page is
+not an item in any arena, so a `FineRef` would point at nothing. The
+manifest is read whole before the first page is, so the outline goes out
+before the first line rather than after the last.
+
+**The catalogue record.** A METS `dmdSec` holds a Dublin Core or MODS
+record. Its leaf statements are read into the shapes that already exist for
+them: a date the source wrote as a calendar date becomes a `MetaDate` (prose
+about a date stays prose rather than being coerced into numbers), an
+`identifier` becomes a `MetaIdentifier` with the scheme its `@type` names,
+a `rights` statement becomes a `MetaLicense`, and everything else becomes a
+`MetaDescriptive` naming the field. Only the innermost element that states a
+field counts, so a MODS `titleInfo/title` and `subject/topic` are one
+statement each rather than two. The record is gated by
+`emit_source_metadata` like every other metadata decode, and a record left
+undecoded is named on the trailer so the omission is visible.
+
+On the Document plane a statement lands in the typed slot `DocumentMeta` has
+for it — `title`, `authors` (a `creator` or a `contributor`), `keywords` (a
+catalogue `subject` is a topical term, and there may be several, which the
+single-string `subject` field could not hold), `language` — and in `extra`
+only when the schema has no field at all, which today means `publisher` and
+`description`. `extra` is documented as being for genuinely open vocabulary,
+so nothing with a slot goes in it.
 
 **Source metadata.** `Document.source_meta` carries what the document
 declares about itself in typed slots: `title` from the `TITLE` item,

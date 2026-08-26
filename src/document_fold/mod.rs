@@ -219,6 +219,7 @@ impl DocumentFold {
             Some(Event::MetaItem(item)) => self.on_meta_item(item),
             Some(Event::Page(page)) => self.on_page(page),
             Some(Event::XbrlNote(note)) => self.on_xbrl_note(note),
+            Some(Event::OutlineItem(entry)) => self.on_outline_item(entry),
             Some(Event::HtmlIsland(_)) => self.islands_skipped += 1,
             // The trailer is counts and warnings, both of which describe the
             // typed stream rather than the document; the fold sees it only so
@@ -355,6 +356,9 @@ impl DocumentFold {
                     copyright_holder: license.copyright_holder.clone(),
                 });
             }
+            Some(pb::meta_item::Value::Descriptive(statement)) => {
+                self.on_descriptive(statement);
+            }
             Some(pb::meta_item::Value::Funding(funding)) => {
                 self.source_meta.funding.push(doc::FundingAward {
                     funder: funding.funder.clone(),
@@ -364,6 +368,64 @@ impl DocumentFold {
             }
             None => {}
         }
+    }
+
+    /// Fold one descriptive statement into the slot `DocumentMeta` has for
+    /// it, and into `extra` only when it has none.
+    ///
+    /// `extra` is documented as being for source metadata that is genuinely
+    /// open vocabulary, so it holds what this schema has no field for
+    /// (`publisher`, `description`) and nothing that does. A first
+    /// declaration wins for the single-valued slots: a catalogue record
+    /// states a title once, and a second `dmdSec` restating it is the same
+    /// title, not a correction.
+    fn on_descriptive(&mut self, statement: &pb::MetaDescriptive) {
+        if statement.value.is_empty() {
+            return;
+        }
+        let value = statement.value.clone();
+        match statement.field.as_str() {
+            "title" => {
+                if self.source_meta.title.is_none() {
+                    self.source_meta.title = Some(value);
+                }
+            }
+            "creator" | "contributor" => self.source_meta.authors.push(value),
+            // A catalogue subject is a topical term, which is what the
+            // repeated `keywords` slot holds. `subject` is a single string
+            // and a record may state several, so folding them there would
+            // keep one and lose the rest.
+            "subject" => self.source_meta.keywords.push(value),
+            "language" => {
+                if self.source_meta.language.is_none() {
+                    self.source_meta.language = Some(value);
+                }
+            }
+            other => {
+                self.source_meta
+                    .extra
+                    .entry(other.to_owned())
+                    .or_insert(value);
+            }
+        }
+    }
+
+    /// One entry of the source's own table of contents.
+    ///
+    /// `Document.outline` is exactly this and had no writer here. No
+    /// `target`: an outline entry names a page of the volume, and a page is
+    /// not an item in any arena, so a `FineRef` would point at nothing. The
+    /// page number is the location, and it is the one the source stated.
+    fn on_outline_item(&mut self, entry: &pb::OutlineItem) {
+        if entry.title.is_empty() {
+            return;
+        }
+        self.document.outline.push(doc::OutlineEntry {
+            title: entry.title.clone(),
+            level: int(entry.level.max(1)),
+            page_no: entry.page_no.map(int),
+            target: None,
+        });
     }
 
     /// A publication date becomes the document's creation declaration, a

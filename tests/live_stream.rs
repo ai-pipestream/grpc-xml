@@ -38,6 +38,7 @@ fn kind(event: &pb::ParseXmlResponse) -> &'static str {
         Some(pb::parse_xml_response::Event::MetaItem(_)) => "meta_item",
         Some(pb::parse_xml_response::Event::Page(_)) => "page",
         Some(pb::parse_xml_response::Event::XbrlNote(_)) => "xbrl_note",
+        Some(pb::parse_xml_response::Event::OutlineItem(_)) => "outline_item",
         Some(pb::parse_xml_response::Event::Document(_)) => "document",
         Some(pb::parse_xml_response::Event::Status(_)) => "status",
         None => "empty",

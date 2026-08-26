@@ -98,6 +98,71 @@ const GBS_METS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 </mets:mets>
 "#;
 
+/// A METS manifest that also carries what a real export carries and the
+/// two-page fixture leaves out: a catalogue record in a `dmdSec`, and a
+/// `structMap` whose divisions are labelled.
+///
+/// The labels are multi-byte, so an entry sliced by bytes rather than read
+/// whole comes back mangled.
+const GBS_METS_CATALOGUED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<mets:mets xmlns:mets="http://www.loc.gov/METS/"
+           xmlns:xlink="http://www.w3.org/1999/xlink"
+           xmlns:dc="http://purl.org/dc/elements/1.1/"
+           xmlns:mods="http://www.loc.gov/mods/v3" PROFILE="gbs">
+  <mets:dmdSec ID="DMD1">
+    <mets:mdWrap MDTYPE="MODS">
+      <mets:xmlData>
+        <mods:mods>
+          <mods:titleInfo><mods:title>Über die Größe der Bücher</mods:title></mods:titleInfo>
+          <mods:name><mods:namePart>Käthe Müller</mods:namePart></mods:name>
+          <mods:name><mods:namePart>Ada Lovelace</mods:namePart></mods:name>
+          <mods:subject><mods:topic>Bibliographie</mods:topic></mods:subject>
+          <mods:language><mods:languageTerm>ger</mods:languageTerm></mods:language>
+          <dc:publisher>Verlag für Bücherkunde</dc:publisher>
+          <dc:date>1876-05-04</dc:date>
+          <dc:identifier type="oclc">123456789</dc:identifier>
+          <dc:rights>Public domain in the United States.</dc:rights>
+        </mods:mods>
+      </mets:xmlData>
+    </mets:mdWrap>
+  </mets:dmdSec>
+  <mets:fileSec>
+    <mets:fileGrp USE="coordOCR">
+      <mets:file ID="OCR1" MIMETYPE="text/html"><mets:FLocat xlink:href="00000001.html"/></mets:file>
+      <mets:file ID="OCR2" MIMETYPE="text/html"><mets:FLocat xlink:href="00000002.html"/></mets:file>
+    </mets:fileGrp>
+  </mets:fileSec>
+  <mets:structMap>
+    <mets:div TYPE="volume" LABEL="Über die Größe der Bücher">
+      <mets:div TYPE="chapter" ORDER="1" ID="ch1" LABEL="Erstes Kapitel">
+        <mets:div TYPE="page" ORDER="1"><mets:fptr FILEID="OCR1"/></mets:div>
+      </mets:div>
+      <mets:div TYPE="chapter" ORDER="2" LABEL="Zweites Kapitel">
+        <mets:div TYPE="page" ORDER="2"><mets:fptr FILEID="OCR2"/></mets:div>
+      </mets:div>
+    </mets:div>
+  </mets:structMap>
+</mets:mets>
+"#;
+
+/// A catalogued export: the manifest above plus its two hOCR pages.
+fn gbs_catalogued_export() -> Vec<u8> {
+    targz_of(&[
+        (
+            "UOM_39015012345678.mets.xml",
+            GBS_METS_CATALOGUED.as_bytes(),
+        ),
+        (
+            "00000001.html",
+            hocr_page(&[("Erstes", "Blatt")]).as_bytes(),
+        ),
+        (
+            "00000002.html",
+            hocr_page(&[("Zweites", "Blatt")]).as_bytes(),
+        ),
+    ])
+}
+
 /// One hOCR page with two lines of two words each, in the shape Google Books
 /// coordOCR files carry: `ocr_line` spans holding `ocrx_word` spans, with
 /// `bbox` and `x_wconf` clauses in `title`.
@@ -833,4 +898,223 @@ async fn the_document_locates_a_line_and_each_word_inside_it() {
     let first_word = base.prov[1].bbox.as_ref().unwrap();
     let second_word = base.prov[2].bbox.as_ref().unwrap();
     assert!(second_word.l > first_word.r, "the boxes are the source's");
+}
+
+#[tokio::test]
+async fn the_struct_map_streams_as_the_volumes_own_table_of_contents() {
+    let client = client().await;
+    let events = parse_bytes_ok(&client, &gbs_catalogued_export(), options()).await;
+    let outline: Vec<&pb::OutlineItem> = events
+        .iter()
+        .filter_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::OutlineItem(entry)) => Some(entry),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        outline
+            .iter()
+            .map(|e| (e.level, e.title.clone(), e.page_no, e.kind.clone()))
+            .collect::<Vec<_>>(),
+        [
+            (
+                1,
+                "Über die Größe der Bücher".to_owned(),
+                None,
+                "volume".to_owned()
+            ),
+            (
+                2,
+                "Erstes Kapitel".to_owned(),
+                Some(1),
+                "chapter".to_owned()
+            ),
+            (
+                2,
+                "Zweites Kapitel".to_owned(),
+                Some(2),
+                "chapter".to_owned()
+            ),
+        ],
+        "an unlabelled page div is structure, not an entry"
+    );
+    assert_eq!(outline[1].element_id.as_deref(), Some("ch1"));
+    assert_eq!(
+        outline[0]
+            .source
+            .as_ref()
+            .expect("attributed")
+            .model
+            .as_deref(),
+        Some("mets-gbs")
+    );
+    assert_eq!(status(&events).counts.unwrap().outline_items, 3);
+
+    // The contents page is known from the manifest, so it goes out before
+    // the first line of the first page rather than after the last.
+    let last_outline = events
+        .iter()
+        .rposition(|e| matches!(e.event, Some(pb::parse_xml_response::Event::OutlineItem(_))))
+        .expect("an outline entry");
+    let first_line = events
+        .iter()
+        .position(|e| matches!(e.event, Some(pb::parse_xml_response::Event::TextItem(_))))
+        .expect("a line");
+    assert!(last_outline < first_line);
+}
+
+#[tokio::test]
+async fn a_dmd_sec_decodes_into_the_typed_shapes_that_already_exist_for_it() {
+    let client = client().await;
+    let events = parse_bytes_ok(
+        &client,
+        &gbs_catalogued_export(),
+        pb::ParseOptions {
+            emit_source_metadata: true,
+            ..options()
+        },
+    )
+    .await;
+    let items = common::meta_items(&events);
+    let descriptive: Vec<(String, String)> = items
+        .iter()
+        .filter_map(|item| match item.value.as_ref() {
+            Some(pb::meta_item::Value::Descriptive(d)) => Some((d.field.clone(), d.value.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        descriptive,
+        [
+            ("title".to_owned(), "Über die Größe der Bücher".to_owned()),
+            ("creator".to_owned(), "Käthe Müller".to_owned()),
+            ("creator".to_owned(), "Ada Lovelace".to_owned()),
+            ("subject".to_owned(), "Bibliographie".to_owned()),
+            ("language".to_owned(), "ger".to_owned()),
+            ("publisher".to_owned(), "Verlag für Bücherkunde".to_owned()),
+        ],
+        "a MODS wrapper is not a second statement of what it wraps"
+    );
+
+    // A date the source wrote as a calendar date is a date, not a string,
+    // and an identifier and a rights statement each have a shape already.
+    let date = items
+        .iter()
+        .find_map(|item| match item.value.as_ref() {
+            Some(pb::meta_item::Value::Date(d)) => Some(d),
+            _ => None,
+        })
+        .expect("the publication date");
+    assert_eq!(
+        (date.year, date.month, date.day),
+        (Some(1876), Some(5), Some(4))
+    );
+    assert_eq!(date.iso_date.as_deref(), Some("1876-05-04"));
+    let identifier = items
+        .iter()
+        .find_map(|item| match item.value.as_ref() {
+            Some(pb::meta_item::Value::Identifier(i)) => Some(i),
+            _ => None,
+        })
+        .expect("the catalogue identifier");
+    assert_eq!(identifier.kind, "oclc");
+    assert_eq!(identifier.value, "123456789");
+    let license = items
+        .iter()
+        .find_map(|item| match item.value.as_ref() {
+            Some(pb::meta_item::Value::License(l)) => Some(l),
+            _ => None,
+        })
+        .expect("the rights statement");
+    assert_eq!(
+        license.statement.as_deref(),
+        Some("Public domain in the United States.")
+    );
+}
+
+#[tokio::test]
+async fn a_catalogue_record_left_undecoded_is_named_on_the_trailer() {
+    let client = client().await;
+    let events = parse_bytes_ok(&client, &gbs_catalogued_export(), options()).await;
+    assert!(
+        common::meta_items(&events).is_empty(),
+        "the switch is off, so no record is decoded"
+    );
+    assert!(
+        status(&events)
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("descriptive metadata record")),
+        "and the omission is visible rather than silent"
+    );
+}
+
+#[tokio::test]
+async fn the_gbs_document_carries_the_outline_and_the_catalogue_record() {
+    let client = client().await;
+    let events = parse_bytes_ok(
+        &client,
+        &gbs_catalogued_export(),
+        pb::ParseOptions {
+            emit_document: true,
+            emit_source_metadata: true,
+            ..options()
+        },
+    )
+    .await;
+    let document = events
+        .iter()
+        .find_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::Document(d)) => Some(d),
+            _ => None,
+        })
+        .expect("emit_document produces a document event");
+
+    assert_eq!(
+        document
+            .outline
+            .iter()
+            .map(|e| (e.level, e.title.clone(), e.page_no))
+            .collect::<Vec<_>>(),
+        [
+            (1, "Über die Größe der Bücher".to_owned(), None),
+            (2, "Erstes Kapitel".to_owned(), Some(1)),
+            (2, "Zweites Kapitel".to_owned(), Some(2)),
+        ]
+    );
+    assert!(
+        document.outline.iter().all(|e| e.target.is_none()),
+        "an outline entry names a page, and a page is not an item to point at"
+    );
+
+    let meta = document.source_meta.as_ref().expect("the catalogue record");
+    assert_eq!(meta.title.as_deref(), Some("Über die Größe der Bücher"));
+    assert_eq!(meta.authors, ["Käthe Müller", "Ada Lovelace"]);
+    assert_eq!(meta.keywords, ["Bibliographie"]);
+    assert_eq!(meta.language.as_deref(), Some("ger"));
+    assert_eq!(meta.created_raw.as_deref(), Some("1876-05-04"));
+    assert_eq!(
+        meta.created_civil
+            .as_ref()
+            .map(|c| (c.year, c.month, c.day)),
+        Some((1876, 5, 4))
+    );
+    assert_eq!(
+        meta.identifiers
+            .iter()
+            .map(|i| (i.kind.clone(), i.value.clone()))
+            .collect::<Vec<_>>(),
+        [("oclc".to_owned(), "123456789".to_owned())]
+    );
+    assert_eq!(
+        meta.license.as_ref().and_then(|l| l.statement.as_deref()),
+        Some("Public domain in the United States.")
+    );
+    // Only what the schema has no field for lands in the open map.
+    assert_eq!(
+        meta.extra.get("publisher").map(String::as_str),
+        Some("Verlag für Bücherkunde")
+    );
+    assert!(!meta.extra.contains_key("title"), "{:?}", meta.extra);
+    assert!(!meta.extra.contains_key("subject"), "{:?}", meta.extra);
 }

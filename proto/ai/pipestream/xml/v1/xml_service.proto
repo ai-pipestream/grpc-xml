@@ -165,6 +165,9 @@ message ParseXmlResponse {
     // One XBRL footnote or label declared inside the instance.
     XbrlNote xbrl_note = 12;
 
+    // One entry of the source's own table of contents.
+    OutlineItem outline_item = 13;
+
     // Parse trailer. Always the last event of a successful parse, sent once.
     ParseStatus status = 8;
 

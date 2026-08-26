@@ -511,6 +511,40 @@ message Page {
   CollectorSource source = 6;
 }
 
+// OutlineItem is one entry of the source's own table of contents.
+//
+// A METS `structMap` is a labelled tree over the pages of a volume: the
+// divisions a cataloguer identified (a chapter, a plate, an index) and the
+// page each begins on. That is the book's own contents page, stated in the
+// manifest rather than recovered from the text, so it is an event of its own
+// rather than a text item: it describes the document, it is not a part of
+// it.
+//
+// An `OutlineItem` carries no stream index, for the same reason a `Page`
+// does not: the index series counts content items.
+message OutlineItem {
+  // Nesting depth of the entry, 1 for a division that is not inside another.
+  uint32 level = 1;
+
+  // The entry's title, as the source labels the division. Never empty: a
+  // division the source did not label is not an entry.
+  string title = 2;
+
+  // The page the division begins on, matching a `Page.page_no`, when the
+  // source sequences it.
+  optional uint32 page_no = 3;
+
+  // The source's own word for what the division is (`chapter`, `index`,
+  // `plate`), an open vocabulary. Empty when the source does not say.
+  string kind = 4;
+
+  // Value of the division's `ID` attribute, when it has one.
+  optional string element_id = 5;
+
+  // Provenance, always set.
+  CollectorSource source = 6;
+}
+
 // TextItem is one streamed unit of text, in document order.
 //
 // This is the workhorse event: titles, headings, paragraphs, list items,
@@ -1005,6 +1039,24 @@ message MetaCitation {
   string text = 3;
 }
 
+// MetaDescriptive is one descriptive statement a source makes about the
+// work, named by the element it wrote it in.
+//
+// A METS `dmdSec` holds a Dublin Core or MODS record, and the two agree on
+// the names that matter here. The field is the source's own vocabulary
+// lightly normalized (a MODS `namePart` is a `creator`), not a scheme of
+// this service's invention: normalizing further would be guessing at what a
+// cataloguer meant.
+message MetaDescriptive {
+  // The statement's field name, lower-cased and unprefixed: `title`,
+  // `creator`, `contributor`, `subject`, `publisher`, `description`,
+  // `language`, `rights`.
+  string field = 1;
+
+  // The statement, flattened and whitespace-collapsed.
+  string value = 2;
+}
+
 // MetaItem is one piece of the document's declaration about itself,
 // recovered from a subtree the item mapping does not walk.
 //
@@ -1038,6 +1090,9 @@ message MetaItem {
 
     // One entry of a cited-reference block.
     MetaCitation citation = 7;
+
+    // One descriptive statement about the work.
+    MetaDescriptive descriptive = 9;
   }
 
   // Provenance, always set.
@@ -1159,6 +1214,9 @@ message ParseCounts {
 
   // `XbrlNote` events sent.
   uint64 xbrl_notes = 11;
+
+  // `OutlineItem` events sent.
+  uint64 outline_items = 12;
 }
 
 // ParseStatus is the trailer of a successful parse: the last event of the

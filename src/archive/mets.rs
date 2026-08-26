@@ -262,6 +262,90 @@ struct Manifest {
     language: Option<String>,
     pages: BTreeMap<u32, PageFiles>,
     elements_visited: u64,
+    /// The labelled divisions of the `structMap`, in document order: the
+    /// volume's own table of contents.
+    outline: Vec<pb::OutlineItem>,
+    /// The descriptive records of the `dmdSec`s, in document order.
+    descriptive: Vec<pb::MetaItem>,
+}
+
+/// Upper bound on structMap entries and descriptive records kept from one
+/// manifest. A real volume's contents page is tens of entries; a manifest
+/// minting a million labelled divisions is not one, and the fold holds them
+/// all in memory at once.
+const MAX_MANIFEST_RECORDS: usize = 4096;
+
+/// The descriptive field one leaf element states, or `None` when the element
+/// is not one this service reads.
+///
+/// Dublin Core and MODS are the two records a METS `dmdSec` carries, and
+/// they agree on the names that matter. The normalization is the smallest
+/// one that makes them agree (a MODS `namePart` is a `creator`); going
+/// further would be guessing at what a cataloguer meant.
+fn descriptive_field(local: &str) -> Option<&'static str> {
+    match local {
+        "title" => Some("title"),
+        "creator" | "namePart" => Some("creator"),
+        "contributor" => Some("contributor"),
+        "subject" | "topic" => Some("subject"),
+        "publisher" => Some("publisher"),
+        "description" | "abstract" => Some("description"),
+        "language" | "languageTerm" => Some("language"),
+        "rights" | "accessCondition" => Some("rights"),
+        "date" | "dateIssued" => Some("date"),
+        "identifier" => Some("identifier"),
+        _ => None,
+    }
+}
+
+/// A descriptive element being read: where it opened, what it states, the
+/// scheme it names itself with, and the text so far.
+#[derive(Debug)]
+struct OpenDescriptive {
+    depth: usize,
+    field: &'static str,
+    kind: Option<String>,
+    text: String,
+}
+
+/// A date as its calendar parts, when the value is one the source wrote out
+/// in full or in part: `1876`, `1876-05`, `1876-05-04`.
+///
+/// Anything looser is prose about a date rather than a date, and it stays a
+/// descriptive statement instead of being coerced into numbers.
+fn parse_date_parts(value: &str) -> Option<pb::MetaDate> {
+    let mut parts = value.trim().split('-');
+    let year = digits(parts.next()?, 4)?;
+    let month = match parts.next() {
+        Some(part) => Some(digits(part, 2)?),
+        None => None,
+    };
+    let day = match parts.next() {
+        Some(part) => Some(digits(part, 2)?),
+        None => None,
+    };
+    if parts.next().is_some() || month.is_some_and(|m| !(1..=12).contains(&m)) {
+        return None;
+    }
+    if day.is_some_and(|d| !(1..=31).contains(&d)) {
+        return None;
+    }
+    Some(pb::MetaDate {
+        // A dmdSec date is the publication date of the work the manifest
+        // describes, which is what the fold reads `pub` as.
+        kind: "pub".to_owned(),
+        year: Some(year),
+        month,
+        day,
+        iso_date: (month.is_some() && day.is_some()).then(|| value.trim().to_owned()),
+    })
+}
+
+/// A zero-padded decimal field of exactly `width` digits.
+fn digits(text: &str, width: usize) -> Option<u32> {
+    (text.len() == width && text.bytes().all(|b| b.is_ascii_digit()))
+        .then(|| text.parse().ok())
+        .flatten()
 }
 
 /// The element-tracking state of one manifest walk.
@@ -276,6 +360,17 @@ struct ManifestWalk {
     open_page: Option<(usize, u32)>,
     /// The `ID` of the `file` element currently open.
     open_file: Option<String>,
+    /// Depth at which the `structMap` opened, so a `div` elsewhere in the
+    /// manifest is not mistaken for a division of the volume.
+    struct_map: Option<usize>,
+    /// How many `div` elements are open inside the `structMap`, which is the
+    /// level a labelled division sits at.
+    div_depth: usize,
+    /// Depth at which a `dmdSec` opened.
+    dmd_sec: Option<usize>,
+    /// The descriptive element being read, innermost first: a MODS
+    /// `titleInfo` holds a `title`, and the inner one is the statement.
+    open_descriptive: Option<OpenDescriptive>,
 }
 
 impl ManifestWalk {
@@ -313,13 +408,38 @@ impl ManifestWalk {
                     );
                 }
             }
+            "structMap" => self.struct_map = Some(self.depth),
+            "dmdSec" => self.dmd_sec = Some(self.depth),
             "div" => {
-                if attr(start, "TYPE").as_deref() == Some("page")
+                let kind = attr(start, "TYPE");
+                if kind.as_deref() == Some("page")
                     && let Some(order) = attr(start, "ORDER").and_then(|v| v.parse::<u32>().ok())
                 {
                     manifest.pages.entry(order).or_default();
                     self.open_page = Some((self.depth, order));
                 }
+                if self.struct_map.is_none() {
+                    return;
+                }
+                self.div_depth += 1;
+                // A division the cataloguer labelled is an entry of the
+                // volume's contents; one they did not label is structure
+                // holding the labelled ones, and inventing a title for it
+                // would put a name in the contents page the book never had.
+                let Some(title) = attr(start, "LABEL").map(|label| collapse(&label)) else {
+                    return;
+                };
+                if title.is_empty() || manifest.outline.len() >= MAX_MANIFEST_RECORDS {
+                    return;
+                }
+                manifest.outline.push(pb::OutlineItem {
+                    level: u32::try_from(self.div_depth).unwrap_or(u32::MAX),
+                    title,
+                    page_no: attr(start, "ORDER").and_then(|v| v.parse::<u32>().ok()),
+                    kind: kind.unwrap_or_default(),
+                    element_id: attr(start, "ID"),
+                    source: None,
+                });
             }
             "fptr" => {
                 if let Some((_, order)) = self.open_page
@@ -335,15 +455,38 @@ impl ManifestWalk {
                     *slot = Some(info.clone());
                 }
             }
-            _ => {}
+            other => {
+                // A descriptive statement is the innermost element that
+                // names one: MODS wraps a `title` in a `titleInfo` and a
+                // `topic` in a `subject`, and the outer one is a container
+                // rather than a second statement of the same thing.
+                if self.dmd_sec.is_some()
+                    && let Some(field) = descriptive_field(other)
+                {
+                    self.open_descriptive = Some(OpenDescriptive {
+                        depth: self.depth,
+                        field,
+                        kind: attr(start, "type"),
+                        text: String::new(),
+                    });
+                }
+            }
         }
     }
 
-    fn on_end(&mut self, end: &quick_xml::events::BytesEnd<'_>) {
-        if end.local_name().as_ref() == "fileGrp" {
+    /// Accumulate character data into the descriptive statement being read.
+    fn on_text(&mut self, text: &str) {
+        if let Some(open) = self.open_descriptive.as_mut() {
+            open.text.push_str(text);
+        }
+    }
+
+    fn on_end(&mut self, end: &quick_xml::events::BytesEnd<'_>, manifest: &mut Manifest) {
+        let local = end.local_name().as_ref().to_owned();
+        if local == "fileGrp" {
             self.grp_uses.pop();
         }
-        if end.local_name().as_ref() == "file" {
+        if local == "file" {
             self.open_file = None;
         }
         if let Some((page_depth, _)) = self.open_page
@@ -351,8 +494,71 @@ impl ManifestWalk {
         {
             self.open_page = None;
         }
+        if self
+            .open_descriptive
+            .as_ref()
+            .is_some_and(|open| open.depth == self.depth)
+            && let Some(open) = self.open_descriptive.take()
+        {
+            self.finish_descriptive(open, manifest);
+        }
+        if self.struct_map.is_some_and(|depth| depth == self.depth) {
+            self.struct_map = None;
+        } else if self.struct_map.is_some() && local == "div" {
+            self.div_depth = self.div_depth.saturating_sub(1);
+        }
+        if self.dmd_sec.is_some_and(|depth| depth == self.depth) {
+            self.dmd_sec = None;
+        }
         self.depth = self.depth.saturating_sub(1);
     }
+
+    /// Route one finished descriptive statement into the typed shape that
+    /// already exists for it, and only into `MetaDescriptive` when none
+    /// does.
+    fn finish_descriptive(&self, open: OpenDescriptive, manifest: &mut Manifest) {
+        let value = collapse(&open.text);
+        if value.is_empty() || manifest.descriptive.len() >= MAX_MANIFEST_RECORDS {
+            return;
+        }
+        let shape = match open.field {
+            // A date the source wrote as a calendar date is a date, and
+            // MetaDate is where a date goes; one written as prose stays a
+            // statement rather than being coerced into numbers.
+            "date" => match parse_date_parts(&value) {
+                Some(date) => pb::meta_item::Value::Date(date),
+                None => descriptive(open.field, value),
+            },
+            "identifier" => pb::meta_item::Value::Identifier(pb::MetaIdentifier {
+                kind: open.kind.unwrap_or_else(|| "identifier".to_owned()),
+                value,
+                scope: None,
+            }),
+            "rights" => pb::meta_item::Value::License(pb::MetaLicense {
+                type_uri: None,
+                statement: Some(value),
+                copyright_statement: None,
+                copyright_year: None,
+                copyright_holder: None,
+            }),
+            _ => descriptive(open.field, value),
+        };
+        manifest.descriptive.push(pb::MetaItem {
+            // One parse spans many member documents, so the path names the
+            // record rather than an element path into one file.
+            path: format!("/dmdSec/{}", open.field),
+            value: Some(shape),
+            source: None,
+        });
+    }
+}
+
+/// One statement that has no typed shape of its own.
+fn descriptive(field: &str, value: String) -> pb::meta_item::Value {
+    pb::meta_item::Value::Descriptive(pb::MetaDescriptive {
+        field: field.to_owned(),
+        value,
+    })
 }
 
 /// One OCR line lifted from an hOCR page.
@@ -475,6 +681,35 @@ impl MetsDriver<'_> {
         };
         self.send(pb::parse_xml_response::Event::Info(info))?;
 
+        // The manifest is fully read before the first page is, so the
+        // volume's own contents page and its catalogue record are known
+        // before any line of it: they go out first, where a reader can title
+        // the view with them.
+        for entry in manifest.outline.clone() {
+            self.counts.outline_items += 1;
+            self.send(pb::parse_xml_response::Event::OutlineItem(
+                pb::OutlineItem {
+                    source: Some(self.source.clone()),
+                    ..entry
+                },
+            ))?;
+        }
+        if self.config.emit_source_metadata {
+            for record in manifest.descriptive.clone() {
+                self.counts.meta_items += 1;
+                self.send(pb::parse_xml_response::Event::MetaItem(pb::MetaItem {
+                    source: Some(self.source.clone()),
+                    ..record
+                }))?;
+            }
+        } else if !manifest.descriptive.is_empty() {
+            self.warn(
+                pb::WarningCode::UnmappedElement,
+                "the manifest carries a descriptive metadata record that was not decoded; set \
+                 emit_source_metadata to receive it",
+            );
+        }
+
         for (order, files) in &manifest.pages {
             self.counts.pages += 1;
             let Some(coord) = files.coord_ocr.as_ref() else {
@@ -527,7 +762,9 @@ impl MetsDriver<'_> {
                 .map_err(|e| ParseError::Malformed(format!("METS manifest {name}: {e}")))?;
             match event {
                 Event::Start(start) => walk.on_start(&start, &mut manifest),
-                Event::End(end) => walk.on_end(&end),
+                Event::End(end) => walk.on_end(&end, &mut manifest),
+                Event::Text(text) => walk.on_text(&text.xml10_content()),
+                Event::CData(cdata) => walk.on_text(cdata.as_ref()),
                 Event::Decl(decl) => {
                     manifest.xml_version = decl.version().ok().map(Cow::into_owned);
                     manifest.encoding = decl.encoding().and_then(Result::ok).map(Cow::into_owned);
