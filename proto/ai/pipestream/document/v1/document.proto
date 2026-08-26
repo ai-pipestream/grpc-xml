@@ -125,6 +125,15 @@ message Document {
 
   // Message envelope for mail sources.
   optional EmailMeta email = 24;
+
+  // Named page styles the source declares; pages point at them by name.
+  repeated PageStyle page_styles = 25;
+
+  // Named and database ranges a spreadsheet declares.
+  repeated NamedRange named_ranges = 26;
+
+  // Pivot table definitions a spreadsheet declares.
+  repeated PivotSpec pivots = 27;
 }
 
 // DocumentOrigin contains metadata about the source document file.
@@ -144,6 +153,9 @@ message DocumentOrigin {
   // Web retrieval provenance for crawled sources (extension beyond the
   // upstream dialect).
   optional WebMeta web = 5;
+
+  // The source's own file identifier (a PDF /ID), hex-encoded.
+  optional string source_id = 6;
 }
 
 // ContentLayer defines the semantic layer where content appears in the document.
@@ -183,6 +195,9 @@ message GroupItem {
   GroupLabel label = 7;
   // Raw label fallback for forward-compatibility with newer label vocabularies.
   optional string label_raw = 8;
+  // Sheet attributes when this group is a spreadsheet sheet (extension
+  // beyond the upstream dialect).
+  optional SheetMeta sheet = 9;
 }
 
 // RefItem is a JSON Pointer reference to another item in the document.
@@ -662,6 +677,7 @@ message Formatting {
   bool insertion = 12;
   bool abbreviation = 13;
   bool quote = 14;
+  bool overline = 15;
 }
 
 // BaseTextItem is a union type representing any text-based item in the document.
@@ -708,6 +724,20 @@ message TextItemBase {
   // The source's own named style for the item (a word processor's
   // paragraph style), verbatim; extension beyond the upstream dialect.
   optional string style_name = 17;
+
+  // Comment identity when this item IS a comment (extension beyond the
+  // upstream dialect).
+  optional CommentMeta comment_meta = 18;
+
+  // Identity of the drawing shape this item came from, for presentation
+  // and drawing sources.
+  optional ShapeMeta shape = 19;
+
+  // Note attribution when this item is a footnote or endnote.
+  optional FootnoteMeta footnote_meta = 20;
+
+  // Index attribution when this item heads a generated index.
+  optional IndexMeta index_meta = 21;
 }
 
 // TitleItem represents a document title or major heading.
@@ -1011,6 +1041,25 @@ message PictureItem {
   repeated PictureAnnotation annotations = 14;
   // Raw label fallback for forward-compatibility with newer label vocabularies.
   optional string label_raw = 15;
+  // Identity of the drawing shape this picture came from (extension beyond
+  // the upstream dialect).
+  optional ShapeMeta shape = 16;
+  // A link target covering this picture's region (extension beyond the
+  // upstream dialect).
+  optional string hyperlink = 17;
+  // An internal destination covering this picture's region: a figure that
+  // jumps into the document rather than out of it.
+  optional FineRef target = 18;
+  // Chart provenance when this picture renders a chart (extension beyond
+  // the upstream dialect).
+  optional ChartMeta chart = 19;
+}
+
+// ChartMeta records where a rendered chart's data came from.
+message ChartMeta {
+  repeated GridSpan sources = 1;
+  bool has_row_headers = 2;
+  bool has_column_headers = 3;
 }
 
 // PictureMeta contains rich metadata for pictures, including AI analysis.
@@ -1028,6 +1077,9 @@ message PictureMeta {
   // Alternate readings a generative engine offered; extension beyond the
   // upstream dialect.
   optional AlternativesMetaField alternatives = 11;
+  // The source's accessibility title, kept beside the description so one
+  // slot never has to hold two source strings.
+  optional string accessibility_title = 12;
   map<string, google.protobuf.Value> custom_fields = 100;
 }
 
@@ -1274,6 +1326,18 @@ message FieldItem {
   repeated ProvenanceItem prov = 7;
   repeated SourceType source = 8;
   repeated FineRef comments = 9;
+
+  // The field's programmatic name in the source form (extension beyond the
+  // upstream dialect).
+  optional string field_name = 10;
+  // A choice field's entries and which one is selected; selected_index is
+  // presence-tracked because zero is a real selection.
+  repeated string options = 11;
+  optional int32 selected_index = 12;
+  // The field's span in the document's annotation space.
+  optional FineRef span = 13;
+  // Fieldmark parameters, a genuinely open per-field vocabulary.
+  map<string, string> parameters = 14;
 }
 
 // PageItem represents metadata about a single page in the document.
@@ -1287,6 +1351,16 @@ message PageItem {
   optional string unit = 4;
   // Extraction diagnostics for the page, when the producer measures them.
   optional PageQuality quality = 5;
+  // The named page style this page uses, resolving into
+  // Document.page_styles.
+  optional string style_name = 6;
+  // The page's own label when the source numbers pages in its own scheme
+  // (iv, A-1) rather than by ordinal.
+  optional string page_label = 7;
+  // The full media box when it differs from the cropped `size`.
+  optional Size media_size = 8;
+  // The source's unit multiplier over its default unit (a PDF /UserUnit).
+  optional double user_unit = 9;
 }
 
 // PageQuality carries a page's extraction diagnostics as the measurements
@@ -1371,6 +1445,10 @@ message InlineSpan {
   // The span's raw payload where the rendered text is a projection (an
   // abbreviation's expansion, inline math in its source syntax).
   optional string raw = 13;
+  // The source's named character style for the run.
+  optional string style_name = 14;
+  // Highlight color as #rrggbb, when the source states one.
+  optional string highlight_color = 15;
 }
 
 // ReferenceKind names what an inline reference points at.
@@ -1417,6 +1495,34 @@ message DocumentMeta {
   // publication year and month); the Timestamp fields stay unset then.
   optional CivilDateTime created_civil = 17;
   optional CivilDateTime modified_civil = 18;
+  optional string subject = 19;
+  // Who last modified the document, as the source records it.
+  optional string modified_by = 20;
+  // The last print, when the source tracks it.
+  optional google.protobuf.Timestamp printed = 21;
+  optional string printed_raw = 22;
+  optional string printer = 23;
+  // The template the document was created from.
+  optional string template = 24;
+  optional int32 editing_cycles = 25;
+  optional int64 editing_duration_seconds = 26;
+  optional DocumentStatistics statistics = 27;
+  // Typed user-defined properties, each in the shape the source stored.
+  repeated UserProperty user_properties = 28;
+  // The source format's own version (a PDF version, an office format
+  // generation).
+  optional string format_version = 29;
+  // Whether the source declares authored structure (a tagged PDF).
+  optional bool structured = 30;
+  // The authoring application, when the source distinguishes it from the
+  // producing one in `generator`.
+  optional string authoring_tool = 31;
+  optional Protection protection = 32;
+  // The source's raw embedded metadata packet (XMP), verbatim bytes.
+  optional bytes raw_metadata = 33;
+  // The source's trapping declaration, three-valued as the format defines
+  // it.
+  optional Trapped trapped = 34;
   // Source metadata that is genuinely open vocabulary. Data whose shape the
   // fleet knows gets a typed field, never an entry here.
   map<string, string> extra = 100;
@@ -1556,6 +1662,10 @@ message SubDocumentRef {
   uint64 size_bytes = 4;
   // The item that mentions or anchors the payload, when one does.
   optional string item_ref = 5;
+  // Embedded-object identity: the container's class id and its own word
+  // for what the object is.
+  optional string class_id = 6;
+  optional string kind = 7;
 }
 
 // WebMeta carries retrieval provenance for crawled sources.
@@ -1696,6 +1806,152 @@ message Hypothesis {
 message AlternativesMetaField {
   repeated Hypothesis hypotheses = 1;
   optional string created_by = 2;
+}
+
+// CommentMeta is the identity and thread position of a comment item.
+message CommentMeta {
+  optional string author = 1;
+  optional string initials = 2;
+  optional google.protobuf.Timestamp timestamp = 3;
+  optional string timestamp_raw = 4;
+  bool resolved = 5;
+  // The comment this one replies to.
+  optional FineRef parent = 6;
+  // The text the comment anchors to, verbatim.
+  optional string anchored_text = 7;
+  // A note the source displays permanently rather than on hover.
+  bool shown = 8;
+}
+
+// ShapeMeta is the identity of the drawing shape an item came from.
+message ShapeMeta {
+  // The source's shape service or type name.
+  optional string shape_type = 1;
+  optional string name = 2;
+  // Text-frame chaining, by frame name.
+  optional string chain_next = 3;
+  optional string chain_prev = 4;
+  optional int32 z_order = 5;
+  optional double rotation_degrees = 6;
+}
+
+// FootnoteMeta attributes a footnote or endnote item.
+message FootnoteMeta {
+  // The note's label as rendered (a number, a symbol).
+  optional string label = 1;
+  bool endnote = 2;
+  // The span in the body where the note's mark sits.
+  optional FineRef mark = 3;
+}
+
+// IndexMeta attributes a generated index item.
+message IndexMeta {
+  // The source's index service or kind name.
+  optional string service = 1;
+  optional string title = 2;
+}
+
+// Trapped is a source's own three-valued trapping declaration.
+enum Trapped {
+  TRAPPED_UNSPECIFIED = 0;
+  TRAPPED_TRUE = 1;
+  TRAPPED_FALSE = 2;
+  TRAPPED_UNKNOWN = 3;
+}
+
+// Protection is the source's own protection posture, as facts rather than
+// a boolean.
+message Protection {
+  bool encrypted = 1;
+  optional string handler = 2;
+  optional int32 key_bits = 3;
+  // The parse opened it without a password (an empty owner password).
+  bool opened_without_password = 4;
+  bool allows_extraction = 5;
+  bool allows_printing = 6;
+}
+
+// DocumentStatistics carries the source's own document statistics.
+message DocumentStatistics {
+  optional int64 pages = 1;
+  optional int64 words = 2;
+  optional int64 characters = 3;
+  optional int64 paragraphs = 4;
+  optional int64 tables = 5;
+  optional int64 images = 6;
+  optional int64 objects = 7;
+  optional int64 cells = 8;
+  optional int64 sheets = 9;
+}
+
+// UserProperty is one user-defined document property in the shape the
+// source stored it.
+message UserProperty {
+  string name = 1;
+  oneof value {
+    string text = 2;
+    double number = 3;
+    bool boolean = 4;
+    google.protobuf.Timestamp instant = 5;
+    CivilDateTime date = 6;
+  }
+}
+
+// Margins are the four page margins in the page unit.
+message Margins {
+  double left = 1;
+  double top = 2;
+  double right = 3;
+  double bottom = 4;
+}
+
+// PageStyle is one named page style the source declares.
+message PageStyle {
+  string name = 1;
+  Size size = 2;
+  optional Margins margins = 3;
+  optional int32 columns = 4;
+  // The style's variant: shared, first, left, right.
+  optional string variant = 5;
+}
+
+// GridSpan is a rectangular sheet range.
+message GridSpan {
+  GridCell start = 1;
+  GridCell end = 2;
+}
+
+// NamedRange is one named or database range a spreadsheet declares.
+message NamedRange {
+  string name = 1;
+  GridSpan range = 2;
+  bool has_headers = 3;
+  bool has_totals = 4;
+  // named or database.
+  optional string kind = 5;
+  // The defining expression when the range is a formula rather than a
+  // rectangle; `range` stays unset then.
+  optional string expression = 6;
+}
+
+// PivotSpec is one pivot table definition.
+message PivotSpec {
+  string name = 1;
+  optional GridSpan source = 2;
+  optional GridSpan output = 3;
+  repeated string row_fields = 4;
+  repeated string column_fields = 5;
+  repeated string data_fields = 6;
+  repeated string page_fields = 7;
+}
+
+// SheetMeta carries a spreadsheet sheet's own attributes.
+message SheetMeta {
+  optional int32 index = 1;
+  bool visible = 2;
+  // Tab color as #rrggbb.
+  optional string tab_color = 3;
+  repeated GridSpan print_areas = 4;
 }
 
 // RecordLayoutMeta describes the fixed-record layout a table was decoded

@@ -545,8 +545,10 @@ impl DocumentFold {
                 page_no: int(page.page_no),
                 unit: (!page.unit.is_empty()).then(|| page.unit.clone()),
                 // Extraction diagnostics belong to a producer that measured
-                // them; this one reads what the OCR already decided.
-                quality: None,
+                // them; this one reads what the OCR already decided, and an
+                // hOCR page declares no style, label, media box, or unit
+                // multiplier.
+                ..Default::default()
             },
         );
     }
