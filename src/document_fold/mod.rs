@@ -676,15 +676,16 @@ impl DocumentFold {
             self.current_parent()
         };
         let self_ref = format!("#/texts/{}", self.document.texts.len());
-        let mut fields = text_fields(item);
+        let fields = text_fields(item);
         let (element_name, namespace) = identity_of(item, &self.root_namespace);
         let source = self.source_of(item.source.as_ref());
         let variant = if label == pb::XmlItemLabel::Code {
             // TRAP, and the reason this branch exists: CodeItem does not wrap
             // a TextItemBase. Its base fields are inlined so that its single
             // `meta` slot is a FloatingMeta; see the comment on CodeItem in
-            // document.proto.
-            identity_fields(item, &self.root_namespace, &mut fields);
+            // document.proto. The identity fields are mirrored onto it for
+            // the same reason `label_raw` is, so this branch states them
+            // itself rather than through a base it does not have.
             doc::base_text_item::Item::Code(doc::CodeItem {
                 self_ref: self_ref.clone(),
                 parent: Some(reference(&parent)),
@@ -698,6 +699,8 @@ impl DocumentFold {
                 orig: item.text.clone(),
                 text: item.text.clone(),
                 source: vec![source],
+                source_element_name: element_name,
+                source_namespace: namespace,
                 ..doc::CodeItem::default()
             })
         } else {
@@ -978,7 +981,7 @@ impl DocumentFold {
         let self_ref = format!("#/pictures/{}", self.document.pictures.len());
         let source = self.source_of(item.source.as_ref());
         let mut fields = text_fields(item);
-        identity_fields(item, &self.root_namespace, &mut fields);
+        let (element_name, namespace) = identity_of(item, &self.root_namespace);
         if !item.text.is_empty() {
             fields.insert("xml.href".to_owned(), string(&item.text));
         }
@@ -998,6 +1001,10 @@ impl DocumentFold {
             // claim a payload this collector does not have.
             image: None,
             source: vec![source],
+            // Mirrored the same way CodeItem's are: PictureItem inlines its
+            // base fields too, so the identity is stated on the item.
+            source_element_name: element_name,
+            source_namespace: namespace,
             ..doc::PictureItem::default()
         });
         self.claim_anchor(item.element_id.as_ref(), &self_ref);
@@ -1789,7 +1796,9 @@ fn doc_reference_kind(kind: i32) -> Option<i32> {
 ///
 /// The element's name and namespace are no longer among them: the schema
 /// grew `source_element_name` and `source_namespace` for exactly this, and
-/// they are set on the item itself by [`identity_of`]. `from_cdata` stays,
+/// mirrors them onto `CodeItem` and `PictureItem`, the two kinds that
+/// inline their base fields, so every item states its element in one typed
+/// place. They are set by [`identity_of`]. `from_cdata` stays,
 /// being a fact about how the parser read the text rather than about the
 /// document, and only when true: the absence of the key means ordinary
 /// character data, and a false entry on every other item would say the same
@@ -1837,21 +1846,6 @@ fn identity_of(item: &pb::TextItem, root_namespace: &str) -> (Option<String>, Op
     let namespace = (!item.namespace.is_empty() && item.namespace != root_namespace)
         .then(|| item.namespace.clone());
     (name, namespace)
-}
-
-/// The same identity as `xml.` custom fields, for the two item kinds whose
-/// messages inline their own base-field set and so never grew the typed
-/// slots: `CodeItem` and `PictureItem`. Neither wraps a `TextItemBase`, so
-/// the fold has nowhere typed to put the element on those two and keeping
-/// the locators together is better than dropping them.
-fn identity_fields(item: &pb::TextItem, root_namespace: &str, fields: &mut HashMap<String, Value>) {
-    let (name, namespace) = identity_of(item, root_namespace);
-    if let Some(name) = name {
-        fields.insert("xml.element_name".to_owned(), string(&name));
-    }
-    if let Some(namespace) = namespace {
-        fields.insert("xml.namespace".to_owned(), string(&namespace));
-    }
 }
 
 /// A `google.protobuf.Value` holding a boolean.

@@ -26,6 +26,7 @@ use grpc_xml::document::v1 as doc;
 use grpc_xml::document_fold::{DocumentFold, MIMETYPE, SCHEMA_NAME, integrity_errors};
 use grpc_xml::parse::{InputStats, ParseConfig};
 use grpc_xml::proto::v1 as pb;
+use prost_types::Value;
 use prost_types::value::Kind;
 
 // ------------------------------------------------------------------ harness
@@ -924,47 +925,74 @@ fn a_code_block_folds_into_a_code_item_that_inlines_its_base_fields() {
         "the body lists the code item like any other"
     );
     assert_eq!(
-        field(fields, "xml.element_name"),
+        code.source_element_name.as_deref(),
         Some("code"),
-        "CodeItem inlines its own base fields and never grew the typed slot, \
-         so its element identity stays with its other locators"
+        "CodeItem inlines its own base fields, so the schema mirrors the \
+         identity slots onto it and the fold states them there"
+    );
+    assert_eq!(
+        field(fields, "xml.element_name"),
+        None,
+        "and the custom-field copy is gone"
     );
 }
 
 #[test]
-fn the_two_messages_without_the_typed_slot_keep_their_identity_in_meta() {
+fn every_item_states_its_element_in_the_typed_slot_and_nowhere_else() {
     // CodeItem and PictureItem do not wrap a TextItemBase: both inline their
-    // own base-field set, which the schema did not extend with
-    // source_element_name. The fold has nowhere typed to put the element on
-    // those two, and keeping the locators together beats dropping them.
+    // own base-field set. The schema mirrors source_element_name and
+    // source_namespace onto them the way label_raw already was, so there is
+    // one typed place on every item kind and no kind left saying it in meta.
     let (_, document) = fold_default(USPTO);
     let picture = &document.pictures[0];
-    let fields = &picture.meta.as_ref().expect("picture meta").custom_fields;
     assert_eq!(
-        field(fields, "xml.element_name"),
+        picture.source_element_name.as_deref(),
         Some("img"),
-        "a picture keeps the element that named it"
+        "a picture states the element that named it, in the mirrored slot"
+    );
+    assert_eq!(
+        field(
+            &picture.meta.as_ref().expect("picture meta").custom_fields,
+            "xml.element_name",
+        ),
+        None,
+        "and not beside its other locators any more"
     );
 
-    // Every item that does wrap a TextItemBase states its element in the
-    // typed slot and nowhere else, so no item says it twice. An item an
-    // archive driver synthesized rather than read from one element states
-    // it in neither, which is what an empty element name on the wire means.
-    let mut typed = 0;
-    for item in &document.texts {
-        if matches!(item.item, Some(doc::base_text_item::Item::Code(_))) {
-            continue;
-        }
-        let base = base(item);
+    // No item of any kind says it twice, and the ones read from an element
+    // do say it once. An item an archive driver synthesized rather than read
+    // from one element states it in neither place, which is what an empty
+    // element name on the wire means.
+    let mut typed = usize::from(picture.source_element_name.is_some());
+    let in_meta = |name: &str, meta: Option<&HashMap<String, Value>>| {
         assert!(
-            !base
-                .meta
-                .as_ref()
-                .is_some_and(|meta| meta.custom_fields.contains_key("xml.element_name")),
-            "{} states its element in both places",
-            base.self_ref
+            !meta.is_some_and(|fields| fields.contains_key("xml.element_name")
+                || fields.contains_key("xml.namespace")),
+            "{name} states its element in both places"
         );
-        typed += usize::from(base.source_element_name.is_some());
+    };
+    in_meta(
+        &picture.self_ref,
+        picture.meta.as_ref().map(|meta| &meta.custom_fields),
+    );
+    for item in &document.texts {
+        match item.item.as_ref() {
+            Some(doc::base_text_item::Item::Code(code)) => {
+                in_meta(
+                    &code.self_ref,
+                    code.meta.as_ref().map(|meta| &meta.custom_fields),
+                );
+                typed += usize::from(code.source_element_name.is_some());
+            }
+            _ => {
+                let base = base(item);
+                in_meta(
+                    &base.self_ref,
+                    base.meta.as_ref().map(|meta| &meta.custom_fields),
+                );
+                typed += usize::from(base.source_element_name.is_some());
+            }
+        }
     }
     assert!(typed > 0, "the items read from elements do state one");
 }

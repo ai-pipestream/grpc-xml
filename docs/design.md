@@ -248,12 +248,11 @@ already states. A `mml:math` inside a JATS article is the case worth
 stating; repeating one URI on every item of a single-namespace document
 would be noise. No item writes the identity in both places.
 
-Two messages are the exception, and deliberately so: `CodeItem` and
-`PictureItem` inline their own base-field set rather than wrapping a
-`TextItemBase`, and the schema did not extend either with those slots. For
-those two the identity stays in `xml.element_name` / `xml.namespace`
-alongside the other locators, because the fold has nowhere typed to put it
-and dropping it would be worse than the asymmetry.
+`CodeItem` and `PictureItem` inline their own base-field set rather than
+wrapping a `TextItemBase`, so the schema mirrors both slots onto them the
+way it already mirrors `label_raw`. The fold states them there, and the
+sentence above holds for every item kind without an exception: one typed
+place, and no item writing the identity in both.
 
 `xml.from_cdata` stays a custom field on every item kind. It is a fact
 about how the parser read the text rather than about the document, and it

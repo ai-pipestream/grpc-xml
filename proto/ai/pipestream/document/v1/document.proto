@@ -816,6 +816,11 @@ message CodeItem {
   optional string code_language_raw = 19;
   // Raw label fallback for forward-compatibility with newer label vocabularies.
   optional string label_raw = 20;
+  // The source element this item came from, mirroring TextItemBase; this
+  // item kind inlines its base fields, so the mirror is stated here.
+  optional string source_element_name = 21;
+  optional string source_namespace = 22;
+
 }
 
 // FormulaItem represents a mathematical formula or equation.
@@ -1079,6 +1084,9 @@ message PictureItem {
   // Chart provenance when this picture renders a chart (extension beyond
   // the upstream dialect).
   optional ChartMeta chart = 19;
+  // The source element this picture came from, mirroring TextItemBase.
+  optional string source_element_name = 20;
+  optional string source_namespace = 21;
 }
 
 // ChartMeta records where a rendered chart's data came from.
