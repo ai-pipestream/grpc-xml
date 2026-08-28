@@ -1071,8 +1071,8 @@ async fn an_item_names_the_element_and_the_bytes_it_was_read_from() {
         title.namespace, "http://jats.nlm.nih.gov/ns/archiving/1.3/",
         "the resolved namespace, not the prefix the document happened to bind"
     );
-    let start = title.byte_start.expect("a byte range") as usize;
-    let end = title.byte_end.expect("a byte range") as usize;
+    let start = usize::try_from(title.byte_start.expect("a byte range")).expect("fits in memory");
+    let end = usize::try_from(title.byte_end.expect("a byte range")).expect("fits in memory");
     assert_eq!(
         &JATS[start..end],
         "<article-title>Streaming XML Without a DOM</article-title>",

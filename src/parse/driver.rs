@@ -13,8 +13,8 @@ use quick_xml::events::{BytesText, Event};
 use quick_xml::name::ResolveResult;
 
 use super::{
-    Capture, Frame, MAX_INLINE_SPANS, MAX_WARNING_KINDS, ParseError, PendingCaption, SpanBuild,
-    Step, attribute_value, collapse, collapse_positions, collapsed_range, convert_error,
+    Capture, Frame, ListPlacement, MAX_INLINE_SPANS, MAX_WARNING_KINDS, ParseError, PendingCaption,
+    SpanBuild, Step, attribute_value, collapse, collapse_positions, collapsed_range, convert_error,
     resolve_reference,
 };
 use crate::dialect::{self, Action, Attrs, ElementCtx};
@@ -467,10 +467,10 @@ impl<R: BufRead> Driver<'_, R> {
         });
         // Only a list item belongs to a list. A paragraph inside one is a
         // paragraph, and claiming a depth for it would say otherwise.
-        let (list_depth, enumerated) = if spec.label == pb::XmlItemLabel::ListItem {
+        let list = if spec.label == pb::XmlItemLabel::ListItem {
             self.open_list()
         } else {
-            (None, false)
+            None
         };
         self.capture = Some(Capture {
             depth: self.stack.len(),
@@ -487,8 +487,7 @@ impl<R: BufRead> Driver<'_, R> {
             from_cdata: false,
             attributes: self.reportable_attributes(attrs),
             spans: Vec::new(),
-            list_depth,
-            enumerated,
+            list,
             is_caption,
             after_child: false,
         });
@@ -655,8 +654,8 @@ impl<R: BufRead> Driver<'_, R> {
             byte_start: Some(capture.byte_start),
             byte_end: Some(byte_end),
             from_cdata: capture.from_cdata,
-            list_depth: capture.list_depth,
-            enumerated: capture.enumerated,
+            list_depth: capture.list.map(|list| list.depth),
+            enumerated: capture.list.is_some_and(|list| list.ordered),
             // Word boxes come from OCR, and a single XML document is not
             // OCR: there is nothing marking a word inside a paragraph.
             words: Vec::new(),
@@ -821,21 +820,20 @@ impl<R: BufRead> Driver<'_, R> {
     }
 
     /// The list this element sits in, as its nesting depth and whether it is
-    /// ordered. Depth starts at 1 for a list that is not inside another;
-    /// `None` means no list container is open at all, which is what a
-    /// dialect with no list vocabulary always reports.
-    fn open_list(&self) -> (Option<u32>, bool) {
+    /// ordered. `None` means no list container is open at all, which is what
+    /// a dialect with no list vocabulary always reports.
+    fn open_list(&self) -> Option<ListPlacement> {
         let depth = self.stack.iter().filter(|f| f.list.is_some()).count();
-        let enumerated = self
+        let ordered = self
             .stack
             .iter()
             .rev()
             .find_map(|f| f.list)
             .unwrap_or_default();
-        (
-            (depth > 0).then(|| u32::try_from(depth).unwrap_or(u32::MAX)),
-            enumerated,
-        )
+        (depth > 0).then(|| ListPlacement {
+            depth: u32::try_from(depth).unwrap_or(u32::MAX),
+            ordered,
+        })
     }
 
     /// Record that a child with this name was seen and return its 1-based

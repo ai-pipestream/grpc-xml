@@ -337,16 +337,22 @@ struct Capture {
     attributes: Vec<pb::Attribute>,
     /// Inline runs recognized inside this capture, in the order they opened.
     spans: Vec<SpanBuild>,
-    /// Nesting depth of the list this item belongs to, and whether that list
-    /// is ordered. Both are read off the open-element stack when the capture
-    /// opens, and both are only meaningful for a list item.
-    list_depth: Option<u32>,
-    enumerated: bool,
+    /// The list this item belongs to, read off the open-element stack when
+    /// the capture opens; only a list item ever has one.
+    list: Option<ListPlacement>,
     /// True when the capture feeds `pending_caption` instead of the stream.
     is_caption: bool,
     /// True when the previous child event was an element end, which is where
     /// a word boundary between two sibling elements belongs.
     after_child: bool,
+}
+
+/// Where a list item sits: the nesting depth of its list and whether that
+/// list is ordered. Depth starts at 1 for a list that is not inside another.
+#[derive(Debug, Clone, Copy)]
+struct ListPlacement {
+    depth: u32,
+    ordered: bool,
 }
 
 /// One inline run being measured against the capture's growing text.

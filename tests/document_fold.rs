@@ -355,14 +355,17 @@ fn a_jats_item_carries_its_locators_in_meta_and_the_bytes_it_came_from() {
     assert_eq!(prov.page_no, 0, "an XML document has no pages");
     assert!(prov.bbox.is_none(), "and no boxes");
     let range = prov.byte_range.as_ref().expect("a byte range instead");
+    let start = usize::try_from(range.start).expect("a range starts at or after zero");
+    let end = usize::try_from(range.end).expect("a range ends at or after zero");
     assert_eq!(
-        &JATS[range.start as usize..range.end as usize],
+        &JATS[start..end],
         "<p>A pull parser yields events in document order.</p>",
         "the range names the element the item was read from"
     );
+    let chars = i32::try_from(item.text.chars().count()).expect("a span end fits the schema");
     assert_eq!(
         prov.charspan.as_ref().map(|s| (s.start, s.end)),
-        Some((0, item.text.chars().count() as i32)),
+        Some((0, chars)),
         "the span covers the whole item, as the element bounds the whole item"
     );
     assert_eq!(item.orig, item.text, "orig is set alongside text");
@@ -909,8 +912,10 @@ fn a_code_block_folds_into_a_code_item_that_inlines_its_base_fields() {
         .byte_range
         .as_ref()
         .expect("a code block is located by its bytes like any other item");
+    let start = usize::try_from(range.start).expect("a range starts at or after zero");
+    let end = usize::try_from(range.end).expect("a range ends at or after zero");
     assert_eq!(
-        &source[range.start as usize..range.end as usize],
+        &source[start..end],
         "<code id=\"snippet-1\">cargo test --offline</code>"
     );
     assert_eq!(collector(&code.source).model.as_deref(), Some("doclang"));
@@ -976,22 +981,19 @@ fn every_item_states_its_element_in_the_typed_slot_and_nowhere_else() {
         picture.meta.as_ref().map(|meta| &meta.custom_fields),
     );
     for item in &document.texts {
-        match item.item.as_ref() {
-            Some(doc::base_text_item::Item::Code(code)) => {
-                in_meta(
-                    &code.self_ref,
-                    code.meta.as_ref().map(|meta| &meta.custom_fields),
-                );
-                typed += usize::from(code.source_element_name.is_some());
-            }
-            _ => {
-                let base = base(item);
-                in_meta(
-                    &base.self_ref,
-                    base.meta.as_ref().map(|meta| &meta.custom_fields),
-                );
-                typed += usize::from(base.source_element_name.is_some());
-            }
+        if let Some(doc::base_text_item::Item::Code(code)) = item.item.as_ref() {
+            in_meta(
+                &code.self_ref,
+                code.meta.as_ref().map(|meta| &meta.custom_fields),
+            );
+            typed += usize::from(code.source_element_name.is_some());
+        } else {
+            let base = base(item);
+            in_meta(
+                &base.self_ref,
+                base.meta.as_ref().map(|meta| &meta.custom_fields),
+            );
+            typed += usize::from(base.source_element_name.is_some());
         }
     }
     assert!(typed > 0, "the items read from elements do state one");
@@ -1936,12 +1938,9 @@ fn a_table_cell_carries_its_runs_and_its_declared_alignment() {
     let run = &emphasized.spans[0];
     // Code points, not bytes: the run covers the Greek word exactly.
     let range = run.range.as_ref().expect("a run states its range");
-    let covered: String = emphasized
-        .text
-        .chars()
-        .skip(range.start as usize)
-        .take((range.end - range.start) as usize)
-        .collect();
+    let start = usize::try_from(range.start).expect("a range starts at or after zero");
+    let width = usize::try_from(range.end - range.start).expect("a range does not run backwards");
+    let covered: String = emphasized.text.chars().skip(start).take(width).collect();
     assert_eq!(covered, "λόγος");
     assert!(
         run.formatting.as_ref().is_some_and(|f| f.italic),

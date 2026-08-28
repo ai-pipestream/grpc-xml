@@ -500,7 +500,7 @@ impl ManifestWalk {
             .is_some_and(|open| open.depth == self.depth)
             && let Some(open) = self.open_descriptive.take()
         {
-            self.finish_descriptive(open, manifest);
+            Self::finish_descriptive(open, manifest);
         }
         if self.struct_map.is_some_and(|depth| depth == self.depth) {
             self.struct_map = None;
@@ -516,7 +516,7 @@ impl ManifestWalk {
     /// Route one finished descriptive statement into the typed shape that
     /// already exists for it, and only into `MetaDescriptive` when none
     /// does.
-    fn finish_descriptive(&self, open: OpenDescriptive, manifest: &mut Manifest) {
+    fn finish_descriptive(open: OpenDescriptive, manifest: &mut Manifest) {
         let value = collapse(&open.text);
         if value.is_empty() || manifest.descriptive.len() >= MAX_MANIFEST_RECORDS {
             return;
@@ -878,73 +878,14 @@ impl MetsDriver<'_> {
                         buf.clear();
                         continue;
                     }
-                    if let Some(capture) = capture.as_mut() {
-                        // A word span sits directly inside the line; the
-                        // deeper ones hOCR nests inside a word are the
-                        // engine's own subdivisions, not words.
-                        if capture.span_depth == 0
-                            && capture.open_word.is_none()
-                            && has_class(&start, "ocrx_word")
-                            && capture.words.len() < parse::MAX_INLINE_SPANS
-                        {
-                            let title = attr(&start, "title").unwrap_or_default();
-                            capture.open_word = parse_bbox(&title).map(|bbox| WordBuild {
-                                start: capture.chars,
-                                end: capture.chars,
-                                bbox,
-                                confidence: stated_confidence(&title),
-                            });
-                        }
-                        capture.span_depth += 1;
-                    } else if has_class(&start, "ocr_line") {
-                        let title = attr(&start, "title").unwrap_or_default();
-                        let attributes = if self.config.include_attributes {
-                            attributes_except(&start, &["class", "title", "id"])
-                        } else {
-                            Vec::new()
-                        };
-                        capture = Some(OcrCapture {
-                            text: String::new(),
-                            chars: 0,
-                            span_depth: 0,
-                            element_id: attr(&start, "id"),
-                            confidence: extract_confidence(&title),
-                            bbox: parse_bbox(&title),
-                            attributes,
-                            words: Vec::new(),
-                            open_word: None,
-                        });
-                    }
+                    self.open_hocr_span(&start, &mut capture);
                 }
                 Event::End(end) => {
                     if end.local_name().as_ref() != "span" {
                         buf.clear();
                         continue;
                     }
-                    if let Some(open) = capture.as_mut() {
-                        if open.span_depth > 0 {
-                            open.span_depth -= 1;
-                            if open.span_depth == 0
-                                && let Some(mut word) = open.open_word.take()
-                            {
-                                word.end = open.chars;
-                                open.words.push(word);
-                            }
-                        } else if let Some(done) = capture.take() {
-                            let (text, positions) = collapse_positions(&done.text);
-                            debug_assert_eq!(text, collapse(&done.text));
-                            if let Some(bbox) = done.bbox.filter(|_| !text.is_empty()) {
-                                page.lines.push(OcrLine {
-                                    words: finish_words(&done.words, &positions),
-                                    text,
-                                    element_id: done.element_id,
-                                    confidence: done.confidence,
-                                    bbox,
-                                    attributes: done.attributes,
-                                });
-                            }
-                        }
-                    }
+                    close_hocr_span(&mut capture, &mut page);
                 }
                 Event::Text(text) => {
                     if let Some(capture) = capture.as_mut() {
@@ -967,6 +908,52 @@ impl MetsDriver<'_> {
             buf.clear();
         }
         Ok(page)
+    }
+
+    /// Take one opening `span` in an hOCR page: a word or nested span while
+    /// a line is being captured, or the start of a new line capture.
+    fn open_hocr_span(
+        &self,
+        start: &quick_xml::events::BytesStart<'_>,
+        capture: &mut Option<OcrCapture>,
+    ) {
+        if let Some(open) = capture.as_mut() {
+            // A word span sits directly inside the line; the deeper ones
+            // hOCR nests inside a word are the engine's own subdivisions,
+            // not words.
+            if open.span_depth == 0
+                && open.open_word.is_none()
+                && has_class(start, "ocrx_word")
+                && open.words.len() < parse::MAX_INLINE_SPANS
+            {
+                let title = attr(start, "title").unwrap_or_default();
+                open.open_word = parse_bbox(&title).map(|bbox| WordBuild {
+                    start: open.chars,
+                    end: open.chars,
+                    bbox,
+                    confidence: stated_confidence(&title),
+                });
+            }
+            open.span_depth += 1;
+        } else if has_class(start, "ocr_line") {
+            let title = attr(start, "title").unwrap_or_default();
+            let attributes = if self.config.include_attributes {
+                attributes_except(start, &["class", "title", "id"])
+            } else {
+                Vec::new()
+            };
+            *capture = Some(OcrCapture {
+                text: String::new(),
+                chars: 0,
+                span_depth: 0,
+                element_id: attr(start, "id"),
+                confidence: extract_confidence(&title),
+                bbox: parse_bbox(&title),
+                attributes,
+                words: Vec::new(),
+                open_word: None,
+            });
+        }
     }
 
     /// Fold one general entity reference into the open capture, resolving
@@ -1060,6 +1047,36 @@ impl MetsDriver<'_> {
 /// with a leading `./` stripped or added, then as a suffix under any single
 /// leading directory — real exports nest their members under a barcode
 /// directory the hrefs do not repeat.
+/// Take one closing `span` in an hOCR page: close the open word when its
+/// own end tag arrives, or finish the line when the capture's does.
+fn close_hocr_span(capture: &mut Option<OcrCapture>, page: &mut HocrPage) {
+    let Some(open) = capture.as_mut() else {
+        return;
+    };
+    if open.span_depth > 0 {
+        open.span_depth -= 1;
+        if open.span_depth == 0
+            && let Some(mut word) = open.open_word.take()
+        {
+            word.end = open.chars;
+            open.words.push(word);
+        }
+    } else if let Some(done) = capture.take() {
+        let (text, positions) = collapse_positions(&done.text);
+        debug_assert_eq!(text, collapse(&done.text));
+        if let Some(bbox) = done.bbox.filter(|_| !text.is_empty()) {
+            page.lines.push(OcrLine {
+                words: finish_words(&done.words, &positions),
+                text,
+                element_id: done.element_id,
+                confidence: done.confidence,
+                bbox,
+                attributes: done.attributes,
+            });
+        }
+    }
+}
+
 fn member_by_href<'a>(members: &'a BTreeMap<String, Vec<u8>>, href: &str) -> Option<&'a [u8]> {
     if let Some(bytes) = members.get(href) {
         return Some(bytes);
