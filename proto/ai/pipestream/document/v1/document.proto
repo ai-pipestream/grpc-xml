@@ -134,6 +134,12 @@ message Document {
 
   // Pivot table definitions a spreadsheet declares.
   repeated PivotSpec pivots = 27;
+  // Every collector's own document-level account, kept whole beside the
+  // resolved view above. Where two collectors answered one field, the
+  // resolved field carries the winner and names it in `field_sources`;
+  // the loser's answer is here, under its collector, not lost. Extension
+  // beyond the upstream dialect.
+  repeated CollectorClaim claims = 28;
 }
 
 // DocumentOrigin contains metadata about the source document file.
@@ -160,6 +166,9 @@ message DocumentOrigin {
   // What the mimetype claim rests on (extension, sniffed magic, declared
   // header), when the producer records it.
   optional string mimetype_evidence = 7;
+  // Which collector's answer each resolved singular field carries.
+  // Extension beyond the upstream dialect.
+  repeated FieldSource field_sources = 8;
 }
 
 // ContentLayer defines the semantic layer where content appears in the document.
@@ -275,6 +284,29 @@ message CollectorSource {
   // How many samples the score aggregates, so a three-token mean and a
   // three-thousand-token mean stay distinguishable.
   optional uint64 raw_score_samples = 7;
+}
+
+// FieldSource names the collector whose answer a resolved singular field
+// carries. `field` is the field's name on the message that holds this
+// list, dotted through nested messages ("web.canonical_uri"); it is a
+// schema identifier, never free text. Extension beyond the upstream
+// dialect.
+message FieldSource {
+  string field = 1;
+  CollectorSource source = 2;
+}
+
+// CollectorClaim is one collector's whole document-level account, kept
+// beside the resolved view so a value that lost the resolution is still
+// on the wire under the collector that gave it. Extension beyond the
+// upstream dialect.
+message CollectorClaim {
+  CollectorSource source = 1;
+  optional DocumentMeta source_meta = 2;
+  optional DocumentOrigin origin = 3;
+  repeated PageStyle page_styles = 4;
+  optional EmailMeta email = 5;
+  optional MediaMeta media = 6;
 }
 
 // SourceType is a union of possible source descriptors.
@@ -1561,6 +1593,9 @@ message DocumentMeta {
   optional Trapped trapped = 34;
   // Source metadata that is genuinely open vocabulary. Data whose shape the
   // fleet knows gets a typed field, never an entry here.
+  // Which collector's answer each resolved singular field carries.
+  // Extension beyond the upstream dialect.
+  repeated FieldSource field_sources = 35;
   map<string, string> extra = 100;
 }
 
