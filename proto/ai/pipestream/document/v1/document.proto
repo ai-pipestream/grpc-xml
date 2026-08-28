@@ -852,7 +852,6 @@ message CodeItem {
   // item kind inlines its base fields, so the mirror is stated here.
   optional string source_element_name = 21;
   optional string source_namespace = 22;
-
 }
 
 // FormulaItem represents a mathematical formula or equation.
