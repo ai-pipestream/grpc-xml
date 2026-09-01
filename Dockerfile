@@ -3,7 +3,7 @@
 # separate CI job that an image could be built around.
 FROM rust:1.98-slim-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      protobuf-compiler ca-certificates \
+      protobuf-compiler libprotobuf-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
