@@ -1,9 +1,9 @@
 # Build stage: compile and run the whole suite. An image never ships from a
 # tree whose tests did not pass, so `cargo test` is a build step and not a
 # separate CI job that an image could be built around.
-FROM rust:1.97-slim-bookworm AS build
+FROM rust:1.98-slim-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      protobuf-compiler ca-certificates \
+      protobuf-compiler libprotobuf-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
