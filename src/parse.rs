@@ -21,11 +21,11 @@ use std::io::{self, BufRead, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use quick_xml::Writer;
 use quick_xml::events::attributes::Attribute as XmlAttribute;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
-use quick_xml::{Decoder, Writer};
 
 use crate::dialect::{
     self, Action, Attrs, CELL_ELEMENTS, ElementCtx, HEADER_CELL_ELEMENTS, HEADER_SECTION_ELEMENTS,
@@ -1352,10 +1352,6 @@ impl<R: BufRead> Driver<'_, R> {
 
     /// Read one XML event and copy it into owned data.
     fn next_step(&mut self) -> Result<Step, ParseError> {
-        // Re-read every time: with the `encoding` feature the decoder is
-        // decided by the XML declaration, so it is not stable until the
-        // prolog has been read.
-        let decoder = self.xml.decoder();
         self.buf.clear();
         let (resolved, event) = self
             .xml
@@ -1363,17 +1359,17 @@ impl<R: BufRead> Driver<'_, R> {
             .map_err(|e| convert_error(&e, self.input))?;
         let step = match event {
             Event::Start(start) => {
-                let qname = decode(start.name().as_ref(), decoder);
-                let local = decode(start.local_name().as_ref(), decoder);
+                let qname = start.name().as_ref().to_owned();
+                let local = start.local_name().as_ref().to_owned();
                 let namespace = match resolved {
-                    ResolveResult::Bound(ns) => decode(ns.as_ref(), decoder),
+                    ResolveResult::Bound(ns) => ns.as_ref().to_owned(),
                     ResolveResult::Unbound | ResolveResult::Unknown(_) => String::new(),
                 };
                 let mut attrs = Vec::new();
                 for attribute in start.attributes() {
                     let attribute = attribute.map_err(|e| ParseError::Malformed(e.to_string()))?;
-                    let key = decode(attribute.key.as_ref(), decoder);
-                    let value = attribute_value(&attribute, decoder);
+                    let key = attribute.key.as_ref().to_owned();
+                    let value = attribute_value(&attribute);
                     attrs.push((key, value));
                 }
                 Step::Start {
@@ -1387,42 +1383,22 @@ impl<R: BufRead> Driver<'_, R> {
             // Empty event never reaches here.
             Event::Empty(_) => unreachable!("empty elements are expanded"),
             Event::End(_) => Step::End,
-            Event::Text(text) => Step::Text(
-                text.xml10_content()
-                    .map_err(|e| ParseError::Malformed(e.to_string()))?
-                    .into_owned(),
-            ),
-            Event::CData(cdata) => Step::Text(
-                cdata
-                    .decode()
-                    .map_err(|e| ParseError::Malformed(e.to_string()))?
-                    .into_owned(),
-            ),
+            Event::Text(text) => Step::Text(text.xml10_content().into_owned()),
+            Event::CData(cdata) => Step::Text(cdata.into_inner().into_owned()),
             Event::GeneralRef(reference) => {
-                let name = reference
-                    .decode()
-                    .map_err(|e| ParseError::Malformed(e.to_string()))?
-                    .into_owned();
+                let name = reference.into_inner().into_owned();
                 let resolved = resolve_reference(&name);
                 Step::GeneralRef { name, resolved }
             }
             Event::Decl(decl) => {
-                let version = decl
-                    .version()
-                    .ok()
-                    .map(|v| String::from_utf8_lossy(&v).into_owned());
+                let version = decl.version().ok().map(std::borrow::Cow::into_owned);
                 let encoding = decl
                     .encoding()
                     .and_then(Result::ok)
-                    .map(|v| String::from_utf8_lossy(&v).into_owned());
+                    .map(std::borrow::Cow::into_owned);
                 Step::Declaration { version, encoding }
             }
-            Event::DocType(doctype) => Step::DocType(
-                doctype
-                    .decode()
-                    .map_err(|e| ParseError::Malformed(e.to_string()))?
-                    .into_owned(),
-            ),
+            Event::DocType(doctype) => Step::DocType(doctype.into_inner().into_owned()),
             Event::Comment(_) | Event::PI(_) => Step::Ignorable,
             Event::Eof => Step::Eof,
         };
@@ -1615,25 +1591,16 @@ pub(crate) fn resolve_reference(name: &str) -> Option<String> {
     quick_xml::escape::resolve_predefined_entity(name).map(str::to_owned)
 }
 
-/// Decode raw bytes with the reader's encoding, replacing what will not
-/// decode rather than failing the parse over one bad byte.
-fn decode(bytes: &[u8], decoder: Decoder) -> String {
-    decoder.decode(bytes).map_or_else(
-        |_| String::from_utf8_lossy(bytes).into_owned(),
-        std::borrow::Cow::into_owned,
-    )
-}
-
 /// Attribute value with predefined and character references resolved.
 ///
 /// A value naming an undeclared entity does not fail: normalization errors
 /// out on it, and the raw text is kept instead, matching what happens to an
 /// unexpandable reference in content.
-fn attribute_value(attribute: &XmlAttribute<'_>, decoder: Decoder) -> String {
+fn attribute_value(attribute: &XmlAttribute<'_>) -> String {
     attribute
-        .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, decoder)
+        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
         .map_or_else(
-            |_| decode(&attribute.value, decoder),
+            |_| attribute.value.as_ref().to_owned(),
             std::borrow::Cow::into_owned,
         )
 }
