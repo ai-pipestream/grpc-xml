@@ -783,6 +783,18 @@ message TextItemBase {
   // that identity.
   optional string source_element_name = 23;
   optional string source_namespace = 24;
+
+  // Source attribution for this item's resolved fields when more than one
+  // engine read them. Filled today only by the PDF consensus vote
+  // (GRPARSE_PDF_BACKEND with several targets): the carried text is the
+  // vote winner's reading, recorded as the field's source under the
+  // "protomolt" claimant name; one further entry per losing backend whose
+  // words deviated inside this item (a text deviation or an order break in
+  // the page's reconciliation) names the reading that lost. The losing
+  // words themselves stay on the stream's PageData.reconciliation; this
+  // list only names who disagreed, on the item where they disagreed.
+  // Empty for single-source items. Extension beyond the upstream dialect.
+  repeated FieldSource field_sources = 25;
 }
 
 // TitleItem represents a document title or major heading.
