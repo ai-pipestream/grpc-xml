@@ -1048,6 +1048,10 @@ message PicturePieChartData {
 // ChartPoint represents a single point in a scatter chart.
 message ChartPoint {
   FloatPair value = 1;
+  // The bubble size at this point, for bubble charts; unset for plain
+  // scatter points (extension beyond the upstream dialect, whose scatter
+  // point carries coordinates only).
+  optional double size = 2;
 }
 
 // PictureScatterChartData contains scatter chart data extracted from a picture.
