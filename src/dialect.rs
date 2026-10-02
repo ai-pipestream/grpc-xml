@@ -768,7 +768,7 @@ mod tests {
         )]);
         let link = jats_inline(&ctx("ext-link", &ancestors, &attrs)).expect("a link is inline");
         assert_eq!(link.hyperlink.as_deref(), Some("https://example.org/spec"));
-        assert!(link.references.is_empty());
+        assert!(link.references.is_empty(), "{:?}", link.references);
 
         // A JATS xref may name several targets in one attribute, and each is
         // its own edge of the reference graph.

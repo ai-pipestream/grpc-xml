@@ -2122,7 +2122,7 @@ mod tests {
             document.origin.as_ref().map(|o| o.mimetype.as_str()),
             Some(MIMETYPE)
         );
-        assert!(integrity_errors(&document).is_empty());
+        assert_eq!(integrity_errors(&document), Vec::<String>::new());
     }
 
     #[test]
@@ -2183,7 +2183,7 @@ mod tests {
         });
         fold.consume(&text(pb::XmlItemLabel::Paragraph, "under the heading"));
         let document = fold.take();
-        assert!(integrity_errors(&document).is_empty());
+        assert_eq!(integrity_errors(&document), Vec::<String>::new());
         document
     }
 
