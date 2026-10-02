@@ -1419,6 +1419,33 @@ message FieldItem {
   optional FineRef span = 13;
   // Fieldmark parameters, a genuinely open per-field vocabulary.
   map<string, string> parameters = 14;
+
+  // The interactive state of the field, typed (extensions beyond the
+  // upstream dialect). The upstream model keeps a PDF form widget's raw
+  // state on its parsed-page PdfWidget, outside the document; here it rides
+  // on the field item itself, so a document consumer reads the form without
+  // the page layer. Each is set only when the source states it.
+
+  // The field's interactive type.
+  optional FormFieldKind field_kind = 15;
+  // The current value as text. A PDF button's value is its state name
+  // without the slash ("Yes").
+  optional string value = 16;
+  // The default value as text (PDF /DV).
+  optional string default_value = 17;
+  // The source's field flags bitfield. For PDF it is the /Ff mask
+  // inherited through the field hierarchy, upstream's
+  // PdfWidget.widget_field_flags.
+  optional uint32 field_flags = 18;
+  // The widget's appearance state as the source spells it. For PDF it is
+  // the widget's own /AS name including its leading slash ("/Yes",
+  // "/Off"), upstream's PdfWidget.widget_appearance_state.
+  optional string appearance_state = 19;
+  // Whether the field refuses edits (PDF /Ff bit 1).
+  optional bool read_only = 20;
+  // The field's tooltip or alternate description (PDF /TU), upstream's
+  // PdfWidget.widget_description.
+  optional string description = 21;
 }
 
 // PageItem represents metadata about a single page in the document.
@@ -2051,6 +2078,27 @@ message RecordLayoutMeta {
   optional uint64 prefix_bytes = 5;
   // Rows the producer's row cap dropped; zero means the table is complete.
   optional uint64 rows_truncated = 6;
+}
+
+// FormFieldKind is the interactive type of a form field (FieldItem
+// .field_kind). For PDF it is the /FT entry refined by the /Ff button and
+// choice bits.
+enum FormFieldKind {
+  FORM_FIELD_KIND_UNSPECIFIED = 0;
+  // A free-text input (PDF /Tx).
+  FORM_FIELD_KIND_TEXT = 1;
+  // A two-state check box (PDF /Btn without the radio or push-button bit).
+  FORM_FIELD_KIND_CHECK_BOX = 2;
+  // One button of a radio group (PDF /Btn with the radio bit).
+  FORM_FIELD_KIND_RADIO_BUTTON = 3;
+  // A button that holds no value (PDF /Btn with the push-button bit).
+  FORM_FIELD_KIND_PUSH_BUTTON = 4;
+  // A drop-down choice (PDF /Ch with the combo bit).
+  FORM_FIELD_KIND_COMBO_BOX = 5;
+  // A scrolling choice list (PDF /Ch without the combo bit).
+  FORM_FIELD_KIND_LIST_BOX = 6;
+  // A signature field (PDF /Sig).
+  FORM_FIELD_KIND_SIGNATURE = 7;
 }
 
 // BarcodeAnnotation is one decoded machine-readable code payload.
