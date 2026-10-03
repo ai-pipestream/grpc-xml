@@ -113,6 +113,24 @@ message ParseOptions {
   // codes and cited-reference blocks: high-value fields that flatten into
   // meaningless prose, which is why they are not simply captured as text.
   bool emit_source_metadata = 8;
+
+  // Repair text that was not escaped before parsing it. Default false: the
+  // document must be well-formed XML, and one that is not ends the stream
+  // with `INVALID_ARGUMENT`.
+  //
+  // Set it for markup written by a generator that does not escape its text,
+  // such as a vision-language model emitting DocLang. Three things are
+  // repaired, and only outside CDATA sections and comments: a bare `&` that
+  // starts no reference is read as a literal `&`; a `<` that cannot start
+  // markup (`p <0.05`) is read as a literal `<`; and a control character
+  // that XML 1.0 forbids is dropped. A `<` followed by a name character is
+  // never touched, so no tag structure is guessed. The security policy is
+  // unchanged: entity declarations are still refused, references to
+  // undeclared entities are still preserved verbatim rather than escaped
+  // or expanded, and nothing is fetched. Every repair is counted on the
+  // trailer as `WARNING_CODE_TEXT_REPAIRED`, and `TextItem.byte_start` and
+  // `byte_end` then count bytes of the repaired stream.
+  bool repair_unescaped_text = 9;
 }
 
 // ParseXmlRequest is one frame of the upload.

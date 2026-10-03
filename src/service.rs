@@ -254,6 +254,7 @@ impl XmlParseService for XmlGrpc {
             emit_source_metadata: options.emit_source_metadata,
             include_attributes: options.include_attributes,
             taxonomy_supplied: !options.taxonomy.is_empty(),
+            repair_unescaped_text: options.repair_unescaped_text,
         };
         let limit = self.resolve_cap(options.max_document_mib);
         let mut stats = InputStats::with_limit(limit);

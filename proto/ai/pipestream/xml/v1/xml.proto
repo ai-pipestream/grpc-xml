@@ -623,9 +623,10 @@ message TextItem {
   // consumed, which is the source itself for a UTF-8 document and the
   // decoded form of it for any other, so a document in another encoding
   // gives a faithful position in the decoded stream rather than a wrong one
-  // in the source. Absent for the archive dialects, whose items come from
-  // many member documents and have no offset into the payload the caller
-  // uploaded.
+  // in the source. With `ParseOptions.repair_unescaped_text` set they count
+  // bytes of the repaired stream. Absent for the archive dialects, whose
+  // items come from many member documents and have no offset into the
+  // payload the caller uploaded.
   optional uint64 byte_start = 16;
 
   // One past the last byte of the item's element. Set with `byte_start`.
@@ -1180,6 +1181,13 @@ enum WarningCode {
   // contain, or a page without OCR. The member still counts against the
   // decompressed byte cap.
   WARNING_CODE_ARCHIVE_MEMBER_IGNORED = 7;
+
+  // The document was not well-formed XML and was repaired before parsing,
+  // because the request set `ParseOptions.repair_unescaped_text`: a bare `&`
+  // or a `<` that cannot start markup was read as text, or a control
+  // character XML 1.0 forbids was dropped. `count` is the number of repairs.
+  // Never reported for a request that did not opt in.
+  WARNING_CODE_TEXT_REPAIRED = 8;
 }
 
 // ParseWarning is one non-fatal finding, carried on the trailer.

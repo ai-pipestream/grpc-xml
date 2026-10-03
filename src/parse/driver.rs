@@ -791,7 +791,16 @@ impl<R: BufRead> Driver<'_, R> {
                 self.open_elements = self.open_elements.saturating_sub(1);
                 Step::End
             }
-            Event::Text(text) => Step::Text(text.xml10_content().into_owned()),
+            Event::Text(text) => {
+                // A reference is its own event, so an `&` left in text is
+                // one the reader let through as dangling, which it only does
+                // when the caller opted in to repair.
+                if let Some(repairs) = self.repairs.as_ref() {
+                    let dangling = text.xml10_content().matches('&').count();
+                    repairs.add(u64::try_from(dangling).unwrap_or(u64::MAX));
+                }
+                Step::Text(text.xml10_content().into_owned())
+            }
             Event::CData(cdata) => Step::CData(cdata.into_inner().into_owned()),
             Event::GeneralRef(reference) => {
                 let name = reference.into_inner().into_owned();
@@ -993,6 +1002,22 @@ impl<R: BufRead> Driver<'_, R> {
     }
 
     pub(super) fn emit_status(&mut self) -> Result<(), ParseError> {
+        if let Some(repaired) = self.repairs.as_ref().map(super::RepairTally::count)
+            && repaired > 0
+        {
+            // Inserted past the bound on warning kinds: it is one fixed
+            // kind, and a repair the trailer does not mention is a silent
+            // one, which is what the option promises never to be.
+            self.warnings.insert(
+                (
+                    pb::WarningCode::TextRepaired as i32,
+                    "unescaped text was repaired before parsing because \
+                     repair_unescaped_text was set"
+                        .to_owned(),
+                ),
+                repaired,
+            );
+        }
         let warnings = self
             .warnings
             .iter()

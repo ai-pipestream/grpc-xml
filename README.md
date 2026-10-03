@@ -98,6 +98,7 @@ sequenceDiagram
 | `emit_inline_spans` | Report the inline markup inside captured elements as `TextItem.spans`: emphasis, hyperlinks, cross-references. The flat `text` is unchanged |
 | `emit_source_metadata` | Decode the structured metadata subtrees the item mapping skips (dates, licences, funding, classification codes, cited references) as `meta_item` events |
 | `emit_document` | Also fold the parse into one `ai.pipestream.document.v1.Document`, sent just before the trailer (see below) |
+| `repair_unescaped_text` | Repair text a generator forgot to escape instead of refusing the document: a bare `&` and a `<` that cannot start markup are read as text, and control characters XML 1.0 forbids are dropped. CDATA sections, comments and markup are never touched, the security policy below is unchanged, and every repair is counted on the trailer as `WARNING_CODE_TEXT_REPAIRED`. Off by default |
 
 **Response.** Exactly one `info` first, content events in document order,
 exactly one `status` last.
@@ -214,6 +215,13 @@ is the whole policy:
   XXE payload it is; a bare relative DTD filename (what real USPTO grants
   carry, and what the dialect sniff reads) is recorded on `XmlInfo`,
   reported as a warning, and never opened.
+- **Repair is opt-in and never structural.** With `repair_unescaped_text`
+  set, a filter in front of the parser only ever turns would-be markup into
+  text (a stray `<` becomes `&lt;`, a forbidden control character is
+  dropped) and quick-xml reads a bare `&` as text; it cannot write a tag, a
+  declaration or a reference, so every refusal above still fires, and the
+  byte cap counts the bytes uploaded rather than the repaired stream. See
+  [`src/parse/repair.rs`](src/parse/repair.rs).
 - **No disk.** Document bytes go from the request stream into an in-memory
   channel and straight into the pull parser. The image runs `--read-only`
   with no tmpfs.
