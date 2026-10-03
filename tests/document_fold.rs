@@ -1243,6 +1243,110 @@ fn spanning_cells_take_their_grid_position_from_the_spans_before_them() {
     assert_eq!(data.table_cells.len(), 4);
 }
 
+/// A JATS article whose one table claims a span no grid can hold.
+const JATS_HOSTILE_SPANS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <body>
+    <sec id="s1">
+      <title>Spans</title>
+      <table-wrap id="t1">
+        <table>
+          <tbody>
+            <tr><td colspan="2000000000" rowspan="4294967295">x</td><td>y</td></tr>
+            <tr><td>a</td></tr>
+          </tbody>
+        </table>
+      </table-wrap>
+    </sec>
+  </body>
+</article>
+"#;
+
+#[test]
+fn a_hostile_span_is_clamped_on_the_wire_and_bounded_in_the_fold() {
+    let started = std::time::Instant::now();
+    let (events, document) = fold_default(JATS_HOSTILE_SPANS);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "a 2e9-column span must not cost the fold 2e9 slots"
+    );
+
+    let first_row = events
+        .iter()
+        .find_map(|event| match event.event.as_ref() {
+            Some(pb::parse_xml_response::Event::TableRow(row)) => Some(row),
+            _ => None,
+        })
+        .expect("a table row");
+    assert_eq!(
+        (
+            first_row.cells[0].column_span,
+            first_row.cells[0].row_span,
+            first_row.cells[1].column_index
+        ),
+        (1000, 65534, 1000),
+        "spans clamp to the HTML table model's limits"
+    );
+
+    // 1000 x 65534 slots is past the fold's span budget, so the cell is laid
+    // as one slot and the rest of the table still lands.
+    let data = document.tables[0].data.as_ref().expect("table data");
+    let first = &data.grid[0].cells[0];
+    assert_eq!((first.col_span, first.row_span), (1, 1));
+    assert_eq!(data.grid.len(), 2);
+    assert_eq!(data.table_cells.len(), 3);
+}
+
+#[test]
+fn span_slots_are_budgeted_across_the_whole_document() {
+    let start = pb::ParseXmlResponse {
+        event: Some(pb::parse_xml_response::Event::TableStart(pb::TableStart {
+            table_ref: "t1".to_owned(),
+            ..pb::TableStart::default()
+        })),
+    };
+    let wide = pb::TableCell {
+        text: "w".to_owned(),
+        column_span: 1000,
+        row_span: 1000,
+        ..pb::TableCell::default()
+    };
+    // Each cell claims a million slots; a few fit the budget, the rest are
+    // laid as single slots instead of costing a million inserts each.
+    let row = pb::ParseXmlResponse {
+        event: Some(pb::parse_xml_response::Event::TableRow(pb::TableRow {
+            table_ref: "t1".to_owned(),
+            cells: vec![wide; 64],
+            ..pb::TableRow::default()
+        })),
+    };
+    let started = std::time::Instant::now();
+    let mut fold = DocumentFold::new();
+    fold.consume(&start);
+    fold.consume(&row);
+    fold.consume(&pb::ParseXmlResponse {
+        event: Some(pb::parse_xml_response::Event::TableEnd(pb::TableEnd {
+            table_ref: "t1".to_owned(),
+            ..pb::TableEnd::default()
+        })),
+    });
+    let document = fold.take();
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+
+    let cells = &document.tables[0].data.as_ref().expect("table data").grid[0].cells;
+    assert_eq!(cells.len(), 64);
+    assert_eq!(
+        cells.iter().filter(|cell| cell.col_span == 1000).count(),
+        4,
+        "four million-slot spans fit the budget and the fifth does not"
+    );
+    assert!(
+        cells[4..]
+            .iter()
+            .all(|cell| (cell.col_span, cell.row_span) == (1, 1))
+    );
+}
+
 // -------------------------------------------------------------------- wire
 
 /// Options asking the server for the Document projection.
