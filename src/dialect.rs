@@ -314,10 +314,12 @@ fn doclang_inline(ctx: &ElementCtx<'_>) -> Option<Inline> {
         "bold" | "b" | "strong" => Some(Inline::styled(pb::SpanStyle::Bold)),
         "italic" | "i" | "em" => Some(Inline::styled(pb::SpanStyle::Italic)),
         "underline" | "u" => Some(Inline::styled(pb::SpanStyle::Underline)),
-        "strike" | "s" => Some(Inline::styled(pb::SpanStyle::Strikethrough)),
+        // Docling spells these out (`strikethrough`, `superscript`,
+        // `subscript`); the short forms are what an XML author writes.
+        "strikethrough" | "strike" | "s" => Some(Inline::styled(pb::SpanStyle::Strikethrough)),
         "code" | "monospace" => Some(Inline::styled(pb::SpanStyle::Monospace)),
-        "sup" => Some(Inline::styled(pb::SpanStyle::Superscript)),
-        "sub" => Some(Inline::styled(pb::SpanStyle::Subscript)),
+        "superscript" | "sup" => Some(Inline::styled(pb::SpanStyle::Superscript)),
+        "subscript" | "sub" => Some(Inline::styled(pb::SpanStyle::Subscript)),
         "formula" | "math" => Some(Inline::styled(pb::SpanStyle::Math)),
         "link" | "a" => Some(Inline::link(ctx.attrs, &["href", "uri"], "")),
         "ref" | "xref" => Some(Inline::reference(
@@ -656,6 +658,11 @@ fn uspto(ctx: &ElementCtx<'_>) -> Action {
 /// it in a `label` attribute holding a `DocItemLabel` short name
 /// (`section_header`). The attribute form wins where both are present,
 /// because it is the one a serializer emits mechanically.
+///
+/// Docling's own element names (`text`, `heading`, `footnote`,
+/// `page_header`, `page_footer`) are among the label-named ones. Docling's
+/// head tags inside an item (`location`, `layer`) carry no text, so a capture
+/// passes over them; the boxes they state are not read.
 fn doclang(ctx: &ElementCtx<'_>) -> Action {
     if let Some(raw) = ctx.attrs.get("label")
         && let Some(label) = label_from_raw(raw)
@@ -682,6 +689,15 @@ fn doclang(ctx: &ElementCtx<'_>) -> Action {
         "code" => Action::Capture(Capture::new(pb::XmlItemLabel::Code, "")),
         "formula" => Action::Capture(Capture::new(pb::XmlItemLabel::Formula, "")),
         "footnote" => Action::Capture(Capture::new(pb::XmlItemLabel::Footnote, "")),
+        // Page chrome. Captured whole like any other item, so text before,
+        // between and after its formatting runs all stays in it, and the
+        // label is what keeps it out of the body.
+        "page_header" | "page-header" => {
+            Action::Capture(Capture::new(pb::XmlItemLabel::PageHeader, ""))
+        }
+        "page_footer" | "page-footer" => {
+            Action::Capture(Capture::new(pb::XmlItemLabel::PageFooter, ""))
+        }
         "reference" => Action::Capture(Capture::new(pb::XmlItemLabel::Reference, "")),
         "picture" | "figure" => Action::AttrText(AttrText {
             label: pb::XmlItemLabel::Picture,
@@ -714,6 +730,8 @@ pub fn label_from_raw(raw: &str) -> Option<pb::XmlItemLabel> {
         "code" => pb::XmlItemLabel::Code,
         "formula" => pb::XmlItemLabel::Formula,
         "picture" => pb::XmlItemLabel::Picture,
+        "page_header" => pb::XmlItemLabel::PageHeader,
+        "page_footer" => pb::XmlItemLabel::PageFooter,
         _ => return None,
     })
 }

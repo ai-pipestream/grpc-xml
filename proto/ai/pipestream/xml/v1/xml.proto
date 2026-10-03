@@ -106,6 +106,15 @@ enum XmlItemLabel {
   // A picture or figure placeholder. XML dialects carry a reference rather
   // than pixels, so the item's text is the alt text or figure label.
   XML_ITEM_LABEL_PICTURE = 11;
+
+  // A running header repeated at the top of a page: page chrome rather than
+  // body content. The Document projection places it in the furniture layer.
+  XML_ITEM_LABEL_PAGE_HEADER = 12;
+
+  // A running footer or page number at the bottom of a page: page chrome
+  // rather than body content. The Document projection places it in the
+  // furniture layer.
+  XML_ITEM_LABEL_PAGE_FOOTER = 13;
 }
 
 // CollectorSource attributes an item to the collector that produced it.

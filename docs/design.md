@@ -236,7 +236,11 @@ the coordinator's merge, so treat those as a hint; the per-item
 `ListItem` (`enumerated` when the source numbered it), `CODE` → `CodeItem`
 (which **inlines** its base fields; it has no `TextItemBase` wrapper),
 `FORMULA` → `FormulaItem`, everything else → `TextItem` with the matching
-`DocItemLabel`. Both `text` and `orig` are set. Per item,
+`DocItemLabel`. `PAGE_HEADER` and `PAGE_FOOTER` (DocLang page chrome) are
+the one exception to placement: they are `TextItem`s in
+`CONTENT_LAYER_FURNITURE`, children of `#/furniture` rather than of the body
+or a section, and they neither close a section nor end a list. Everything
+else is `CONTENT_LAYER_BODY`. Both `text` and `orig` are set. Per item,
 `meta.custom_fields` carries `xml.path`, plus `xml.role`, `xml.element_id`
 and `xml.ordinal` when the event has them.
 

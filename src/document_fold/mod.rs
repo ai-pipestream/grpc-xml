@@ -69,8 +69,9 @@ pub const MIMETYPE: &str = "application/xml";
 /// is not under a section header.
 const BODY_REF: &str = "#/body";
 
-/// Self ref of the furniture group. Nothing is put in it: XML dialects have
-/// no page chrome to put there.
+/// Self ref of the furniture group: the parent of page chrome. Only a
+/// `DocLang` page header or footer is put in it; the other dialects have no
+/// page chrome to put there.
 const FURNITURE_REF: &str = "#/furniture";
 
 /// Grid slots one document's cell spans may claim beyond the slot each cell
@@ -680,7 +681,21 @@ impl DocumentFold {
         if label == pb::XmlItemLabel::SectionHeader {
             self.close_headings(level);
         }
-        let parent = if label == pb::XmlItemLabel::ListItem {
+        // Page chrome is furniture: it hangs off the furniture root rather
+        // than the body, and it neither closes a section nor ends a list,
+        // because a running header between two pages interrupts neither.
+        let furniture = matches!(
+            label,
+            pb::XmlItemLabel::PageHeader | pb::XmlItemLabel::PageFooter
+        );
+        let layer = if furniture {
+            doc::ContentLayer::Furniture
+        } else {
+            doc::ContentLayer::Body
+        };
+        let parent = if furniture {
+            FURNITURE_REF.to_owned()
+        } else if label == pb::XmlItemLabel::ListItem {
             self.list_parent(item)
         } else {
             // Anything that is not a list item ends the run of list items,
@@ -702,7 +717,7 @@ impl DocumentFold {
             doc::base_text_item::Item::Code(doc::CodeItem {
                 self_ref: self_ref.clone(),
                 parent: Some(reference(&parent)),
-                content_layer: doc::ContentLayer::Body as i32,
+                content_layer: layer as i32,
                 meta: Some(doc::FloatingMeta {
                     custom_fields: fields,
                     ..doc::FloatingMeta::default()
@@ -720,7 +735,7 @@ impl DocumentFold {
             let base = doc::TextItemBase {
                 self_ref: self_ref.clone(),
                 parent: Some(reference(&parent)),
-                content_layer: doc::ContentLayer::Body as i32,
+                content_layer: layer as i32,
                 meta: Some(doc::BaseMeta {
                     custom_fields: fields,
                     ..doc::BaseMeta::default()
@@ -1432,6 +1447,10 @@ impl DocumentFold {
             if let Some(body) = self.document.body.as_mut() {
                 body.children.push(reference(child));
             }
+        } else if parent == FURNITURE_REF {
+            if let Some(furniture) = self.document.furniture.as_mut() {
+                furniture.children.push(reference(child));
+            }
         } else if let Some(index) = parent
             .strip_prefix("#/groups/")
             .and_then(|index| index.parse::<usize>().ok())
@@ -1894,6 +1913,8 @@ const fn doc_label(label: pb::XmlItemLabel) -> doc::DocItemLabel {
         pb::XmlItemLabel::Footnote => doc::DocItemLabel::Footnote,
         pb::XmlItemLabel::Code => doc::DocItemLabel::Code,
         pb::XmlItemLabel::Formula => doc::DocItemLabel::Formula,
+        pb::XmlItemLabel::PageHeader => doc::DocItemLabel::PageHeader,
+        pb::XmlItemLabel::PageFooter => doc::DocItemLabel::PageFooter,
         // A PICTURE event does not reach this mapping: it folds into a
         // placeholder `PictureItem` in the picture arena rather than into a
         // text item. The arm is here so the label vocabulary stays covered.
