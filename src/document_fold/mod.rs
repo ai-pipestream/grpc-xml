@@ -1439,8 +1439,8 @@ impl DocumentFold {
     /// Both halves of the parent link: the item names its parent, and the
     /// parent lists the item. An integrity check fails on either one alone.
     ///
-    /// The only parents this fold makes are the body, section headers and
-    /// list groups, so a ref that is none of those is a bug in the caller
+    /// The only parents this fold makes are the body, the furniture root,
+    /// section headers and list groups, so a ref that is none of those is a bug in the caller
     /// rather than something to resolve generically.
     fn link_child(&mut self, parent: &str, child: &str) {
         if parent == BODY_REF {

@@ -263,7 +263,7 @@ wanted.
 | JATS | `http://jats.nlm.nih.gov*` namespace, `//NLM//` or JATS public id, root `article` | title, contributors, affiliations, abstract, keywords, nested sections, paragraphs, lists, formulas, figures, captioned tables, references |
 | USPTO | `//USPTO//` public id, ST.96 namespace, root `us-patent-grant` / `us-patent-application` / `patent-document` | title, inventors, assignees, document and application numbers, abstract, headings, description, drawing descriptions, numbered claims, drawing references, CALS tables |
 | XBRL | `http://www.xbrl.org/2003/instance` namespace, root `xbrl` | contexts (entity, period, segment/scenario dimensions), units (simple and divide), facts with `contextRef` / `unitRef` resolved inline, `decimals`, `precision`, `sign`, `xsi:nil`, `@id`, plus the footnote and label linkbases inside the instance |
-| DocLang | the `NS_DOCLANG` namespace URI (defined in `src/sniff.rs`), root `doclang`; an alternate root name is also accepted | typed decode of label-named elements and of a generic `item` carrying a `DocItemLabel` short name, including Docling's own `text`, `heading`, `footnote`, `page_header` / `page_footer` and its `superscript` / `subscript` / `strikethrough` runs |
+| DocLang | the `NS_DOCLANG` namespace URI (defined in `src/sniff.rs`), root `doclang`; an alternate root name is also accepted | typed decode of label-named elements and of a generic `item` carrying a `DocItemLabel` short name, including the `text`, `heading`, `footnote` and `page_header` / `page_footer` element names and the `superscript` / `subscript` / `strikethrough` runs |
 | DCLX | ZIP magic `PK\x03\x04` | the archive's root `document.xml` member, mapped exactly as DocLang; `assets/` and `pages/` images stay compressed and undecoded |
 | METS_GBS | gzip magic `\x1f\x8b`, then a tar holding a METS manifest with `PROFILE="gbs"` | pages in manifest (`div TYPE="page" ORDER`) order, one `TextItem` with `role = "ocr-line"` per hOCR `ocr_line` span of each page's `coordOCR` file, `x_wconf` as the item's source confidence; scans and plain OCR text are counted, warned about and never decoded |
 
@@ -286,16 +286,15 @@ is what design.md requires.
 The DocLang schema here is inferred: the serialization is not pinned by a
 published DTD this repo can point at, so the mapper accepts a documented,
 permissive shape (see [`src/dialect.rs`](src/dialect.rs)). Point it at a real
-corpus before trusting it. Checked against what Docling itself writes
-([`tests/doclang_docling.rs`](tests/doclang_docling.rs), which also replays
-the inputs of docling-core's October 2026 deserializer fixes), these parts of
-Docling's serialization are not mapped yet: `<location>` boxes and
+corpus before trusting it. Checked against the reference serializer's
+element vocabulary ([`tests/doclang_vocabulary.rs`](tests/doclang_vocabulary.rs)),
+these parts of that serialization are not mapped yet: `<location>` boxes and
 `<page_break>` (so a plain DocLang item has no provenance), an explicit
 `<layer>` on items other than page chrome, lists written as `<ldiv/>`
 markers between item bodies (their text is dropped with an
 `UNMAPPED_ELEMENT` warning), OTSL tables (`fcel` / `nl` cells), and field
 regions outside a captured item. An element with no text is no item at all,
-where Docling keeps an empty item to hold its box.
+where the reference serializer keeps an empty item to hold its box.
 
 CALS `namest`/`nameend` column spans are not expanded through `colspec`;
 `colspan`, `rowspan` and `morerows` are, clamped to 1000 columns and 65534

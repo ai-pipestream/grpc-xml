@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `DocLang` as Docling itself writes it, checked against the deserializer
-//! fixes docling-core shipped in October 2026 (docling-core #803, #804, #811,
-//! #820 and #824).
+//! `DocLang` in the reference serializer's own vocabulary, checked against
+//! inputs that a tree-walking reader is known to get wrong: unescaped text,
+//! mixed content and formatting runs, empty items, empty list item bodies,
+//! and float satellites with nested content.
 //!
-//! Each upstream fix came with an input that its deserializer got wrong. This
+//! Each of those inputs breaks a tree-walking deserializer. This
 //! reader is built differently — one streaming pass that captures an item's
 //! text instead of a tree walk that rebuilds inline groups — so most of those
 //! bugs cannot happen here. The inputs are kept anyway, adapted where the
@@ -12,9 +13,10 @@
 //! here first. Where the input did show a gap in this reader, the test pins
 //! the fix.
 //!
-//! The fragments use Docling's own tag names (`text`, `heading`,
-//! `superscript`, `page_header`, `location`, `layer`) with no namespace and
-//! `version="0.7"` on the root, which is what a Docling serializer emits.
+//! The fragments use the reference serializer's tag names (`text`,
+//! `heading`, `superscript`, `page_header`, `location`, `layer`) with no
+//! namespace and `version="0.7"` on the root, which is what it emits.
+//! `doclang_render_shapes.rs` covers the shapes gRParse writes.
 
 mod common;
 
@@ -24,7 +26,7 @@ use grpc_xml::document_fold::integrity_errors;
 use grpc_xml::proto::v1 as pb;
 use tonic::Code;
 
-/// A fragment wrapped in the root element a Docling serializer writes.
+/// A fragment wrapped in the root element the reference serializer writes.
 fn doclang(body: &str) -> String {
     format!("<doclang version=\"0.7\">{body}</doclang>")
 }
@@ -101,7 +103,7 @@ fn runs(item: &pb::TextItem) -> Vec<(String, Vec<pb::SpanStyle>)> {
         .collect()
 }
 
-// ------------------------------------------------- #803: lenient text repair
+// ------------------------------------------------------ lenient text repair
 
 #[tokio::test]
 async fn unescaped_text_is_refused_unless_the_caller_opts_in() {
@@ -123,10 +125,10 @@ async fn unescaped_text_is_refused_unless_the_caller_opts_in() {
 }
 
 #[tokio::test]
-async fn repair_escapes_what_can_only_be_text_like_docling_does() {
+async fn repair_escapes_what_can_only_be_text() {
     let client = client().await;
-    // docling-core #803's own table. The last case differs on purpose:
-    // Docling splits a CDATA section into its own inline run, and this reader
+    // The last case differs from a tree-walking reader on purpose: that
+    // splits a CDATA section into its own inline run, and this reader
     // captures the element's text as one item.
     for (body, expected) in [
         ("Wiley & Sons", "Wiley & Sons"),
@@ -176,12 +178,12 @@ async fn repair_leaves_well_formed_markup_and_references_alone() {
     assert!(!warned(&repaired, pb::WarningCode::TextRepaired));
 }
 
-// ------------------------------------ #804: mixed content and formatting runs
+// ----------------------------------------- mixed content and formatting runs
 
 #[tokio::test]
 async fn leading_text_before_a_lone_formatting_child_is_kept() {
     let client = client().await;
-    // docling-core #804's table. Docling dropped the "2" of "2nd" and kept
+    // A tree-walking reader drops the "2" of "2nd" and keeps
     // only the innermost run of nested formatting; a capture flattens the
     // whole element, so the text is complete and the runs overlay it.
     for (body, label, text) in [
@@ -250,7 +252,7 @@ async fn nested_formatting_keeps_every_style_on_the_words_it_covers() {
 }
 
 #[tokio::test]
-async fn doclings_own_formatting_names_become_runs() {
+async fn spelled_out_formatting_names_become_runs() {
     let client = client().await;
     let events = parse_ok(
         &client,
@@ -314,7 +316,7 @@ async fn page_headers_and_footers_keep_their_label_and_fold_into_furniture() {
     )
     .await;
     // Before: both were unmapped, their text dropped with a warning, which
-    // is the worse form of the bug docling-core #804 fixed.
+    // is a worse loss than a mislabelled item.
     assert!(
         !warned(&events, pb::WarningCode::UnmappedElement),
         "{:?}",
@@ -402,7 +404,7 @@ async fn the_label_attribute_spells_page_chrome_too() {
     );
 }
 
-// ------------------------------------------------------ #811: empty <text>
+// ------------------------------------------------------------ empty <text>
 
 #[tokio::test]
 async fn an_empty_element_is_no_item_and_never_an_empty_group() {
@@ -419,17 +421,17 @@ async fn an_empty_element_is_no_item_and_never_an_empty_group() {
         "<text>a</text><code></code><code/>".to_owned(),
     ] {
         let events = parse_ok(&client, &doclang(&body), with_document()).await;
-        // Docling now keeps an empty item so the item's box and layer
+        // The reference serializer keeps an empty item so its box and layer
         // survive. This reader reads neither from a plain DocLang document,
         // so an empty item would carry nothing; it is dropped instead, and,
-        // unlike Docling before the fix, never becomes a childless group.
+        // unlike a tree-walking reader, never becomes a childless group.
         assert_eq!(all_texts(&events), ["a"], "{body}");
         let document = document(&events);
         assert!(document.groups.is_empty(), "{body}: {:?}", document.groups);
     }
 }
 
-// -------------------------------------------- #820: empty list item bodies
+// ------------------------------------------------- empty list item bodies
 
 #[tokio::test]
 async fn an_empty_list_item_never_replays_its_siblings() {
@@ -451,10 +453,10 @@ async fn an_empty_list_item_never_replays_its_siblings() {
 }
 
 #[tokio::test]
-async fn doclings_ldiv_list_never_duplicates_and_never_drops_silently() {
-    // Docling writes a list as `<ldiv/>` markers between item bodies. This
-    // reader does not map that shape yet; what it must never do is the
-    // docling-core #820 bug (replay the list into the empty slot), or drop
+async fn an_ldiv_list_never_duplicates_and_never_drops_silently() {
+    // The reference serializer writes a list as `<ldiv/>` markers between
+    // item bodies. This reader does not map that shape yet; what it must
+    // never do is replay the list into the empty slot, or drop
     // the items without saying so.
     let client = client().await;
     let events = parse_ok(
@@ -483,7 +485,7 @@ async fn doclings_ldiv_list_never_duplicates_and_never_drops_silently() {
     }
 }
 
-// ------------------------------------ #824: satellites with nested content
+// ----------------------------------------- satellites with nested content
 
 #[tokio::test]
 async fn a_float_footnote_with_nested_content_keeps_that_content() {
@@ -499,7 +501,7 @@ async fn a_float_footnote_with_nested_content_keeps_that_content() {
         with_document(),
     )
     .await;
-    // Docling skipped a satellite with no text of its own together with its
+    // A tree-walking reader skips a satellite with no text of its own with its
     // content. A capture keeps every descendant's text; the field structure
     // flattens, which is what a capture does to any markup it does not map.
     assert_eq!(

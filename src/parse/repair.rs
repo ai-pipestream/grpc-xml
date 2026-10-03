@@ -3,9 +3,9 @@
 //! Opt-in repair of text a generator forgot to escape.
 //!
 //! `ParseOptions.repair_unescaped_text` exists for markup written by
-//! something that does not escape its text — a vision-language model emitting
-//! `DocLang` is the case that motivated docling-core #803 — where one bare
-//! `&` or `p <0.05` would otherwise fail the whole document.
+//! something that does not escape its text, such as a vision-language model
+//! emitting `DocLang`, where one bare `&` or `p <0.05` would otherwise fail
+//! the whole document.
 //!
 //! The repair is split by what can do it soundly:
 //!
@@ -17,13 +17,13 @@
 //!   the reader, because quick-xml has already failed by the time it sees
 //!   either.
 //!
-//! Docling repairs with three regular expressions over the whole string.
-//! The filter here is the same rule as a streaming state machine, so the
+//! A whole-string repair would use three regular expressions. The filter
+//! here is the same rule as a streaming state machine, so the
 //! parse stays live: it holds at most the one byte after a `<` back, never a
 //! document. It also skips comments as well as CDATA sections, and leaves a
 //! `<` followed by any non-ASCII byte alone, because XML names may start
-//! with a non-ASCII letter and Docling's ASCII-only pattern would escape
-//! `<日本>` into text.
+//! with a non-ASCII letter and an ASCII-only pattern would escape `<日本>`
+//! into text.
 //!
 //! What the filter can produce is the security argument. It only ever
 //! *removes* a byte or replaces a `<` with `&lt;`, the predefined entity for

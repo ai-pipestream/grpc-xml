@@ -314,8 +314,9 @@ fn doclang_inline(ctx: &ElementCtx<'_>) -> Option<Inline> {
         "bold" | "b" | "strong" => Some(Inline::styled(pb::SpanStyle::Bold)),
         "italic" | "i" | "em" => Some(Inline::styled(pb::SpanStyle::Italic)),
         "underline" | "u" => Some(Inline::styled(pb::SpanStyle::Underline)),
-        // Docling spells these out (`strikethrough`, `superscript`,
-        // `subscript`); the short forms are what an XML author writes.
+        // The reference serializer spells these out (`strikethrough`,
+        // `superscript`, `subscript`); the short forms are what an XML
+        // author writes.
         "strikethrough" | "strike" | "s" => Some(Inline::styled(pb::SpanStyle::Strikethrough)),
         "code" | "monospace" => Some(Inline::styled(pb::SpanStyle::Monospace)),
         "superscript" | "sup" => Some(Inline::styled(pb::SpanStyle::Superscript)),
@@ -659,8 +660,8 @@ fn uspto(ctx: &ElementCtx<'_>) -> Action {
 /// (`section_header`). The attribute form wins where both are present,
 /// because it is the one a serializer emits mechanically.
 ///
-/// Docling's own element names (`text`, `heading`, `footnote`,
-/// `page_header`, `page_footer`) are among the label-named ones. Docling's
+/// The reference serializer's element names (`text`, `heading`, `footnote`,
+/// `page_header`, `page_footer`) are among the label-named ones. Its
 /// head tags inside an item (`location`, `layer`) carry no text, so a capture
 /// passes over them; the boxes they state are not read.
 fn doclang(ctx: &ElementCtx<'_>) -> Action {
