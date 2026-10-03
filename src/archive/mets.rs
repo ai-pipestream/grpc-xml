@@ -15,7 +15,7 @@ use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
 use quick_xml::reader::NsReader;
 
-use super::{NS_METS, budget_for, read_inflated, stream_error};
+use super::{Metered, NS_METS, read_inflated, stream_error};
 use crate::dialect::Attrs;
 use crate::parse::{
     self, EmitFn, InputStats, ParseConfig, ParseError, collapse, collapse_positions,
@@ -81,8 +81,7 @@ pub(super) fn parse<R: BufRead>(
     evidence: Evidence,
     requested: bool,
 ) -> Result<Dialect, ParseError> {
-    let mut budget = budget_for(input);
-    let members = read_tar_members(reader, input, &mut budget, requested)?;
+    let members = read_tar_members(reader, input, requested)?;
 
     let Some((manifest_name, manifest)) = find_mets_manifest(&members) else {
         return Err(if requested {
@@ -121,15 +120,15 @@ pub(super) fn parse<R: BufRead>(
 
 /// Inflate the tar, keeping the members that can carry text.
 ///
-/// Every member's bytes are inflated through the budget whether kept or not,
-/// so an image-shaped bomb is caught exactly like a text-shaped one.
+/// Every byte out of the decompressor is charged against the budget, headers
+/// and skipped entries included, so an image-shaped bomb is caught exactly
+/// like a text-shaped one and a header-shaped one like either.
 fn read_tar_members<R: BufRead>(
     reader: R,
     input: &InputStats,
-    budget: &mut u64,
     requested: bool,
 ) -> Result<BTreeMap<String, Vec<u8>>, ParseError> {
-    let mut archive = tar::Archive::new(GzDecoder::new(reader));
+    let mut archive = tar::Archive::new(Metered::new(GzDecoder::new(reader), input));
     let mut members = BTreeMap::new();
     let entries = match archive.entries() {
         Ok(entries) => entries,
@@ -141,21 +140,26 @@ fn read_tar_members<R: BufRead>(
             Ok(entry) => entry,
             Err(e) => return Err(not_a_tar(&e, input, requested)),
         };
-        if !entry.header().entry_type().is_file() {
-            continue;
-        }
+        // Every entry costs a header's worth of work, so directories, links
+        // and devices count toward the bound as files do.
         member_count += 1;
         if member_count > MAX_ARCHIVE_MEMBERS {
             return Err(ParseError::Malformed(format!(
                 "the archive has more than {MAX_ARCHIVE_MEMBERS} members"
             )));
         }
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
         let name = entry
             .path()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
         let keep = wants_member(&name);
-        let bytes = read_inflated(entry, budget, input, keep)?;
+        // The decompressor is already metered, so the member's own read is
+        // not charged a second time.
+        let mut unmetered = u64::MAX;
+        let bytes = read_inflated(entry, &mut unmetered, input, keep)?;
         if keep {
             members.insert(name, bytes);
         }
