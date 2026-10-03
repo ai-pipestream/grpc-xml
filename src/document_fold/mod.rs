@@ -73,6 +73,16 @@ const BODY_REF: &str = "#/body";
 /// no page chrome to put there.
 const FURNITURE_REF: &str = "#/furniture";
 
+/// Grid slots one document's cell spans may claim beyond the slot each cell
+/// takes anyway.
+///
+/// Every slot a `rowspan` or `colspan` covers is tracked until its row is
+/// laid, so the spans are work and memory the fold spends on the source's
+/// say-so. Real tables span a handful of slots; past this many across the
+/// whole document a span is laid as a single slot instead, which keeps the
+/// fold linear in the input whatever the spans claim.
+const MAX_SPAN_SLOTS: u64 = 1 << 22;
+
 /// The name and kind of an XHTML island's placeholder, in both the group
 /// that marks its position and the attachment that makes it addressable.
 const HTML_ISLAND_KIND: &str = "html-island";
@@ -144,6 +154,8 @@ pub struct DocumentFold {
     /// parent. Any content that is not a list item closes the whole stack,
     /// which is what makes a group one contiguous list.
     lists: Vec<(u32, bool, String)>,
+    /// What is left of [`MAX_SPAN_SLOTS`] for this document.
+    span_slots_left: u64,
 }
 
 /// A table being assembled from `table_start` / `table_row` / `table_end`.
@@ -201,6 +213,7 @@ impl DocumentFold {
             summary: Vec::new(),
             root_namespace: String::new(),
             lists: Vec::new(),
+            span_slots_left: MAX_SPAN_SLOTS,
         }
     }
 
@@ -1080,14 +1093,23 @@ impl DocumentFold {
             return;
         }
         let row_index = int_from_usize(table.grid.len());
+        // Slots in rows already laid are never consulted again.
+        table.occupied = table.occupied.split_off(&(row_index, i32::MIN));
         let mut column = 0i32;
         let mut cells = Vec::with_capacity(row.cells.len());
         for cell in &row.cells {
             while table.occupied.contains(&(row_index, column)) {
-                column += 1;
+                column = column.saturating_add(1);
             }
-            let col_span = int(cell.column_span.max(1));
-            let row_span = int(cell.row_span.max(1));
+            let mut col_span = int(cell.column_span.max(1));
+            let mut row_span = int(cell.row_span.max(1));
+            let extra = u64::from(col_span.unsigned_abs()) * u64::from(row_span.unsigned_abs()) - 1;
+            if extra > self.span_slots_left {
+                col_span = 1;
+                row_span = 1;
+            } else {
+                self.span_slots_left -= extra;
+            }
             let end_row = row_index.saturating_add(row_span);
             let end_col = column.saturating_add(col_span);
             for r in row_index..end_row {

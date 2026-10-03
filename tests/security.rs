@@ -210,6 +210,63 @@ async fn a_truncated_document_is_invalid_argument_not_a_short_success() {
 }
 
 #[tokio::test]
+async fn deep_nesting_is_refused_quickly_instead_of_growing_the_stack() {
+    // 200k levels of an unmapped element: three bytes a level, and every
+    // level used to copy every ancestor name.
+    let mut document =
+        String::from("<article xmlns=\"http://jats.nlm.nih.gov/ns/archiving/1.3/\"><body>");
+    document.push_str(&"<x>".repeat(200_000));
+    document.push_str(&"</x>".repeat(200_000));
+    document.push_str("</body></article>");
+    let client = client().await;
+    let started = Instant::now();
+    let error = parse(&client, &document, options())
+        .await
+        .expect_err("nesting past the depth bound is refused");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    assert!(
+        error.message().contains("nest deeper"),
+        "{}",
+        error.message()
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn nesting_inside_a_skipped_subtree_is_bounded_too() {
+    // A `counts` subtree is skipped wholesale by its own loop, which still
+    // counts the levels it reads.
+    let mut document =
+        String::from("<article xmlns=\"http://jats.nlm.nih.gov/ns/archiving/1.3/\"><body><counts>");
+    document.push_str(&"<x>".repeat(5_000));
+    document.push_str(&"</x>".repeat(5_000));
+    document.push_str("</counts></body></article>");
+    let client = client().await;
+    let error = parse(&client, &document, options())
+        .await
+        .expect_err("nesting past the depth bound is refused");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+}
+
+#[tokio::test]
+async fn a_truncation_error_names_only_the_innermost_open_elements() {
+    let mut document =
+        String::from("<article xmlns=\"http://jats.nlm.nih.gov/ns/archiving/1.3/\"><body>");
+    document.push_str(&"<deeply-nested-element>".repeat(1000));
+    let client = client().await;
+    let error = parse(&client, &document, options())
+        .await
+        .expect_err("a truncated document must not report success");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    assert!(
+        error.message().contains("1002 element(s) still open: .../"),
+        "{}",
+        error.message()
+    );
+    assert!(error.message().len() < 1024, "{}", error.message().len());
+}
+
+#[tokio::test]
 async fn truncation_inside_a_tag_is_also_invalid_argument() {
     let document = "<?xml version=\"1.0\"?>\n<article xmlns=\"http://jats.nlm.nih.gov/ns/archiving/1.3/\"><body><sec><title>Cut here</ti";
     let client = client().await;
@@ -366,6 +423,41 @@ async fn a_document_under_the_cap_parses_and_reports_the_bytes_it_read() {
         "the trailer accounts for every byte the parser was handed"
     );
     assert!(status.counts.as_ref().unwrap().elements_visited > 20);
+}
+
+// ------------------------------------------------------------ cancellation
+
+/// Run the driver directly over `document` with the given stop state.
+fn parse_stopped(document: &str, stats: &grpc_xml::parse::InputStats) -> Result<usize, String> {
+    let mut events = 0usize;
+    let mut emit = |_: pb::ParseXmlResponse| {
+        events += 1;
+        true
+    };
+    grpc_xml::parse::parse(
+        std::io::BufReader::new(document.as_bytes()),
+        &grpc_xml::parse::ParseConfig::default(),
+        stats,
+        &mut emit,
+    )
+    .map(|_| events)
+    .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn a_cancelled_parse_stops_without_reading_on() {
+    let stats = grpc_xml::parse::InputStats::with_limit(1 << 20);
+    stats.cancel();
+    let error = parse_stopped(JATS, &stats).expect_err("a cancelled parse stops");
+    assert_eq!(error, "ConsumerGone");
+}
+
+#[test]
+fn a_parse_past_its_deadline_stops_with_deadline_exceeded() {
+    let mut stats = grpc_xml::parse::InputStats::with_limit(1 << 20);
+    stats.deadline = Some(Instant::now());
+    let error = parse_stopped(JATS, &stats).expect_err("a parse past its deadline stops");
+    assert!(error.starts_with("DeadlineExceeded"), "{error}");
 }
 
 // -------------------------------------------------------- admission control

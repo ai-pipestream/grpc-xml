@@ -126,9 +126,19 @@ event:
 | Condition | Code |
 |---|---|
 | Over the byte cap, or past the concurrency limit | `RESOURCE_EXHAUSTED` |
-| Malformed, truncated, entity-declaring or ambiguous input | `INVALID_ARGUMENT` |
+| Malformed, truncated, entity-declaring, ambiguous, or nested deeper than 1024 elements | `INVALID_ARGUMENT` |
 | A dialect this service does not map | `UNIMPLEMENTED` |
+| The `grpc-timeout` deadline passed, no request message for 30 s, or nothing read for 30 s while 4 MiB of events waited | `DEADLINE_EXCEEDED` |
 | A parser fault | `INTERNAL` |
+
+A stream never ends `OK` without its `status` event. A parse slot is taken
+only once `options` arrives, and the parse notices a cancelled call or a
+passed deadline even in phases that emit nothing (skipping a subtree,
+inflating an archive). Events wait in a queue bounded at 4 MiB of encoded
+bytes rather than a handful of events, so a client that uploads the whole
+document before it reads anything still completes when the events fit; once
+a parse has ended, the rest of the upload is read and discarded so such a
+client always reaches the status.
 
 ## Live stream is the product
 
@@ -270,14 +280,16 @@ permissive shape (see [`src/dialect.rs`](src/dialect.rs)). Point it at a real
 corpus before trusting it.
 
 CALS `namest`/`nameend` column spans are not expanded through `colspec`;
-`colspan`, `rowspan` and `morerows` are. Nested tables are flattened into
+`colspan`, `rowspan` and `morerows` are, clamped to 1000 columns and 65534
+rows as HTML clamps them. The Document fold lays at most 4M spanned grid
+slots per document and lays any span past that as a single slot. Nested tables are flattened into
 the outer table's cell text.
 
 METS-GBS maps text and line geometry: scans are never decoded, but each page
 arrives as a `page` event with its extent in pixels and each OCR line carries
 its `bbox` and `page_no`, which fold into `Document.pages` and a per-item
-`ProvenanceItem`. Word-level `ocrx_word` spans and their own confidences are
-still read past, not emitted.
+`ProvenanceItem`. Word-level `ocrx_word` spans are emitted too, each with its
+own box and its own `x_wconf` confidence.
 
 DCLX images stay in the archive: `assets/` and `pages/` members are never
 inflated, and pictures land as the same placeholder items the plain

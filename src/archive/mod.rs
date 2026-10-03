@@ -154,6 +154,7 @@ fn read_inflated<R: Read>(
     let mut out = Vec::new();
     let mut buf = [0u8; 16 * 1024];
     loop {
+        input.check()?;
         let n = match reader.read(&mut buf) {
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -175,6 +176,50 @@ fn read_inflated<R: Read>(
     }
 }
 
+/// A reader that charges every byte it yields against the inflation budget.
+///
+/// [`read_inflated`] meters one member's body, which leaves out whatever a
+/// container format reads around its members: tar headers, padding, and the
+/// bodies of entries that are not files, which the tar reader skips by
+/// reading them out of the decompressor. Wrapping the decompressor itself
+/// counts all of it, so a gzip of a million headers or of one device entry
+/// declaring gigabytes of zeros spends the same budget as a file would.
+struct Metered<'a, R> {
+    inner: R,
+    budget: u64,
+    input: &'a InputStats,
+}
+
+impl<'a, R> Metered<'a, R> {
+    fn new(inner: R, input: &'a InputStats) -> Self {
+        Self {
+            inner,
+            budget: budget_for(input),
+            input,
+        }
+    }
+}
+
+impl<R: Read> Read for Metered<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.input.check().is_err() {
+            return Err(io::Error::other("grpc-xml: parse stopped"));
+        }
+        let n = self.inner.read(buf)?;
+        let n64 = n as u64;
+        if n64 > self.budget {
+            // Recorded on the shared stats as well as in the message, so the
+            // cap survives whatever wrapping the tar reader gives the error.
+            self.input
+                .capped
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Err(io::Error::other(parse::CAP_MARKER));
+        }
+        self.budget -= n64;
+        Ok(n)
+    }
+}
+
 /// Turn an I/O failure from an archive read into the fleet taxonomy.
 ///
 /// The request-stream reader signals a tripped byte cap through an
@@ -182,6 +227,9 @@ fn read_inflated<R: Read>(
 /// surfaces through a decompressor; everything else at this layer is the
 /// archive's bytes being wrong.
 fn stream_error(error: &io::Error, input: &InputStats) -> ParseError {
+    if let Err(stopped) = input.check() {
+        return stopped;
+    }
     if input.capped.load(std::sync::atomic::Ordering::Relaxed)
         || error.to_string().contains(parse::CAP_MARKER)
     {

@@ -671,6 +671,94 @@ async fn mets_inflation_over_the_cap_is_resource_exhausted() {
     assert!(error.message().contains("byte cap"), "{}", error.message());
 }
 
+/// A gzipped tar of raw entries, each a type, a name and a body.
+fn targz_of_entries(entries: &[(tar::EntryType, &str, &[u8])]) -> Vec<u8> {
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut builder = tar::Builder::new(encoder);
+    for (kind, name, bytes) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(*kind);
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, name, *bytes)
+            .expect("append tar entry");
+    }
+    builder
+        .into_inner()
+        .expect("finish tar")
+        .finish()
+        .expect("finish gzip")
+}
+
+#[tokio::test]
+async fn a_non_file_entry_body_is_charged_against_the_cap() {
+    // A device entry declaring megabytes of zeros: the tar reader skips its
+    // body by reading it out of the decompressor, and those bytes inflate
+    // exactly like a file's.
+    let zeros = vec![0u8; 3 * 1024 * 1024];
+    let archive = targz_of_entries(&[
+        (tar::EntryType::Char, "dev/zero", zeros.as_slice()),
+        (
+            tar::EntryType::Regular,
+            "UOM_39015012345678.mets.xml",
+            GBS_METS.as_bytes(),
+        ),
+    ]);
+    assert!(archive.len() < 1024 * 1024, "{}", archive.len());
+
+    let client = client().await;
+    let error = parse_bytes(
+        &client,
+        &archive,
+        pb::ParseOptions {
+            max_document_mib: 1,
+            ..options()
+        },
+    )
+    .await
+    .expect_err("the skipped body inflates past the cap");
+    assert_eq!(error.code(), Code::ResourceExhausted, "{error}");
+    assert!(error.message().contains("byte cap"), "{}", error.message());
+}
+
+#[tokio::test]
+async fn directory_entries_count_toward_the_member_bound() {
+    let names: Vec<String> = (0..1001).map(|n| format!("d{n}/")).collect();
+    let entries: Vec<(tar::EntryType, &str, &[u8])> = names
+        .iter()
+        .map(|name| (tar::EntryType::Directory, name.as_str(), &b""[..]))
+        .collect();
+    let archive = targz_of_entries(&entries);
+
+    let client = client().await;
+    let error = parse_bytes(&client, &archive, options())
+        .await
+        .expect_err("a member mill made of directories is still a member mill");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    assert!(error.message().contains("members"), "{}", error.message());
+}
+
+#[test]
+fn a_cancelled_archive_parse_stops_while_inflating() {
+    let stats = grpc_xml::parse::InputStats::with_limit(64 << 20);
+    stats.cancel();
+    let archive = gbs_export();
+    let mut emit = |_: pb::ParseXmlResponse| true;
+    let error = grpc_xml::parse::parse(
+        std::io::BufReader::new(archive.as_slice()),
+        &grpc_xml::parse::ParseConfig::default(),
+        &stats,
+        &mut emit,
+    )
+    .expect_err("a cancelled parse stops");
+    assert!(
+        matches!(error, grpc_xml::parse::ParseError::ConsumerGone),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn the_gbs_document_carries_pages_and_per_line_provenance() {
     let client = client().await;

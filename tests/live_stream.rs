@@ -266,3 +266,215 @@ async fn dropping_the_response_stream_stops_the_parse() {
     let events = parse_ok(&client, common::JATS, options()).await;
     assert!(!events.is_empty(), "is empty");
 }
+
+// ------------------------------------------------- half-duplex and timeouts
+
+/// Upload every chunk of `document` without reading a single event, the way
+/// a half-duplex client does, then close the upload.
+///
+/// Send failures are ignored: a server that gives up on the parse may stop
+/// taking the upload, and what the test asserts is how the stream ends.
+async fn upload_everything_first(parse: &LiveParse, document: &str) {
+    for chunk in document.as_bytes().chunks(64 * 1024) {
+        let frame = pb::ParseXmlRequest {
+            payload: Some(pb::parse_xml_request::Payload::Chunk(chunk.to_vec())),
+        };
+        if parse.requests.send(frame).await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Read a stream to its end, returning the events and how it ended.
+async fn drain(
+    events: &mut tonic::Streaming<pb::ParseXmlResponse>,
+) -> (Vec<pb::ParseXmlResponse>, Result<(), tonic::Status>) {
+    let mut seen = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(30), events.message())
+            .await
+            .expect("the stream ended within the test deadline")
+        {
+            Ok(Some(event)) => seen.push(event),
+            Ok(None) => return (seen, Ok(())),
+            Err(status) => return (seen, Err(status)),
+        }
+    }
+}
+
+fn document_options() -> pb::ParseOptions {
+    pb::ParseOptions {
+        emit_document: true,
+        ..options()
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_uploads_everything_before_reading_still_completes() {
+    // A short stall window, so a deadlock fails the test in seconds.
+    let client = common::client_with(
+        grpc_xml::service::XmlGrpc::new().with_consumer_stall(Duration::from_secs(3)),
+    )
+    .await;
+    // Large enough that its events overflow what the transport windows hold
+    // (a queue of a few dozen events stalls on it), small enough that they
+    // fit the default event queue.
+    let document = big_jats(30_000);
+    let parse = LiveParse::start(&client, options()).await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        upload_everything_first(&parse, &document),
+    )
+    .await
+    .expect("the upload completes without the client reading anything");
+    let LiveParse {
+        requests,
+        mut events,
+    } = parse;
+    drop(requests);
+
+    let (seen, ended) = drain(&mut events).await;
+    ended.expect("the parse succeeds");
+    assert_eq!(kind(seen.last().expect("events")), "status");
+    assert_eq!(text_items(&seen).len(), 30_000 + 3);
+}
+
+#[tokio::test]
+async fn a_client_that_stops_reading_gets_an_error_status_not_a_bare_ok() {
+    // A queue far smaller than the events, and a short stall window: the
+    // parse gives up on the client, and the stream must say so with a
+    // status rather than closing as OK with no trailer.
+    let client = common::client_with(
+        grpc_xml::service::XmlGrpc::new()
+            .with_event_queue_bytes(16 * 1024)
+            .with_consumer_stall(Duration::from_secs(1)),
+    )
+    .await;
+    let document = big_jats(60_000);
+    let parse = LiveParse::start(&client, document_options()).await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        upload_everything_first(&parse, &document),
+    )
+    .await
+    .expect("a parse that gave up stops holding the upload");
+    let LiveParse {
+        requests,
+        mut events,
+    } = parse;
+    drop(requests);
+
+    let (seen, ended) = drain(&mut events).await;
+    let status = ended.expect_err("the stream ends with an error status");
+    assert_eq!(status.code(), tonic::Code::DeadlineExceeded, "{status}");
+    assert!(
+        status.message().contains("stopped reading"),
+        "{}",
+        status.message()
+    );
+    assert!(seen.iter().all(|event| kind(event) != "status"));
+}
+
+#[tokio::test]
+async fn a_client_that_goes_quiet_is_timed_out_and_its_slot_freed() {
+    let client = common::client_with(
+        grpc_xml::service::XmlGrpc::new()
+            .with_max_concurrent_parses(1)
+            .with_input_idle_timeout(Duration::from_millis(500)),
+    )
+    .await;
+    let mut parse = LiveParse::start(&client, options()).await;
+    parse.send(&prefix(2)).await;
+    assert_eq!(kind(&parse.next().await), "info");
+    let started = Instant::now();
+    let ended = loop {
+        match parse.try_next().await {
+            Some(Ok(_)) => {}
+            Some(Err(status)) => break status,
+            None => panic!("the stream ended without a status"),
+        }
+    };
+    assert_eq!(ended.code(), tonic::Code::DeadlineExceeded, "{ended}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // The slot is free again while the quiet client still holds its stream.
+    // The status can reach the client a moment before the parse thread has
+    // unwound and returned its slot, so the second parse may retry briefly.
+    let mut attempts = 0;
+    let events = loop {
+        match common::parse(&client, common::JATS, options()).await {
+            Ok(events) => break events,
+            Err(status) if status.code() == tonic::Code::ResourceExhausted && attempts < 20 => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(status) => panic!("the slot was not freed: {status}"),
+        }
+    };
+    assert_eq!(kind(events.last().expect("events")), "status");
+    drop(parse);
+}
+
+#[tokio::test]
+async fn a_stream_that_sends_no_options_holds_no_slot() {
+    let client = common::client_with(
+        grpc_xml::service::XmlGrpc::new()
+            .with_max_concurrent_parses(1)
+            .with_input_idle_timeout(Duration::from_secs(1)),
+    )
+    .await;
+    let (silent_tx, silent_rx) = tokio::sync::mpsc::channel::<pb::ParseXmlRequest>(1);
+    let mut silent_client = client.clone();
+    let silent = tokio::spawn(async move {
+        silent_client
+            .parse_xml(tokio_stream::wrappers::ReceiverStream::new(silent_rx))
+            .await
+    });
+    // Give the silent stream time to reach the server.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let events = parse_ok(&client, common::JATS, options()).await;
+    assert!(!events.is_empty(), "the silent stream took no slot");
+
+    let error = silent
+        .await
+        .expect("join")
+        .expect_err("a stream with no options is timed out");
+    assert_eq!(error.code(), tonic::Code::DeadlineExceeded, "{error}");
+    drop(silent_tx);
+}
+
+#[tokio::test]
+async fn the_callers_deadline_ends_a_parse_waiting_for_input() {
+    let client = client().await;
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(pb::ParseXmlRequest {
+        payload: Some(pb::parse_xml_request::Payload::Options(options())),
+    })
+    .await
+    .expect("send options");
+    tx.send(pb::ParseXmlRequest {
+        payload: Some(pb::parse_xml_request::Payload::Chunk(
+            prefix(2).into_bytes(),
+        )),
+    })
+    .await
+    .expect("send chunk");
+    let mut request = tonic::Request::new(tokio_stream::wrappers::ReceiverStream::new(rx));
+    request.set_timeout(Duration::from_millis(500));
+    let mut client = client.clone();
+    let started = Instant::now();
+    let ended = match client.parse_xml(request).await {
+        Err(status) => status,
+        Ok(response) => {
+            let mut events = response.into_inner();
+            drain(&mut events)
+                .await
+                .1
+                .expect_err("the deadline ends the parse")
+        }
+    };
+    assert_eq!(ended.code(), tonic::Code::DeadlineExceeded, "{ended}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    drop(tx);
+}

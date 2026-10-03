@@ -133,11 +133,14 @@ impl<R: BufRead> Driver<'_, R> {
                 next_column: 0,
             });
         } else if CELL_ELEMENTS.contains(&local) {
+            // Spans are clamped the way HTML clamps them: a span is a claim
+            // about the grid the consumer has to materialize, so a hostile
+            // `colspan="2000000000"` must not become one.
             let column_span = attrs
                 .get("colspan")
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(1)
-                .max(1);
+                .clamp(1, MAX_COLUMN_SPAN);
             // CALS spells a vertical span as `morerows`, counting the extra
             // rows rather than the total.
             let row_span = attrs
@@ -146,10 +149,10 @@ impl<R: BufRead> Driver<'_, R> {
                 .or_else(|| {
                     attrs
                         .get("morerows")
-                        .and_then(|v| v.parse::<u32>().ok().map(|m| m + 1))
+                        .and_then(|v| v.parse::<u32>().ok().map(|m| m.saturating_add(1)))
                 })
                 .unwrap_or(1)
-                .max(1);
+                .clamp(1, MAX_ROW_SPAN);
             let is_header = HEADER_CELL_ELEMENTS.contains(&local) || table.header_sections > 0;
             let column_index = table.row.as_ref().map_or(0, |r| r.next_column);
             table.cell = Some(Cell {
@@ -254,7 +257,7 @@ impl<R: BufRead> Driver<'_, R> {
             debug_assert_eq!(text, collapse(&cell.text));
             let spans = Self::finish_spans(cell.spans, &text, &positions);
             if let Some(row) = table.row.as_mut() {
-                row.next_column = cell.column_index + cell.column_span;
+                row.next_column = cell.column_index.saturating_add(cell.column_span);
                 row.cells.push(pb::TableCell {
                     column_index: cell.column_index,
                     text,
@@ -288,7 +291,7 @@ impl<R: BufRead> Driver<'_, R> {
             let width = row
                 .cells
                 .iter()
-                .map(|c| c.column_index + c.column_span)
+                .map(|c| c.column_index.saturating_add(c.column_span))
                 .max()
                 .unwrap_or(0);
             table.column_count = table.column_count.max(width);
@@ -322,6 +325,13 @@ impl<R: BufRead> Driver<'_, R> {
 /// An XHTML `col span="4000000000"` is one attribute asking for unbounded
 /// memory; a real table's column count is orders of magnitude below this.
 const MAX_COLUMN_SPECS: usize = 4096;
+
+/// Largest `colspan` honoured, the clamp the HTML table model applies.
+const MAX_COLUMN_SPAN: u32 = 1000;
+
+/// Largest `rowspan` (or CALS `morerows` + 1) honoured, the clamp the HTML
+/// table model applies.
+const MAX_ROW_SPAN: u32 = 65534;
 
 /// One `colspec` or `col` element as the geometry it declares.
 ///

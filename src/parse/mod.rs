@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use quick_xml::events::attributes::Attribute as XmlAttribute;
 use quick_xml::reader::NsReader;
@@ -58,6 +59,17 @@ pub(crate) const MAX_WARNING_KINDS: usize = 64;
 /// item. Real prose is orders of magnitude below this; past it the driver
 /// keeps flattening and stops recording.
 pub(crate) const MAX_INLINE_SPANS: usize = 512;
+
+/// Deepest element nesting a document may have.
+///
+/// Every open element costs a frame, and a run of `<x>` start tags is three
+/// bytes a level, so without a bound the open-element stack is the cheapest
+/// memory amplifier in the parser. Real documents nest tens of levels; this
+/// is four times the 256 levels libxml2 accepts by default.
+pub(crate) const MAX_DEPTH: usize = 1024;
+
+/// How many of the innermost open elements a truncation error names.
+pub(crate) const MAX_OPEN_ELEMENTS_SHOWN: usize = 16;
 
 /// Consumer of parse events; returns `false` when the client is gone and the
 /// parse should stop.
@@ -102,6 +114,10 @@ pub struct InputStats {
     pub capped: Arc<AtomicBool>,
     /// The cap that was in force, in bytes.
     pub limit_bytes: u64,
+    /// Set when the client went away, so work nobody will read stops.
+    pub cancelled: Arc<AtomicBool>,
+    /// When the caller's deadline passes, if it stated one.
+    pub deadline: Option<Instant>,
 }
 
 impl InputStats {
@@ -112,6 +128,8 @@ impl InputStats {
             consumed: Arc::new(AtomicU64::new(0)),
             capped: Arc::new(AtomicBool::new(false)),
             limit_bytes,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: None,
         }
     }
 
@@ -119,6 +137,36 @@ impl InputStats {
     #[must_use]
     pub fn bytes(&self) -> u64 {
         self.consumed.load(Ordering::Relaxed)
+    }
+
+    /// Tell the parse its client is gone.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Why the parse must stop now, if it must.
+    ///
+    /// The phases that never emit an event (skipping a subtree, inflating an
+    /// archive, walking a manifest) call this as they go, because nothing
+    /// else would tell them the client left or the deadline passed.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::ConsumerGone`] once the client is gone, and
+    /// [`ParseError::DeadlineExceeded`] once the stated deadline has passed.
+    pub fn check(&self) -> Result<(), ParseError> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(ParseError::ConsumerGone);
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(ParseError::DeadlineExceeded(
+                "the request deadline passed before the parse finished".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -148,6 +196,9 @@ pub enum ParseError {
     /// The input stream failed for a reason that is not the caller's fault.
     /// `INTERNAL`.
     Io(String),
+    /// The caller's deadline passed, or the client went quiet for longer than
+    /// the server waits. `DEADLINE_EXCEEDED`.
+    DeadlineExceeded(String),
     /// The client stopped reading. No status is sent.
     ConsumerGone,
 }
@@ -158,7 +209,7 @@ impl std::fmt::Display for ParseError {
             Self::Malformed(m) => write!(f, "malformed XML: {m}"),
             Self::Truncated(m) => write!(f, "truncated XML: {m}"),
             Self::Refused(m) => write!(f, "refused: {m}"),
-            Self::Ambiguous(m) | Self::Unsupported(m) => f.write_str(m),
+            Self::Ambiguous(m) | Self::Unsupported(m) | Self::DeadlineExceeded(m) => f.write_str(m),
             Self::TooLarge { limit_bytes } => {
                 write!(
                     f,
@@ -236,6 +287,7 @@ fn peek_bytes<R: BufRead>(
             Ok(n) => filled += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
+                input.check()?;
                 if input.capped.load(Ordering::Relaxed) || e.to_string().contains(CAP_MARKER) {
                     return Err(ParseError::TooLarge {
                         limit_bytes: input.limit_bytes,
@@ -286,6 +338,7 @@ pub(crate) fn parse_xml<R: BufRead>(
         counts: pb::ParseCounts::default(),
         warnings: BTreeMap::new(),
         stack: Vec::new(),
+        open_elements: 0,
         event_start: 0,
         capture: None,
         table: None,
@@ -312,6 +365,16 @@ struct Frame {
     /// a list item its nesting depth, and the innermost one says whether its
     /// list is numbered.
     list: Option<bool>,
+}
+
+impl dialect::Ancestors for Vec<Frame> {
+    fn innermost(&self) -> Option<&str> {
+        self.last().map(|frame| frame.local.as_str())
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.iter().any(|frame| frame.local == name)
+    }
 }
 
 /// A text capture in progress.
@@ -449,6 +512,8 @@ struct Driver<'a, R: BufRead> {
     counts: pb::ParseCounts,
     warnings: BTreeMap<(i32, String), u64>,
     stack: Vec<Frame>,
+    /// Start tags read and not yet closed, whichever loop read them.
+    open_elements: usize,
     /// Offset of the first byte of the event [`Driver::next_step`] most
     /// recently read. The reader reports where it has got *to*, so the
     /// position is taken before the read to get where an event starts.
@@ -471,6 +536,9 @@ pub const CAP_MARKER: &str = "grpc-xml: document byte cap exceeded";
 
 /// Turn a quick-xml failure into the fleet's error taxonomy.
 fn convert_error(error: &quick_xml::Error, input: &InputStats) -> ParseError {
+    if let Err(stopped) = input.check() {
+        return stopped;
+    }
     if input.capped.load(Ordering::Relaxed) {
         return ParseError::TooLarge {
             limit_bytes: input.limit_bytes,

@@ -13,9 +13,9 @@ use quick_xml::events::{BytesText, Event};
 use quick_xml::name::ResolveResult;
 
 use super::{
-    Capture, Frame, ListPlacement, MAX_INLINE_SPANS, MAX_WARNING_KINDS, ParseError, PendingCaption,
-    SpanBuild, Step, attribute_value, collapse, collapse_positions, collapsed_range, convert_error,
-    resolve_reference,
+    Capture, Frame, ListPlacement, MAX_DEPTH, MAX_INLINE_SPANS, MAX_OPEN_ELEMENTS_SHOWN,
+    MAX_WARNING_KINDS, ParseError, PendingCaption, SpanBuild, Step, attribute_value, collapse,
+    collapse_positions, collapsed_range, convert_error, resolve_reference,
 };
 use crate::dialect::{self, Action, Attrs, ElementCtx};
 use crate::proto::v1 as pb;
@@ -194,14 +194,18 @@ impl<R: BufRead> Driver<'_, R> {
                 Step::ProcessingInstruction(target) => self.warn_processing_instruction(&target),
                 Step::Ignorable => {}
                 Step::Eof => {
-                    let open = self
-                        .stack
+                    // The innermost few name the place the input stopped;
+                    // listing every open element would put an unbounded
+                    // string into the status message.
+                    let shown = self.stack.len().min(MAX_OPEN_ELEMENTS_SHOWN);
+                    let elided = if shown < self.stack.len() { ".../" } else { "" };
+                    let open = self.stack[self.stack.len() - shown..]
                         .iter()
                         .map(|f| f.qname.as_str())
                         .collect::<Vec<_>>()
                         .join("/");
                     return Err(ParseError::Truncated(format!(
-                        "input ended with {} element(s) still open: {open}",
+                        "input ended with {} element(s) still open: {elided}{open}",
                         self.stack.len()
                     )));
                 }
@@ -255,11 +259,10 @@ impl<R: BufRead> Driver<'_, R> {
             return Ok(());
         }
 
-        let ancestors: Vec<String> = self.stack.iter().map(|f| f.local.clone()).collect();
         let ctx = ElementCtx {
             namespace,
             local,
-            ancestors: &ancestors,
+            ancestors: &self.stack,
             attrs,
         };
         match dialect::action(self.dialect, &ctx) {
@@ -528,11 +531,10 @@ impl<R: BufRead> Driver<'_, R> {
         attrs: &Attrs,
         start: usize,
     ) -> Option<SpanBuild> {
-        let ancestors: Vec<String> = self.stack.iter().map(|f| f.local.clone()).collect();
         let ctx = ElementCtx {
             namespace,
             local,
-            ancestors: &ancestors,
+            ancestors: &self.stack,
             attrs,
         };
         let inline = dialect::inline(self.dialect, &ctx)?;
@@ -744,6 +746,7 @@ impl<R: BufRead> Driver<'_, R> {
 
     /// Read one XML event and copy it into owned data.
     pub(super) fn next_step(&mut self) -> Result<Step, ParseError> {
+        self.input.check()?;
         self.buf.clear();
         // Where this event begins. The reader reports where it has read to,
         // so the offset of a start tag is the position before the read, and
@@ -755,6 +758,12 @@ impl<R: BufRead> Driver<'_, R> {
             .map_err(|e| convert_error(&e, self.input))?;
         let step = match event {
             Event::Start(start) => {
+                if self.open_elements >= MAX_DEPTH {
+                    return Err(ParseError::Refused(format!(
+                        "elements nest deeper than {MAX_DEPTH} levels"
+                    )));
+                }
+                self.open_elements += 1;
                 let qname = start.name().as_ref().to_owned();
                 let local = start.local_name().as_ref().to_owned();
                 let namespace = match resolved {
@@ -778,7 +787,10 @@ impl<R: BufRead> Driver<'_, R> {
             // `expand_empty_elements` turns `<a/>` into Start + End, so an
             // Empty event never reaches here.
             Event::Empty(_) => unreachable!("empty elements are expanded"),
-            Event::End(_) => Step::End,
+            Event::End(_) => {
+                self.open_elements = self.open_elements.saturating_sub(1);
+                Step::End
+            }
             Event::Text(text) => Step::Text(text.xml10_content().into_owned()),
             Event::CData(cdata) => Step::CData(cdata.into_inner().into_owned()),
             Event::GeneralRef(reference) => {
