@@ -210,6 +210,63 @@ async fn a_truncated_document_is_invalid_argument_not_a_short_success() {
 }
 
 #[tokio::test]
+async fn deep_nesting_is_refused_quickly_instead_of_growing_the_stack() {
+    // 200k levels of an unmapped element: three bytes a level, and every
+    // level used to copy every ancestor name.
+    let mut document =
+        String::from("<article xmlns=\"http://jats.nlm.nih.gov/ns/archiving/1.3/\"><body>");
+    document.push_str(&"<x>".repeat(200_000));
+    document.push_str(&"</x>".repeat(200_000));
+    document.push_str("</body></article>");
+    let client = client().await;
+    let started = Instant::now();
+    let error = parse(&client, &document, options())
+        .await
+        .expect_err("nesting past the depth bound is refused");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    assert!(
+        error.message().contains("nest deeper"),
+        "{}",
+        error.message()
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn nesting_inside_a_skipped_subtree_is_bounded_too() {
+    // A `counts` subtree is skipped wholesale by its own loop, which still
+    // counts the levels it reads.
+    let mut document =
+        String::from("<article xmlns=\"http://jats.nlm.nih.gov/ns/archiving/1.3/\"><body><counts>");
+    document.push_str(&"<x>".repeat(5_000));
+    document.push_str(&"</x>".repeat(5_000));
+    document.push_str("</counts></body></article>");
+    let client = client().await;
+    let error = parse(&client, &document, options())
+        .await
+        .expect_err("nesting past the depth bound is refused");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+}
+
+#[tokio::test]
+async fn a_truncation_error_names_only_the_innermost_open_elements() {
+    let mut document =
+        String::from("<article xmlns=\"http://jats.nlm.nih.gov/ns/archiving/1.3/\"><body>");
+    document.push_str(&"<deeply-nested-element>".repeat(1000));
+    let client = client().await;
+    let error = parse(&client, &document, options())
+        .await
+        .expect_err("a truncated document must not report success");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+    assert!(
+        error.message().contains("1002 element(s) still open: .../"),
+        "{}",
+        error.message()
+    );
+    assert!(error.message().len() < 1024, "{}", error.message().len());
+}
+
+#[tokio::test]
 async fn truncation_inside_a_tag_is_also_invalid_argument() {
     let document = "<?xml version=\"1.0\"?>\n<article xmlns=\"http://jats.nlm.nih.gov/ns/archiving/1.3/\"><body><sec><title>Cut here</ti";
     let client = client().await;

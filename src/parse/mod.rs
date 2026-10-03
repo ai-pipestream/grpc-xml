@@ -59,6 +59,17 @@ pub(crate) const MAX_WARNING_KINDS: usize = 64;
 /// keeps flattening and stops recording.
 pub(crate) const MAX_INLINE_SPANS: usize = 512;
 
+/// Deepest element nesting a document may have.
+///
+/// Every open element costs a frame, and a run of `<x>` start tags is three
+/// bytes a level, so without a bound the open-element stack is the cheapest
+/// memory amplifier in the parser. Real documents nest tens of levels; this
+/// is four times the 256 levels libxml2 accepts by default.
+pub(crate) const MAX_DEPTH: usize = 1024;
+
+/// How many of the innermost open elements a truncation error names.
+pub(crate) const MAX_OPEN_ELEMENTS_SHOWN: usize = 16;
+
 /// Consumer of parse events; returns `false` when the client is gone and the
 /// parse should stop.
 pub type EmitFn<'a> = &'a mut dyn FnMut(pb::ParseXmlResponse) -> bool;
@@ -286,6 +297,7 @@ pub(crate) fn parse_xml<R: BufRead>(
         counts: pb::ParseCounts::default(),
         warnings: BTreeMap::new(),
         stack: Vec::new(),
+        open_elements: 0,
         event_start: 0,
         capture: None,
         table: None,
@@ -312,6 +324,16 @@ struct Frame {
     /// a list item its nesting depth, and the innermost one says whether its
     /// list is numbered.
     list: Option<bool>,
+}
+
+impl dialect::Ancestors for Vec<Frame> {
+    fn innermost(&self) -> Option<&str> {
+        self.last().map(|frame| frame.local.as_str())
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.iter().any(|frame| frame.local == name)
+    }
 }
 
 /// A text capture in progress.
@@ -449,6 +471,8 @@ struct Driver<'a, R: BufRead> {
     counts: pb::ParseCounts,
     warnings: BTreeMap<(i32, String), u64>,
     stack: Vec<Frame>,
+    /// Start tags read and not yet closed, whichever loop read them.
+    open_elements: usize,
     /// Offset of the first byte of the event [`Driver::next_step`] most
     /// recently read. The reader reports where it has got *to*, so the
     /// position is taken before the read to get where an event starts.

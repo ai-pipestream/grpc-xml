@@ -335,8 +335,8 @@ pub struct ElementCtx<'a> {
     pub namespace: &'a str,
     /// Element local name.
     pub local: &'a str,
-    /// Local names of the ancestors, root first, excluding this element.
-    pub ancestors: &'a [String],
+    /// The open ancestors, excluding this element.
+    pub ancestors: &'a dyn Ancestors,
     /// Attributes of this start tag.
     pub attrs: &'a Attrs,
 }
@@ -345,13 +345,35 @@ impl ElementCtx<'_> {
     /// Local name of the immediate parent, or empty at the root.
     #[must_use]
     pub fn parent(&self) -> &str {
-        self.ancestors.last().map_or("", String::as_str)
+        self.ancestors.innermost().unwrap_or("")
     }
 
     /// True when any ancestor has this local name.
     #[must_use]
     pub fn inside(&self, name: &str) -> bool {
-        self.ancestors.iter().any(|a| a == name)
+        self.ancestors.contains(name)
+    }
+}
+
+/// The local names of an element's open ancestors, root first.
+///
+/// A trait rather than a slice of names so the driver can lend its
+/// open-element stack as it stands: copying every ancestor name for every
+/// start tag made a deeply nested document quadratic.
+pub trait Ancestors {
+    /// Local name of the innermost ancestor, or `None` at the root.
+    fn innermost(&self) -> Option<&str>;
+    /// True when any ancestor has this local name.
+    fn contains(&self, name: &str) -> bool;
+}
+
+impl Ancestors for Vec<String> {
+    fn innermost(&self) -> Option<&str> {
+        self.last().map(String::as_str)
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.iter().any(|a| a == name)
     }
 }
 
@@ -700,7 +722,7 @@ pub fn label_from_raw(raw: &str) -> Option<pb::XmlItemLabel> {
 mod tests {
     use super::*;
 
-    fn ctx<'a>(local: &'a str, ancestors: &'a [String], attrs: &'a Attrs) -> ElementCtx<'a> {
+    fn ctx<'a>(local: &'a str, ancestors: &'a Vec<String>, attrs: &'a Attrs) -> ElementCtx<'a> {
         ElementCtx {
             namespace: "",
             local,
