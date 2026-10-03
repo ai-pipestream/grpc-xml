@@ -472,7 +472,7 @@ fn a_heading_ladder_pops_on_a_shallower_heading_and_on_a_sibling() {
     fold.consume(&heading(1, "two"));
     fold.consume(&paragraph("back at the top"));
     let document = fold.take();
-    assert!(integrity_errors(&document).is_empty());
+    assert_eq!(integrity_errors(&document), Vec::<String>::new());
 
     assert_parented(&document, "before any heading", "#/body");
     assert_parented(&document, "one", "#/body");
@@ -651,9 +651,13 @@ fn a_picture_with_no_reference_carries_no_href() {
     let mut fold = DocumentFold::new();
     fold.consume(&event);
     let document = fold.take();
-    assert!(integrity_errors(&document).is_empty());
+    assert_eq!(integrity_errors(&document), Vec::<String>::new());
     assert_eq!(document.pictures.len(), 1);
-    assert!(document.pictures[0].captions.is_empty());
+    assert!(
+        document.pictures[0].captions.is_empty(),
+        "{:?}",
+        document.pictures[0].captions
+    );
     let fields = &document.pictures[0]
         .meta
         .as_ref()
@@ -1141,7 +1145,7 @@ fn the_island_placeholder_holds_the_markup_and_the_words_it_carries() {
     assert_eq!(collector(&item.source).model.as_deref(), Some("jats"));
 
     // Still merge-safe with the extra item in it.
-    assert!(integrity_errors(&document).is_empty());
+    assert_eq!(integrity_errors(&document), Vec::<String>::new());
 }
 
 #[test]
@@ -1160,7 +1164,11 @@ fn the_checker_catches_an_attachment_pointing_at_nothing() {
 #[test]
 fn a_document_with_no_islands_registers_no_attachment() {
     let (_, document) = fold_default(JATS);
-    assert!(document.attachments.is_empty());
+    assert!(
+        document.attachments.is_empty(),
+        "{:?}",
+        document.attachments
+    );
     assert!(
         document.groups.is_empty(),
         "and mints no placeholder for one that was never there"
@@ -1207,7 +1215,7 @@ fn spanning_cells_take_their_grid_position_from_the_spans_before_them() {
     fold.consume(&row(vec![cell("a", 1, 1), cell("b", 1, 1)], false));
     fold.consume(&end);
     let document = fold.take();
-    assert!(integrity_errors(&document).is_empty());
+    assert_eq!(integrity_errors(&document), Vec::<String>::new());
 
     let data = document.tables[0].data.as_ref().expect("table data");
     assert_eq!((data.num_rows, data.num_cols), (2, 3));
@@ -1282,7 +1290,7 @@ async fn the_document_event_is_sent_once_and_immediately_before_the_trailer() {
     );
 
     let document = documents[0];
-    assert!(integrity_errors(document).is_empty());
+    assert_eq!(integrity_errors(document), Vec::<String>::new());
     assert_eq!(document.name, "Streaming XML Without a DOM");
     assert_eq!(document.tables.len(), 1);
     // The projection is of these events, not of a second parse.
@@ -1466,9 +1474,9 @@ fn every_source_identifier_becomes_an_anchor_at_a_real_item() {
         .chain(document.pictures.iter().map(|p| p.self_ref.clone()))
         .chain(document.tables.iter().map(|t| t.self_ref.clone()))
         .collect();
-    assert!(!document.anchors.is_empty());
+    assert!(!document.anchors.is_empty(), "is empty");
     for anchor in &document.anchors {
-        assert!(!anchor.name.is_empty());
+        assert!(!anchor.name.is_empty(), "is empty");
         let target = anchor.target.as_ref().expect("an anchor points somewhere");
         assert!(
             refs.contains(&target.r#ref),

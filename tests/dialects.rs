@@ -98,7 +98,7 @@ async fn jats_items_carry_provenance_and_a_positional_path() {
     let client = client().await;
     let events = parse_ok(&client, JATS, options()).await;
     let items = text_items(&events);
-    assert!(!items.is_empty());
+    assert!(!items.is_empty(), "is empty");
     for item in &items {
         let source = item.source.as_ref().expect("every item is attributed");
         assert_eq!(source.collector, "xml");
@@ -257,7 +257,7 @@ async fn jats_link_and_citation_runs_survive_the_flattening() {
         Some("https://example.org/spec"),
         "the xlink:href of an ext-link is the whole point"
     );
-    assert!(link.references.is_empty());
+    assert!(link.references.is_empty(), "{:?}", link.references);
 }
 
 #[tokio::test]
@@ -470,7 +470,7 @@ async fn jats_dates_licences_and_funding_are_decoded_rather_than_dropped() {
     let client = client().await;
     let events = parse_ok(&client, JATS, with_metadata()).await;
     let items = common::meta_items(&events);
-    assert!(!items.is_empty());
+    assert!(!items.is_empty(), "is empty");
 
     let dates: Vec<&pb::MetaDate> = items
         .iter()
@@ -757,7 +757,7 @@ async fn xbrl_carries_dimensions_divide_units_and_nil_facts() {
     );
     assert_eq!(per_share.value, "");
     let unit = per_share.unit.as_ref().expect("divide unit resolved");
-    assert!(unit.measures.is_empty());
+    assert!(unit.measures.is_empty(), "{:?}", unit.measures);
     assert_eq!(unit.numerator_measures, ["iso4217:USD"]);
     assert_eq!(unit.denominator_measures, ["xbrli:shares"]);
 }
@@ -1011,7 +1011,11 @@ async fn a_table_cell_keeps_the_markup_inside_it_as_runs() {
     );
 
     // A cell with no markup says nothing extra about itself.
-    assert!(rows[1].cells[1].spans.is_empty());
+    assert!(
+        rows[1].cells[1].spans.is_empty(),
+        "{:?}",
+        rows[1].cells[1].spans
+    );
 }
 
 #[tokio::test]

@@ -228,7 +228,7 @@ async fn stream_indexes_are_dense_and_ascending_across_event_kinds() {
             _ => {}
         }
     }
-    assert!(!indexes.is_empty());
+    assert!(!indexes.is_empty(), "is empty");
     assert_eq!(
         indexes,
         (0..indexes.len() as u64).collect::<Vec<_>>(),
@@ -264,5 +264,5 @@ async fn dropping_the_response_stream_stops_the_parse() {
     // Nothing to assert beyond "the server is still healthy": a leaked parse
     // shows up as the next request being refused for want of a slot.
     let events = parse_ok(&client, common::JATS, options()).await;
-    assert!(!events.is_empty());
+    assert!(!events.is_empty(), "is empty");
 }
