@@ -98,6 +98,7 @@ sequenceDiagram
 | `emit_inline_spans` | Report the inline markup inside captured elements as `TextItem.spans`: emphasis, hyperlinks, cross-references. The flat `text` is unchanged |
 | `emit_source_metadata` | Decode the structured metadata subtrees the item mapping skips (dates, licences, funding, classification codes, cited references) as `meta_item` events |
 | `emit_document` | Also fold the parse into one `ai.pipestream.document.v1.Document`, sent just before the trailer (see below) |
+| `repair_unescaped_text` | Repair text a generator forgot to escape instead of refusing the document: a bare `&` and a `<` that cannot start markup are read as text, and control characters XML 1.0 forbids are dropped. CDATA sections, comments and markup are never touched, the security policy below is unchanged, and every repair is counted on the trailer as `WARNING_CODE_TEXT_REPAIRED`. Off by default |
 
 **Response.** Exactly one `info` first, content events in document order,
 exactly one `status` last.
@@ -170,6 +171,7 @@ never edited here.
 |---|---|
 | `info` | `name` (the title), `origin.mimetype = application/xml`, and `xml.dialect` / `xml.root_namespace` / `xml.root_local_name` on the body meta |
 | `text_item` | A `BaseTextItem` variant chosen by label: `TitleItem`, `SectionHeaderItem`, `ListItem`, `CodeItem`, `FormulaItem`, else `TextItem`, with `text` and `orig` set |
+| `text_item` labelled `PAGE_HEADER` / `PAGE_FOOTER` | A `TextItem` under `#/furniture`, in the furniture content layer, so page chrome never reads as body text |
 | `text_item` labelled `PICTURE` | A placeholder `PictureItem` with `image` unset and no captions; the reference the parser lifted from the markup (`xlink:href`, drawing `file`, DocLang `uri`) lands in `meta.custom_fields["xml.href"]` |
 | `table_start` / `table_row` / `table_end` | One `TableItem`: both `grid` and flat `table_cells`, offsets computed honoring spans, the caption created as a `CAPTION` item and referenced |
 | `fact` | One row of a single lazily created "facts" table: concept, context, period, unit, value, decimals |
@@ -214,6 +216,13 @@ is the whole policy:
   XXE payload it is; a bare relative DTD filename (what real USPTO grants
   carry, and what the dialect sniff reads) is recorded on `XmlInfo`,
   reported as a warning, and never opened.
+- **Repair is opt-in and never structural.** With `repair_unescaped_text`
+  set, a filter in front of the parser only ever turns would-be markup into
+  text (a stray `<` becomes `&lt;`, a forbidden control character is
+  dropped) and quick-xml reads a bare `&` as text; it cannot write a tag, a
+  declaration or a reference, so every refusal above still fires, and the
+  byte cap counts the bytes uploaded rather than the repaired stream. See
+  [`src/parse/repair.rs`](src/parse/repair.rs).
 - **No disk.** Document bytes go from the request stream into an in-memory
   channel and straight into the pull parser. The image runs `--read-only`
   with no tmpfs.
@@ -254,7 +263,7 @@ wanted.
 | JATS | `http://jats.nlm.nih.gov*` namespace, `//NLM//` or JATS public id, root `article` | title, contributors, affiliations, abstract, keywords, nested sections, paragraphs, lists, formulas, figures, captioned tables, references |
 | USPTO | `//USPTO//` public id, ST.96 namespace, root `us-patent-grant` / `us-patent-application` / `patent-document` | title, inventors, assignees, document and application numbers, abstract, headings, description, drawing descriptions, numbered claims, drawing references, CALS tables |
 | XBRL | `http://www.xbrl.org/2003/instance` namespace, root `xbrl` | contexts (entity, period, segment/scenario dimensions), units (simple and divide), facts with `contextRef` / `unitRef` resolved inline, `decimals`, `precision`, `sign`, `xsi:nil`, `@id`, plus the footnote and label linkbases inside the instance |
-| DocLang | the `NS_DOCLANG` namespace URI (defined in `src/sniff.rs`), root `doclang`; an alternate root name is also accepted | typed decode of label-named elements and of a generic `item` carrying a `DocItemLabel` short name |
+| DocLang | the `NS_DOCLANG` namespace URI (defined in `src/sniff.rs`), root `doclang`; an alternate root name is also accepted | typed decode of label-named elements and of a generic `item` carrying a `DocItemLabel` short name, including the `text`, `heading`, `footnote` and `page_header` / `page_footer` element names and the `superscript` / `subscript` / `strikethrough` runs |
 | DCLX | ZIP magic `PK\x03\x04` | the archive's root `document.xml` member, mapped exactly as DocLang; `assets/` and `pages/` images stay compressed and undecoded |
 | METS_GBS | gzip magic `\x1f\x8b`, then a tar holding a METS manifest with `PROFILE="gbs"` | pages in manifest (`div TYPE="page" ORDER`) order, one `TextItem` with `role = "ocr-line"` per hOCR `ocr_line` span of each page's `coordOCR` file, `x_wconf` as the item's source confidence; scans and plain OCR text are counted, warned about and never decoded |
 
@@ -277,7 +286,15 @@ is what design.md requires.
 The DocLang schema here is inferred: the serialization is not pinned by a
 published DTD this repo can point at, so the mapper accepts a documented,
 permissive shape (see [`src/dialect.rs`](src/dialect.rs)). Point it at a real
-corpus before trusting it.
+corpus before trusting it. Checked against the reference serializer's
+element vocabulary ([`tests/doclang_vocabulary.rs`](tests/doclang_vocabulary.rs)),
+these parts of that serialization are not mapped yet: `<location>` boxes and
+`<page_break>` (so a plain DocLang item has no provenance), an explicit
+`<layer>` on items other than page chrome, lists written as `<ldiv/>`
+markers between item bodies (their text is dropped with an
+`UNMAPPED_ELEMENT` warning), OTSL tables (`fcel` / `nl` cells), and field
+regions outside a captured item. An element with no text is no item at all,
+where the reference serializer keeps an empty item to hold its box.
 
 CALS `namest`/`nameend` column spans are not expanded through `colspec`;
 `colspan`, `rowspan` and `morerows` are, clamped to 1000 columns and 65534

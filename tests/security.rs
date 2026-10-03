@@ -129,6 +129,99 @@ async fn an_undeclared_entity_reference_is_preserved_and_never_expanded() {
     assert!(warned(&events, pb::WarningCode::UnexpandedEntity));
 }
 
+// ------------------------------------------------------ opt-in text repair
+
+/// Default options plus `repair_unescaped_text`.
+fn repairing() -> pb::ParseOptions {
+    pb::ParseOptions {
+        repair_unescaped_text: true,
+        ..options()
+    }
+}
+
+#[tokio::test]
+async fn text_repair_opens_no_door_the_policy_closes() {
+    // The repair only ever turns would-be markup into text, so every hostile
+    // document the strict parse refuses is refused with it on, for the same
+    // reason.
+    let client = client().await;
+    for document in [
+        billion_laughs(),
+        quadratic_blowup(),
+        XXE_SYSTEM_DOCTYPE.to_owned(),
+        XXE_ENTITY.to_owned(),
+        XXE_HTTP.to_owned(),
+    ] {
+        let started = Instant::now();
+        let error = parse(&client, &document, repairing())
+            .await
+            .expect_err("repair must not make a hostile document parse");
+        assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+}
+
+#[tokio::test]
+async fn text_repair_keeps_an_undeclared_reference_verbatim_rather_than_escaping_it() {
+    // `&mystery;` is a reference, not a bare `&`: repair leaves it to the
+    // policy, which preserves it and says so, and it is not counted as a
+    // repair.
+    let document = r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <body><sec><title>T</title><p>before &mystery; after &amp; done &#65; & so</p></sec></body>
+</article>"#;
+    let client = client().await;
+    let events = parse(&client, document, repairing()).await.expect("parses");
+    let paragraph = text_items(&events)
+        .into_iter()
+        .find(|i| i.label == pb::XmlItemLabel::Paragraph as i32)
+        .expect("the paragraph");
+    assert_eq!(paragraph.text, "before &mystery; after & done A & so");
+    assert!(warned(&events, pb::WarningCode::UnexpandedEntity));
+    let repaired: Vec<u64> = status(&events)
+        .warnings
+        .iter()
+        .filter(|w| w.code == pb::WarningCode::TextRepaired as i32)
+        .map(|w| w.count)
+        .collect();
+    assert_eq!(repaired, [1], "only the bare `&` was a repair");
+}
+
+#[tokio::test]
+async fn text_repair_never_repairs_structure() {
+    let document = r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <body><sec><title>T</title><p>text</sec></p></body>
+</article>"#;
+    let client = client().await;
+    let error = parse(&client, document, repairing())
+        .await
+        .expect_err("mismatched nesting must not parse, repair or not");
+    assert_eq!(error.code(), Code::InvalidArgument, "{error}");
+}
+
+#[tokio::test]
+async fn the_byte_cap_counts_the_upload_not_the_repaired_stream() {
+    // Every `<` here becomes `&lt;`, four bytes for one. The cap still trips
+    // on the bytes the caller sent, so the growth is bounded by it.
+    let mut document = String::from("<doclang version=\"0.7\"><text>");
+    while document.len() <= 1024 * 1024 + 1 {
+        document.push_str("p <0.05 ");
+    }
+    document.push_str("</text></doclang>");
+    let error = parse(
+        &client().await,
+        &document,
+        pb::ParseOptions {
+            max_document_mib: 1,
+            ..repairing()
+        },
+    )
+    .await
+    .expect_err("a document over the cap must not parse");
+    assert_eq!(error.code(), Code::ResourceExhausted, "{error}");
+}
+
 // -------------------------------------------------------------------- XXE
 
 #[tokio::test]

@@ -478,3 +478,52 @@ async fn the_callers_deadline_ends_a_parse_waiting_for_input() {
     assert!(started.elapsed() < Duration::from_secs(10));
     drop(tx);
 }
+
+/// The repair filter for unescaped text sits between the upload and the
+/// parser, so it is exactly where a buffering mistake would hide. It holds
+/// back at most the byte after a `<`; the items before the withheld rest of
+/// the document must already be on the wire.
+#[tokio::test]
+async fn repaired_text_still_streams_before_the_upload_finishes() {
+    let client = client().await;
+    let mut parse = LiveParse::start(
+        &client,
+        pb::ParseOptions {
+            repair_unescaped_text: true,
+            ..options()
+        },
+    )
+    .await;
+    let mut head = String::from("<doclang version=\"0.7\">\n");
+    for n in 0..4 {
+        let _ = writeln!(head, "<text>Run {n}: p <0.05 & R&D</text>");
+    }
+    parse.send(&head).await;
+
+    assert_eq!(kind(&parse.next().await), "info");
+    let first = parse.next().await;
+    let Some(pb::parse_xml_response::Event::TextItem(item)) = first.event else {
+        panic!("expected a text item, got {}", kind(&first));
+    };
+    assert_eq!(item.text, "Run 0: p <0.05 & R&D");
+
+    parse.send("<text>last</text>\n</doclang>\n").await;
+    let LiveParse {
+        requests,
+        mut events,
+    } = parse;
+    drop(requests);
+    let mut rest = Vec::new();
+    while let Some(event) = events.message().await.expect("stream error") {
+        rest.push(event);
+    }
+    let status = status(&rest);
+    assert!(
+        status
+            .warnings
+            .iter()
+            .any(|w| w.code == pb::WarningCode::TextRepaired as i32 && w.count == 12),
+        "{:?}",
+        status.warnings
+    );
+}

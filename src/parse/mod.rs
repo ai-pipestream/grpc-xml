@@ -33,6 +33,7 @@ mod driver;
 mod encoding;
 mod island;
 mod meta;
+mod repair;
 mod table;
 mod xbrl;
 
@@ -40,6 +41,7 @@ pub(crate) use driver::{namespace_bindings, root_attributes, schema_locations};
 pub(crate) use encoding::decoding_reader;
 
 use island::Island;
+use repair::{RepairReader, RepairTally};
 use table::Table;
 use xbrl::PendingFact;
 
@@ -96,6 +98,10 @@ pub struct ParseConfig {
     pub include_attributes: bool,
     /// True when the caller sent taxonomy bytes, which v1 does not use.
     pub taxonomy_supplied: bool,
+    /// Repair text a generator forgot to escape instead of refusing the
+    /// document. The private `repair` module documents what that covers and
+    /// why it cannot weaken the security policy.
+    pub repair_unescaped_text: bool,
 }
 
 /// Shared view of how much input the parse has taken and whether the byte cap
@@ -314,7 +320,33 @@ pub(crate) fn parse_xml<R: BufRead>(
     forced: Option<(Dialect, sniff::Evidence)>,
 ) -> Result<Dialect, ParseError> {
     let started = std::time::Instant::now();
-    let mut xml = NsReader::from_reader(decoding_reader(reader, input)?);
+    let decoded = decoding_reader(reader, input)?;
+    if config.repair_unescaped_text {
+        // The filter sits after the transcoder, so it only ever sees UTF-8,
+        // and before the reader, which would already have failed on what it
+        // repairs.
+        let tally = RepairTally::default();
+        let repaired = RepairReader::new(decoded, tally.clone());
+        drive(repaired, config, input, emit, forced, started, Some(tally))
+    } else {
+        drive(decoded, config, input, emit, forced, started, None)
+    }
+}
+
+/// Run the driver over a byte source that is ready to parse.
+fn drive<R: BufRead>(
+    source: R,
+    config: &ParseConfig,
+    input: &InputStats,
+    emit: EmitFn<'_>,
+    forced: Option<(Dialect, sniff::Evidence)>,
+    started: Instant,
+    repairs: Option<RepairTally>,
+) -> Result<Dialect, ParseError> {
+    let mut xml = NsReader::from_reader(source);
+    // A bare `&` is read back as text rather than refused, but only when the
+    // caller opted in to repair; the driver counts each one.
+    xml.config_mut().allow_dangling_amp = repairs.is_some();
     // Empty elements are expanded into a Start/End pair so the driver has one
     // shape to reason about; every depth comparison in it depends on that.
     xml.config_mut().expand_empty_elements = true;
@@ -347,6 +379,7 @@ pub(crate) fn parse_xml<R: BufRead>(
         fact: None,
         contexts: HashMap::new(),
         units: HashMap::new(),
+        repairs,
     };
     driver.run()
 }
@@ -525,6 +558,8 @@ struct Driver<'a, R: BufRead> {
     fact: Option<PendingFact>,
     contexts: HashMap<String, pb::XbrlContext>,
     units: HashMap<String, pb::XbrlUnit>,
+    /// Repairs made to the input, when the caller opted in to them.
+    repairs: Option<RepairTally>,
 }
 
 /// Marker an `io::Error` carries when the byte cap tripped.

@@ -227,6 +227,29 @@ async fn dclx_sniffs_from_zip_magic_and_maps_with_the_doclang_rules() {
 }
 
 #[tokio::test]
+async fn a_dclx_document_is_repaired_when_the_caller_opts_in() {
+    // The archive's `document.xml` goes through the same driver as a plain
+    // DocLang document, so the repair applies to it with no path of its own.
+    let archive = dclx_of("<doclang version=\"0.7\"><text>R&D < 5%</text></doclang>");
+    let client = client().await;
+    let refused = parse_bytes(&client, &archive, options())
+        .await
+        .expect_err("strict by default");
+    assert_eq!(refused.code(), Code::InvalidArgument);
+    let events = parse_bytes_ok(
+        &client,
+        &archive,
+        pb::ParseOptions {
+            repair_unescaped_text: true,
+            ..options()
+        },
+    )
+    .await;
+    assert_eq!(texts(&common::text_items(&events)), ["R&D < 5%"]);
+    assert!(warned(&events, pb::WarningCode::TextRepaired));
+}
+
+#[tokio::test]
 async fn an_explicit_dclx_request_is_obeyed_and_reported_as_requested() {
     let client = client().await;
     let events = parse_bytes_ok(

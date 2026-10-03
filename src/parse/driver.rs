@@ -303,6 +303,12 @@ impl<R: BufRead> Driver<'_, R> {
             }
             Action::AttrText(spec) => {
                 self.push_frame(local, qname);
+                if self.dialect == Dialect::Doclang && spec.label == pb::XmlItemLabel::Picture {
+                    // A DocLang caption precedes its float; no table follows
+                    // to take it, so it is emitted now, ahead of the picture,
+                    // rather than when the enclosing element closes.
+                    self.flush_pending_caption()?;
+                }
                 if let Some(value) = attrs.get(spec.attr) {
                     let text = collapse(value);
                     if !text.is_empty() {
@@ -620,7 +626,10 @@ impl<R: BufRead> Driver<'_, R> {
         let byte_end = self.xml.buffer_position();
         if capture.is_caption {
             // The caption belongs to the table that follows it inside the
-            // same wrapper; `wrapper_depth` is where it gives up waiting.
+            // same wrapper; `wrapper_depth` is where it gives up waiting. A
+            // caption already waiting is emitted first rather than replaced:
+            // a float may carry several, and only the last one reaches it.
+            self.flush_pending_caption()?;
             self.pending_caption = Some(PendingCaption {
                 text,
                 path: capture.path,
@@ -791,7 +800,17 @@ impl<R: BufRead> Driver<'_, R> {
                 self.open_elements = self.open_elements.saturating_sub(1);
                 Step::End
             }
-            Event::Text(text) => Step::Text(text.xml10_content().into_owned()),
+            Event::Text(text) => {
+                let content = text.xml10_content().into_owned();
+                // A reference is its own event, so an `&` left in text is
+                // one the reader let through as dangling, which it only does
+                // when the caller opted in to repair.
+                if let Some(repairs) = self.repairs.as_ref() {
+                    let dangling = content.matches('&').count();
+                    repairs.add(u64::try_from(dangling).unwrap_or(u64::MAX));
+                }
+                Step::Text(content)
+            }
             Event::CData(cdata) => Step::CData(cdata.into_inner().into_owned()),
             Event::GeneralRef(reference) => {
                 let name = reference.into_inner().into_owned();
@@ -993,6 +1012,22 @@ impl<R: BufRead> Driver<'_, R> {
     }
 
     pub(super) fn emit_status(&mut self) -> Result<(), ParseError> {
+        if let Some(repaired) = self.repairs.as_ref().map(super::RepairTally::count)
+            && repaired > 0
+        {
+            // Inserted past the bound on warning kinds: it is one fixed
+            // kind, and a repair the trailer does not mention is a silent
+            // one, which is what the option promises never to be.
+            self.warnings.insert(
+                (
+                    pb::WarningCode::TextRepaired as i32,
+                    "unescaped text was repaired before parsing because \
+                     repair_unescaped_text was set"
+                        .to_owned(),
+                ),
+                repaired,
+            );
+        }
         let warnings = self
             .warnings
             .iter()
