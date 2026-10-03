@@ -154,6 +154,7 @@ fn read_inflated<R: Read>(
     let mut out = Vec::new();
     let mut buf = [0u8; 16 * 1024];
     loop {
+        input.check()?;
         let n = match reader.read(&mut buf) {
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -201,6 +202,9 @@ impl<'a, R> Metered<'a, R> {
 
 impl<R: Read> Read for Metered<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.input.check().is_err() {
+            return Err(io::Error::other("grpc-xml: parse stopped"));
+        }
         let n = self.inner.read(buf)?;
         let n64 = n as u64;
         if n64 > self.budget {
@@ -223,6 +227,9 @@ impl<R: Read> Read for Metered<'_, R> {
 /// surfaces through a decompressor; everything else at this layer is the
 /// archive's bytes being wrong.
 fn stream_error(error: &io::Error, input: &InputStats) -> ParseError {
+    if let Err(stopped) = input.check() {
+        return stopped;
+    }
     if input.capped.load(std::sync::atomic::Ordering::Relaxed)
         || error.to_string().contains(parse::CAP_MARKER)
     {

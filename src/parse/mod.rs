@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::{self, BufRead, Read};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use quick_xml::events::attributes::Attribute as XmlAttribute;
 use quick_xml::reader::NsReader;
@@ -113,6 +114,10 @@ pub struct InputStats {
     pub capped: Arc<AtomicBool>,
     /// The cap that was in force, in bytes.
     pub limit_bytes: u64,
+    /// Set when the client went away, so work nobody will read stops.
+    pub cancelled: Arc<AtomicBool>,
+    /// When the caller's deadline passes, if it stated one.
+    pub deadline: Option<Instant>,
 }
 
 impl InputStats {
@@ -123,6 +128,8 @@ impl InputStats {
             consumed: Arc::new(AtomicU64::new(0)),
             capped: Arc::new(AtomicBool::new(false)),
             limit_bytes,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: None,
         }
     }
 
@@ -130,6 +137,36 @@ impl InputStats {
     #[must_use]
     pub fn bytes(&self) -> u64 {
         self.consumed.load(Ordering::Relaxed)
+    }
+
+    /// Tell the parse its client is gone.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    /// Why the parse must stop now, if it must.
+    ///
+    /// The phases that never emit an event (skipping a subtree, inflating an
+    /// archive, walking a manifest) call this as they go, because nothing
+    /// else would tell them the client left or the deadline passed.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError::ConsumerGone`] once the client is gone, and
+    /// [`ParseError::DeadlineExceeded`] once the stated deadline has passed.
+    pub fn check(&self) -> Result<(), ParseError> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(ParseError::ConsumerGone);
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(ParseError::DeadlineExceeded(
+                "the request deadline passed before the parse finished".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -159,6 +196,9 @@ pub enum ParseError {
     /// The input stream failed for a reason that is not the caller's fault.
     /// `INTERNAL`.
     Io(String),
+    /// The caller's deadline passed, or the client went quiet for longer than
+    /// the server waits. `DEADLINE_EXCEEDED`.
+    DeadlineExceeded(String),
     /// The client stopped reading. No status is sent.
     ConsumerGone,
 }
@@ -169,7 +209,7 @@ impl std::fmt::Display for ParseError {
             Self::Malformed(m) => write!(f, "malformed XML: {m}"),
             Self::Truncated(m) => write!(f, "truncated XML: {m}"),
             Self::Refused(m) => write!(f, "refused: {m}"),
-            Self::Ambiguous(m) | Self::Unsupported(m) => f.write_str(m),
+            Self::Ambiguous(m) | Self::Unsupported(m) | Self::DeadlineExceeded(m) => f.write_str(m),
             Self::TooLarge { limit_bytes } => {
                 write!(
                     f,
@@ -247,6 +287,7 @@ fn peek_bytes<R: BufRead>(
             Ok(n) => filled += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
+                input.check()?;
                 if input.capped.load(Ordering::Relaxed) || e.to_string().contains(CAP_MARKER) {
                     return Err(ParseError::TooLarge {
                         limit_bytes: input.limit_bytes,
@@ -495,6 +536,9 @@ pub const CAP_MARKER: &str = "grpc-xml: document byte cap exceeded";
 
 /// Turn a quick-xml failure into the fleet's error taxonomy.
 fn convert_error(error: &quick_xml::Error, input: &InputStats) -> ParseError {
+    if let Err(stopped) = input.check() {
+        return stopped;
+    }
     if input.capped.load(Ordering::Relaxed) {
         return ParseError::TooLarge {
             limit_bytes: input.limit_bytes,

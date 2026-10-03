@@ -761,6 +761,7 @@ impl MetsDriver<'_> {
         xml.config_mut().expand_empty_elements = true;
         let mut buf = Vec::new();
         loop {
+            self.input.check()?;
             let event = xml
                 .read_event_into(&mut buf)
                 .map_err(|e| ParseError::Malformed(format!("METS manifest {name}: {e}")))?;
@@ -867,6 +868,7 @@ impl MetsDriver<'_> {
         let mut capture: Option<OcrCapture> = None;
         let mut buf = Vec::new();
         loop {
+            self.input.check()?;
             let event = xml
                 .read_event_into(&mut buf)
                 .map_err(|e| ParseError::Malformed(format!("hOCR member {member}: {e}")))?;

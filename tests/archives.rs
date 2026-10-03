@@ -740,6 +740,25 @@ async fn directory_entries_count_toward_the_member_bound() {
     assert!(error.message().contains("members"), "{}", error.message());
 }
 
+#[test]
+fn a_cancelled_archive_parse_stops_while_inflating() {
+    let stats = grpc_xml::parse::InputStats::with_limit(64 << 20);
+    stats.cancel();
+    let archive = gbs_export();
+    let mut emit = |_: pb::ParseXmlResponse| true;
+    let error = grpc_xml::parse::parse(
+        std::io::BufReader::new(archive.as_slice()),
+        &grpc_xml::parse::ParseConfig::default(),
+        &stats,
+        &mut emit,
+    )
+    .expect_err("a cancelled parse stops");
+    assert!(
+        matches!(error, grpc_xml::parse::ParseError::ConsumerGone),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn the_gbs_document_carries_pages_and_per_line_provenance() {
     let client = client().await;

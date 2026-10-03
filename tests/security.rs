@@ -425,6 +425,41 @@ async fn a_document_under_the_cap_parses_and_reports_the_bytes_it_read() {
     assert!(status.counts.as_ref().unwrap().elements_visited > 20);
 }
 
+// ------------------------------------------------------------ cancellation
+
+/// Run the driver directly over `document` with the given stop state.
+fn parse_stopped(document: &str, stats: &grpc_xml::parse::InputStats) -> Result<usize, String> {
+    let mut events = 0usize;
+    let mut emit = |_: pb::ParseXmlResponse| {
+        events += 1;
+        true
+    };
+    grpc_xml::parse::parse(
+        std::io::BufReader::new(document.as_bytes()),
+        &grpc_xml::parse::ParseConfig::default(),
+        stats,
+        &mut emit,
+    )
+    .map(|_| events)
+    .map_err(|e| format!("{e:?}"))
+}
+
+#[test]
+fn a_cancelled_parse_stops_without_reading_on() {
+    let stats = grpc_xml::parse::InputStats::with_limit(1 << 20);
+    stats.cancel();
+    let error = parse_stopped(JATS, &stats).expect_err("a cancelled parse stops");
+    assert_eq!(error, "ConsumerGone");
+}
+
+#[test]
+fn a_parse_past_its_deadline_stops_with_deadline_exceeded() {
+    let mut stats = grpc_xml::parse::InputStats::with_limit(1 << 20);
+    stats.deadline = Some(Instant::now());
+    let error = parse_stopped(JATS, &stats).expect_err("a parse past its deadline stops");
+    assert!(error.starts_with("DeadlineExceeded"), "{error}");
+}
+
 // -------------------------------------------------------- admission control
 
 #[tokio::test]

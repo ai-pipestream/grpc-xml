@@ -746,6 +746,7 @@ impl<R: BufRead> Driver<'_, R> {
 
     /// Read one XML event and copy it into owned data.
     pub(super) fn next_step(&mut self) -> Result<Step, ParseError> {
+        self.input.check()?;
         self.buf.clear();
         // Where this event begins. The reader reports where it has read to,
         // so the offset of a start tag is the position before the read, and
