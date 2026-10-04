@@ -64,7 +64,9 @@ This process owns secure XML parsing: no network, no DTD fetch, no entity
 expansion, so XXE and billion-laughs die at the parser. It owns dialect
 detection: the explicit option wins, otherwise archive magic bytes first,
 then root namespace and public id, and an ambiguous `.xml` without a hint
-is `INVALID_ARGUMENT`, not a guess. It owns the projection to sections,
+is `INVALID_ARGUMENT`, not a guess. A document nothing claims is not
+ambiguous; it is mapped with the vocabulary-blind `GENERIC` rules, which keep
+each element's text under the element's name. It owns the projection to sections,
 paragraphs, tables, lists, citations, and (for XBRL) fact tables. For USPTO
 it maps the ST.36 / ST.96 grant and application XML families. For XBRL it
 accepts instance facts plus an optional taxonomy as **bytes** on the
@@ -74,7 +76,7 @@ request, not a filesystem path, because this service is diskless.
 
 | Concern | Owner |
 |---|---|
-| Arbitrary XML → Document | out of scope; unknown dialects fail |
+| Understanding arbitrary XML | out of scope; unknown vocabularies parse through the `GENERIC` fallback, which keeps text, names and positions but infers no structure |
 | HTML/CSS layout of JATS bodies | HTML collector |
 | PDF of the same paper | gRParse CV, a different collector on the same parse |
 | Taxonomy hosting | client sends the package; we do not fetch from the web |

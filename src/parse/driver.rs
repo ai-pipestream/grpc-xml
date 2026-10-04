@@ -14,8 +14,8 @@ use quick_xml::name::ResolveResult;
 
 use super::{
     Capture, Frame, ListPlacement, MAX_DEPTH, MAX_INLINE_SPANS, MAX_OPEN_ELEMENTS_SHOWN,
-    MAX_WARNING_KINDS, ParseError, PendingCaption, SpanBuild, Step, attribute_value, collapse,
-    collapse_positions, collapsed_range, convert_error, resolve_reference,
+    MAX_WARNING_KINDS, OwnText, ParseError, PendingCaption, SpanBuild, Step, attribute_value,
+    collapse, collapse_positions, collapsed_range, convert_error, resolve_reference,
 };
 use crate::dialect::{self, Action, Attrs, ElementCtx};
 use crate::proto::v1 as pb;
@@ -117,7 +117,9 @@ impl<R: BufRead> Driver<'_, R> {
                              not implemented, labels are concept local names",
                         );
                     }
+                    let own = self.own_text_for(&namespace, &local, &attrs);
                     self.push_frame(&local, &qname);
+                    self.attach_own_text(own);
                     self.counts.elements_visited += 1;
                     let info = pb::XmlInfo {
                         dialect: dialect.to_proto() as i32,
@@ -155,7 +157,6 @@ impl<R: BufRead> Driver<'_, R> {
         }
         sniff::resolve(self.config.dialect, signals).map_err(|e| match e {
             SniffError::Conflict { .. } => ParseError::Ambiguous(e.to_string()),
-            SniffError::Unrecognized { .. } => ParseError::Unsupported(e.to_string()),
         })
     }
 
@@ -254,6 +255,9 @@ impl<R: BufRead> Driver<'_, R> {
         if self.dialect == Dialect::Xbrl {
             return self.xbrl_start(namespace, local, qname, attrs);
         }
+        // A child start tag ends the parent's current run of own text, so the
+        // run goes out before anything the child produces.
+        self.flush_own_text(self.event_start, false)?;
         if self.config.emit_html_islands && namespace == NS_XHTML {
             self.begin_island(namespace, local, qname, attrs);
             return Ok(());
@@ -270,7 +274,9 @@ impl<R: BufRead> Driver<'_, R> {
             // worth naming is that the items under it count it.
             Action::Descend => {
                 let list = dialect::list_container(self.dialect, &ctx);
+                let own = self.own_text_for(namespace, local, attrs);
                 self.push_frame_list(local, qname, list);
+                self.attach_own_text(own);
             }
             Action::Skip => self.skip_subtree(local, qname)?,
             Action::Meta(shape) => {
@@ -373,6 +379,8 @@ impl<R: BufRead> Driver<'_, R> {
         {
             self.flush_pending_caption()?;
         }
+        // The end tag has been read, so the position is one past it.
+        self.flush_own_text(self.xml.buffer_position(), true)?;
         self.stack.pop();
         Ok(self.stack.is_empty())
     }
@@ -403,6 +411,9 @@ impl<R: BufRead> Driver<'_, R> {
             cell.text.push_str(text);
             cell.chars += text.chars().count();
             cell.after_child = false;
+            return;
+        }
+        if self.append_own_text(text, from_cdata) {
             return;
         }
         if !text.trim().is_empty() {
@@ -458,7 +469,129 @@ impl<R: BufRead> Driver<'_, R> {
             cell.text.push_str(&text);
             cell.chars += text.chars().count();
             cell.after_child = false;
+            return;
         }
+        self.append_own_text(&text, false);
+    }
+
+    // -------------------------------------------------------------- own text
+
+    /// The own-text collector for an element whose start tag was just read,
+    /// when the dialect maps it that way. Called before the element's frame
+    /// is pushed, so the open stack is exactly its ancestors.
+    fn own_text_for(&self, namespace: &str, local: &str, attrs: &Attrs) -> Option<Box<OwnText>> {
+        let ctx = ElementCtx {
+            namespace,
+            local,
+            ancestors: &self.stack,
+            attrs,
+        };
+        let spec = dialect::own_text(self.dialect, &ctx)?;
+        Some(Box::new(OwnText {
+            spec,
+            text: String::new(),
+            from_cdata: false,
+            // The caller pushed the frame right after reading the start tag,
+            // so the last event read is this element's start tag.
+            run_start: Some(self.event_start),
+            element_id: attrs.get("id").map(str::to_owned),
+            namespace: namespace.to_owned(),
+            attributes: self.reportable_attributes(attrs),
+            element_start: self.event_start,
+            emitted: false,
+            attribute_text: dialect::attribute_text(attrs),
+        }))
+    }
+
+    /// Attach an own-text collector to the frame on top of the stack.
+    fn attach_own_text(&mut self, own: Option<Box<OwnText>>) {
+        if own.is_some()
+            && let Some(frame) = self.stack.last_mut()
+        {
+            frame.own = own;
+        }
+    }
+
+    /// Append character data to the innermost element's own text. Returns
+    /// false when that element is not collecting any.
+    fn append_own_text(&mut self, text: &str, from_cdata: bool) -> bool {
+        let event_start = self.event_start;
+        let Some(own) = self.stack.last_mut().and_then(|f| f.own.as_mut()) else {
+            return false;
+        };
+        own.run_start.get_or_insert(event_start);
+        own.text.push_str(text);
+        own.from_cdata |= from_cdata;
+        true
+    }
+
+    /// Emit the innermost element's current run of own text as one item,
+    /// ending at `byte_end`, and start a new run. A blank run is dropped.
+    ///
+    /// When the element is `closing` and never sent any text, its rendered
+    /// attributes become its one item instead, as a paragraph spanning the
+    /// whole element, so an element whose content is all attributes is not
+    /// lost.
+    fn flush_own_text(&mut self, byte_end: u64, closing: bool) -> Result<(), ParseError> {
+        let Some(frame) = self.stack.last_mut() else {
+            return Ok(());
+        };
+        let qname = frame.qname.clone();
+        let Some(own) = frame.own.as_mut() else {
+            return Ok(());
+        };
+        let run_start = own.run_start.take();
+        let raw = std::mem::take(&mut own.text);
+        let from_cdata = std::mem::take(&mut own.from_cdata);
+        let mut text = collapse(&raw);
+        let mut label = own.spec.label;
+        let mut byte_start = run_start;
+        if text.is_empty() {
+            let rendered = if closing && !own.emitted {
+                own.attribute_text.take()
+            } else {
+                None
+            };
+            let Some(rendered) = rendered else {
+                return Ok(());
+            };
+            text = rendered;
+            label = pb::XmlItemLabel::Paragraph;
+            byte_start = Some(own.element_start);
+        }
+        own.emitted = true;
+        let attributes = std::mem::take(&mut own.attributes);
+        let spec = own.spec.clone();
+        let element_id = own.element_id.clone();
+        let namespace = own.namespace.clone();
+        let item = pb::TextItem {
+            index: self.next_index(),
+            label: label as i32,
+            role: spec.role,
+            text,
+            level: spec.level,
+            ordinal: spec.ordinal,
+            path: self.path(),
+            element_id,
+            attributes,
+            source: Some(self.source.clone()),
+            // No pages and no boxes in a single XML document.
+            bbox: None,
+            page_no: None,
+            // Inline markup is not a run of this item: under the generic
+            // rules a child element's text is the child's own item.
+            spans: Vec::new(),
+            element_name: qname,
+            namespace,
+            byte_start,
+            byte_end: Some(byte_end),
+            from_cdata,
+            list_depth: None,
+            enumerated: false,
+            words: Vec::new(),
+        };
+        self.counts.text_items += 1;
+        self.send(pb::parse_xml_response::Event::TextItem(item))
     }
 
     // --------------------------------------------------------------- captures
@@ -847,6 +980,7 @@ impl<R: BufRead> Driver<'_, R> {
             position,
             children: HashMap::new(),
             list,
+            own: None,
         });
     }
 

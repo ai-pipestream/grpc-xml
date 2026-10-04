@@ -407,21 +407,16 @@ async fn a_request_that_does_not_start_with_options_is_rejected() {
 // ------------------------------------------------------------- dialects
 
 #[tokio::test]
-async fn an_unrecognized_root_is_unimplemented_not_a_guess() {
+async fn an_unrecognized_root_falls_back_to_the_generic_rules_rather_than_failing() {
     let client = client().await;
-    let error = parse(&client, "<root/>", options())
+    let events = parse(&client, "<root/>", options())
         .await
-        .expect_err("a bare root has no dialect");
-    assert_eq!(
-        error.code(),
-        Code::Unimplemented,
-        "an unmapped dialect is UNIMPLEMENTED: {error}"
-    );
-    assert!(
-        error.message().contains("does not map arbitrary XML"),
-        "{}",
-        error.message()
-    );
+        .expect("well-formed XML that no dialect claims still parses");
+    let Some(pb::parse_xml_response::Event::Info(info)) = events[0].event.as_ref() else {
+        panic!("the first event is XmlInfo");
+    };
+    assert_eq!(info.dialect, pb::XmlDialect::Generic as i32);
+    assert_eq!(info.evidence, pb::DialectEvidence::GenericFallback as i32);
 }
 
 #[tokio::test]
