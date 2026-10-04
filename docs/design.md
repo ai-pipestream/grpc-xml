@@ -79,7 +79,7 @@ The mapping follows the document model, not a 1:1 XML clone:
 | DocLang | already-close-to-Document; mostly a typed decode |
 | DCLX | the zip's root `document.xml`, mapped exactly as DocLang; images stay compressed |
 | METS_GBS | one text item per hOCR `ocr_line`, pages in manifest order, `x_wconf` as source confidence, per-line and per-word boxes, the `structMap` as the outline and the `dmdSec` as the catalogue record; no pixels |
-| GENERIC | one paragraph per run of an element's own text, `role` = the element's local name; a root-level `title` as the title |
+| GENERIC | one paragraph per run of an element's own text, `role` = the element's local name; one paragraph of rendered `name="value"` attributes for an element with attributes and no text; a root-level `title` as the title |
 
 Every item: `CollectorSource.collector = "xml"`, `model` = dialect
 name, `version` = this server's version, `confidence` unset, because a
@@ -457,8 +457,13 @@ element's own end tag, so mixed content comes out in reading order as
 several items of the same element and the buffered text is bounded by one
 run. A blank run (indentation between elements) is no item. A `title`
 directly under the root is the `TITLE` item; nothing else is promoted.
-Attributes follow `include_attributes` and ride on the element's first item;
-an element with no text of its own has no item for them to ride on. No
+Attributes follow `include_attributes` and ride on the element's first item.
+An element that closes without having sent any text yields one `PARAGRAPH`
+item of its attributes instead, rendered as `name="value"` pairs in
+document order separated by single spaces, prefixes as written, namespace
+declarations left out, with the whole element as its byte range; an element
+with neither text nor attributes yields nothing. A successful parse of a
+document whose content is all attributes is therefore not an empty one. No
 lists, sections, tables, inline runs or metadata decodes: the vocabulary is
 unknown, so none of them can be justified.
 

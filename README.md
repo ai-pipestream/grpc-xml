@@ -297,11 +297,18 @@ drop nothing that is text:
 - A `title` element directly under the root is the `TITLE` item, which also
   names the folded Document. Nothing else is a title, heading, list, table
   or picture: there is no evidence in an unknown vocabulary to say so.
-- Attributes reach the wire only through `include_attributes`, on the item of
-  the element that carries them. An element with attributes and no text of
-  its own produces no item, so a file whose content lives entirely in
-  attributes (an OpenOffice menu definition, say) parses to an empty item
-  list; the root element's attributes are still on `XmlInfo`.
+- An element with attributes but no text of its own still yields one
+  `PARAGRAPH` item when it closes: `role` is its local name and `text` its
+  attributes as `name="value"` pairs, in document order, separated by single
+  spaces, prefixes as written (`menu:id=".uno:Cut" menu:label="~Copy"`).
+  Namespace declarations are not counted, so an element whose only
+  attributes are `xmlns` declarations, or that has none, yields nothing. The
+  byte range covers the whole element. This is what makes a file whose
+  content lives entirely in attributes (an OpenOffice menu definition, say)
+  parse to items rather than to an empty success.
+- An element that does have text yields only its text items; its attributes
+  ride on the first of them when `include_attributes` is set, as in every
+  other dialect.
 - The security policy, the byte cap and the streaming contract are the same
   as for every other dialect: each item goes out when its run of text ends.
 

@@ -257,7 +257,7 @@ impl<R: BufRead> Driver<'_, R> {
         }
         // A child start tag ends the parent's current run of own text, so the
         // run goes out before anything the child produces.
-        self.flush_own_text(self.event_start)?;
+        self.flush_own_text(self.event_start, false)?;
         if self.config.emit_html_islands && namespace == NS_XHTML {
             self.begin_island(namespace, local, qname, attrs);
             return Ok(());
@@ -380,7 +380,7 @@ impl<R: BufRead> Driver<'_, R> {
             self.flush_pending_caption()?;
         }
         // The end tag has been read, so the position is one past it.
-        self.flush_own_text(self.xml.buffer_position())?;
+        self.flush_own_text(self.xml.buffer_position(), true)?;
         self.stack.pop();
         Ok(self.stack.is_empty())
     }
@@ -497,6 +497,9 @@ impl<R: BufRead> Driver<'_, R> {
             element_id: attrs.get("id").map(str::to_owned),
             namespace: namespace.to_owned(),
             attributes: self.reportable_attributes(attrs),
+            element_start: self.event_start,
+            emitted: false,
+            attribute_text: dialect::attribute_text(attrs),
         }))
     }
 
@@ -524,7 +527,12 @@ impl<R: BufRead> Driver<'_, R> {
 
     /// Emit the innermost element's current run of own text as one item,
     /// ending at `byte_end`, and start a new run. A blank run is dropped.
-    fn flush_own_text(&mut self, byte_end: u64) -> Result<(), ParseError> {
+    ///
+    /// When the element is `closing` and never sent any text, its rendered
+    /// attributes become its one item instead, as a paragraph spanning the
+    /// whole element, so an element whose content is all attributes is not
+    /// lost.
+    fn flush_own_text(&mut self, byte_end: u64, closing: bool) -> Result<(), ParseError> {
         let Some(frame) = self.stack.last_mut() else {
             return Ok(());
         };
@@ -535,17 +543,30 @@ impl<R: BufRead> Driver<'_, R> {
         let run_start = own.run_start.take();
         let raw = std::mem::take(&mut own.text);
         let from_cdata = std::mem::take(&mut own.from_cdata);
-        let text = collapse(&raw);
+        let mut text = collapse(&raw);
+        let mut label = own.spec.label;
+        let mut byte_start = run_start;
         if text.is_empty() {
-            return Ok(());
+            let rendered = if closing && !own.emitted {
+                own.attribute_text.take()
+            } else {
+                None
+            };
+            let Some(rendered) = rendered else {
+                return Ok(());
+            };
+            text = rendered;
+            label = pb::XmlItemLabel::Paragraph;
+            byte_start = Some(own.element_start);
         }
+        own.emitted = true;
         let attributes = std::mem::take(&mut own.attributes);
         let spec = own.spec.clone();
         let element_id = own.element_id.clone();
         let namespace = own.namespace.clone();
         let item = pb::TextItem {
             index: self.next_index(),
-            label: spec.label as i32,
+            label: label as i32,
             role: spec.role,
             text,
             level: spec.level,
@@ -562,7 +583,7 @@ impl<R: BufRead> Driver<'_, R> {
             spans: Vec::new(),
             element_name: qname,
             namespace,
-            byte_start: run_start,
+            byte_start,
             byte_end: Some(byte_end),
             from_cdata,
             list_depth: None,

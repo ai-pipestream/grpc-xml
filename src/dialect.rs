@@ -495,6 +495,29 @@ pub fn action(dialect: Dialect, ctx: &ElementCtx<'_>) -> Action {
     }
 }
 
+/// An element's attributes as text, for the generic rule's item of an
+/// element that holds no text: `name="value"` pairs in document order,
+/// separated by single spaces, names with their prefixes as written and
+/// values as decoded. Namespace declarations are not attributes of the
+/// content and are left out; `None` when nothing else is left.
+#[must_use]
+pub fn attribute_text(attrs: &Attrs) -> Option<String> {
+    let mut out = String::new();
+    for (name, value) in &attrs.0 {
+        if name == "xmlns" || name.starts_with("xmlns:") {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(name);
+        out.push_str("=\"");
+        out.push_str(value);
+        out.push('"');
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// What the character data an element holds directly becomes, or `None`
 /// when the dialect maps elements through [`action`] instead.
 ///
@@ -505,7 +528,9 @@ pub fn action(dialect: Dialect, ctx: &ElementCtx<'_>) -> Action {
 /// element holds belongs to that child's item, not to its parent's, so
 /// nested markup splits into one item per element instead of flattening
 /// into the outermost one. A `title` element directly under the root is the
-/// one name with an obvious meaning, and it becomes the title.
+/// one name with an obvious meaning, and it becomes the title. An element
+/// that closes without any text of its own yields one paragraph of its
+/// [`attribute_text`] instead, when it has attributes.
 #[must_use]
 pub fn own_text(dialect: Dialect, ctx: &ElementCtx<'_>) -> Option<Capture> {
     if dialect != Dialect::Generic {
@@ -907,6 +932,25 @@ mod tests {
         assert!(own_text(Dialect::Jats, &element).is_none());
         assert!(inline(Dialect::Generic, &element).is_none());
         assert!(list_container(Dialect::Generic, &element).is_none());
+    }
+
+    #[test]
+    fn attribute_text_renders_pairs_in_order_without_namespace_declarations() {
+        let attrs = Attrs(vec![
+            (
+                "xmlns:menu".to_owned(),
+                "http://openoffice.org/2001/menu".to_owned(),
+            ),
+            ("menu:id".to_owned(), ".uno:Cut".to_owned()),
+            ("menu:label".to_owned(), "Cu~t".to_owned()),
+        ]);
+        assert_eq!(
+            attribute_text(&attrs).as_deref(),
+            Some(r#"menu:id=".uno:Cut" menu:label="Cu~t""#)
+        );
+        let only_namespaces = Attrs(vec![("xmlns".to_owned(), "urn:x".to_owned())]);
+        assert_eq!(attribute_text(&only_namespaces), None);
+        assert_eq!(attribute_text(&Attrs::default()), None);
     }
 
     #[test]

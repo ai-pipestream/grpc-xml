@@ -426,6 +426,15 @@ struct OwnText {
     /// Reported on the element's first item only, so a mixed-content element
     /// does not repeat its attributes on every run.
     attributes: Vec<pb::Attribute>,
+    /// Offset of the element's start tag, where an attribute item's byte
+    /// range begins.
+    element_start: u64,
+    /// True once any item of this element has been sent.
+    emitted: bool,
+    /// The element's attributes rendered as text, sent as the element's one
+    /// item when it closes without having sent any text of its own. `None`
+    /// when it has no attributes but namespace declarations.
+    attribute_text: Option<String>,
 }
 
 impl dialect::Ancestors for Vec<Frame> {

@@ -64,11 +64,14 @@ enum XmlDialect {
   // Any other well-formed XML, mapped with vocabulary-blind rules: every
   // element whose own character data is not blank becomes one paragraph
   // `TextItem` with `role` set to the element's local name and `path` to its
-  // position, and a `title` child of the root becomes the title. Element
-  // names are not interpreted beyond that, and attributes reach the wire only
-  // through `ParseOptions.include_attributes`. Sniffing resolves to this
-  // dialect, with `DIALECT_EVIDENCE_GENERIC_FALLBACK`, when no specific
-  // dialect matched; a caller may also request it explicitly.
+  // position, and a `title` child of the root becomes the title. An element
+  // with attributes but no text of its own becomes one paragraph whose text
+  // is its attributes as `name="value"` pairs in document order, separated
+  // by single spaces, namespace declarations excluded. Element names are not
+  // interpreted beyond that; on an element that has text, attributes reach
+  // the wire only through `ParseOptions.include_attributes`. Sniffing
+  // resolves to this dialect, with `DIALECT_EVIDENCE_GENERIC_FALLBACK`, when
+  // no specific dialect matched; a caller may also request it explicitly.
   XML_DIALECT_GENERIC = 7;
 }
 

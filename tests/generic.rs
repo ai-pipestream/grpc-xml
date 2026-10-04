@@ -84,6 +84,8 @@ async fn an_office_properties_part_maps_every_field_with_its_name() {
             ("DocSecurity", "0"),
             ("lpstr", "Title"),
             ("i4", "1"),
+            ("vector", r#"size="2" baseType="variant""#),
+            ("vector", r#"size="1" baseType="lpstr""#),
             ("Company", "Example Org"),
             ("LinksUpToDate", "false"),
             ("AppVersion", "16.0000"),
@@ -146,17 +148,23 @@ async fn an_unqualified_data_file_keeps_every_value_in_document_order() {
         .skip_while(|item| item.role != "note")
         .map(|item| (item.role.as_str(), item.text.as_str()))
         .collect();
+    // The station holds no text of its own, so its attributes are its item,
+    // sent when it closes.
     assert_eq!(
         order,
         [
             ("note", "Moved in"),
             ("year", "2019"),
-            ("note", "after works")
+            ("note", "after works"),
+            ("station", r#"id="s2""#),
         ]
     );
+    assert_eq!(
+        texts(&items_with_role(&events, "station")),
+        [r#"id="s1" kind="automatic""#, r#"id="s2""#]
+    );
     // Whitespace between elements is layout, not content, and an empty
-    // element has nothing to say.
-    assert_eq!(texts(&items_with_role(&events, "station")), NONE);
+    // element with no attributes has nothing to say.
     assert_eq!(texts(&items_with_role(&events, "empty")), NONE);
     assert_eq!(texts(&items_with_role(&events, "monitoringStations")), NONE);
     // Nothing was dropped, so nothing says it was.
@@ -173,8 +181,8 @@ async fn generic_attributes_follow_the_attribute_option() {
             .all(|item| item.attributes.is_empty())
     );
 
-    // `station` has no text of its own, so its attributes have no item to
-    // ride on; an element that has both carries them.
+    // An element with both text and attributes yields only its text item;
+    // the attributes ride on it when asked for, and are never a second item.
     let events = parse_ok(&client, WITH_ATTRS, with_attributes()).await;
     let records = items_with_role(&events, "record");
     assert_eq!(texts(&records), ["first", "second"]);
@@ -186,6 +194,58 @@ async fn generic_attributes_follow_the_attribute_option() {
     assert_eq!(names, [("id", "r1"), ("status", "ok")]);
     assert_eq!(records[0].element_id.as_deref(), Some("r1"));
     assert_eq!(records[1].attributes, []);
+    let events = parse_ok(&client, WITH_ATTRS, options()).await;
+    assert_eq!(texts(&text_items(&events)), ["first", "second"]);
+}
+
+/// An OpenOffice-style menu: all of the content is in attributes.
+const MENU: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<menu:menupopup xmlns:menu="http://openoffice.org/2001/menu">
+  <menu:menuitem menu:id=".uno:Cut"/>
+  <menu:menuitem menu:id=".uno:Copy" menu:label="~Copy"/>
+  <menu:menuseparator/>
+</menu:menupopup>
+"#;
+
+#[tokio::test]
+async fn an_element_with_only_attributes_yields_them_as_its_item() {
+    let client = client().await;
+    let events = parse_ok(&client, MENU, options()).await;
+    assert_eq!(info(&events).dialect, pb::XmlDialect::Generic as i32);
+    let items = text_items(&events);
+    let pairs: Vec<(&str, &str, &str)> = items
+        .iter()
+        .map(|item| (item.role.as_str(), item.text.as_str(), item.path.as_str()))
+        .collect();
+    // The root's only attribute is a namespace declaration, and the
+    // separator has none, so neither is an item.
+    assert_eq!(
+        pairs,
+        [
+            (
+                "menuitem",
+                r#"menu:id=".uno:Cut""#,
+                "/menu:menupopup/menu:menuitem"
+            ),
+            (
+                "menuitem",
+                r#"menu:id=".uno:Copy" menu:label="~Copy""#,
+                "/menu:menupopup/menu:menuitem[2]"
+            ),
+        ]
+    );
+    let first = items[0];
+    assert_eq!(first.label, pb::XmlItemLabel::Paragraph as i32);
+    assert_eq!(first.element_name, "menu:menuitem");
+    assert_eq!(first.namespace, "http://openoffice.org/2001/menu");
+    assert_eq!(
+        first.source.as_ref().and_then(|s| s.model.as_deref()),
+        Some("generic")
+    );
+    // The byte range is the whole element, here a self-closing tag.
+    let start = usize::try_from(first.byte_start.unwrap()).unwrap();
+    let end = usize::try_from(first.byte_end.unwrap()).unwrap();
+    assert_eq!(&MENU[start..end], r#"<menu:menuitem menu:id=".uno:Cut"/>"#);
 }
 
 #[tokio::test]
