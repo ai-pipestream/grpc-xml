@@ -2,7 +2,9 @@
 
 gRPC collector for JATS, USPTO, XBRL, and DocLang XML, plus the DocLang
 archive (`.dclx`) and Google Books METS (`.tar.gz`) containers that carry
-XML, projecting into the gRParse Document data plane.
+XML, projecting into the gRParse Document data plane. Any other well-formed
+XML falls back to a generic mapping that keeps every element's text under
+the element's own name.
 
 One Rust process reads declarative XML with [`quick-xml`](https://github.com/tafia/quick-xml)
 and streams typed document items as the parser yields them: the title goes
@@ -90,7 +92,7 @@ sequenceDiagram
 
 | Option | Meaning |
 |---|---|
-| `dialect` | `JATS` / `USPTO` / `XBRL` / `DOCLANG` / `DCLX` / `METS_GBS`, or unset to sniff |
+| `dialect` | `JATS` / `USPTO` / `XBRL` / `DOCLANG` / `DCLX` / `METS_GBS` / `GENERIC`, or unset to sniff |
 | `max_document_mib` | Per-request byte cap; 0 takes the server default, over the ceiling clamps. For an archive it also caps the *decompressed* bytes |
 | `taxonomy` | XBRL taxonomy package bytes. Accepted, unused in v1 (see below) |
 | `emit_html_islands` | Hand XHTML subtrees to the HTML collector instead of flattening them |
@@ -128,7 +130,7 @@ event:
 |---|---|
 | Over the byte cap, or past the concurrency limit | `RESOURCE_EXHAUSTED` |
 | Malformed, truncated, entity-declaring, ambiguous, or nested deeper than 1024 elements | `INVALID_ARGUMENT` |
-| A dialect this service does not map | `UNIMPLEMENTED` |
+| A ZIP or gzip payload that is not a DCLX or METS-GBS archive | `UNIMPLEMENTED` |
 | The `grpc-timeout` deadline passed, no request message for 30 s, or nothing read for 30 s while 4 MiB of events waited | `DEADLINE_EXCEEDED` |
 | A parser fault | `INTERNAL` |
 
@@ -274,7 +276,39 @@ namespace, then the DOCTYPE public identifier, then a well-known root
 element name as a fallback. Two *strong* signals that disagree fail closed
 with both names in the message rather than being resolved by precedence,
 including a stated dialect against contradicting archive magic, and a stated
-archive dialect on a payload without its magic.
+archive dialect on a payload without its magic. When nothing matches at all,
+the document is mapped as `GENERIC` with evidence `GENERIC_FALLBACK`
+instead of being refused.
+
+### The generic fallback
+
+`GENERIC` is for well-formed XML no specific dialect claims: Office
+`docProps/app.xml` parts, application configuration, OGC exception reports,
+data exports. Its rules know no vocabulary, so they interpret nothing and
+drop nothing that is text:
+
+- Every element whose own character data is not blank becomes one
+  `PARAGRAPH` text item, with `role` set to the element's local name (`Company`,
+  `locationName`) and `path` to its position (`/Properties/Company`). Own
+  text means the text directly inside the element; a child's text is the
+  child's item. Mixed content is split at each child, so
+  `<note>Moved in <year>2019</year> after works</note>` yields `note`
+  "Moved in", `year` "2019", `note` "after works", in reading order.
+- A `title` element directly under the root is the `TITLE` item, which also
+  names the folded Document. Nothing else is a title, heading, list, table
+  or picture: there is no evidence in an unknown vocabulary to say so.
+- Attributes reach the wire only through `include_attributes`, on the item of
+  the element that carries them. An element with attributes and no text of
+  its own produces no item, so a file whose content lives entirely in
+  attributes (an OpenOffice menu definition, say) parses to an empty item
+  list; the root element's attributes are still on `XmlInfo`.
+- The security policy, the byte cap and the streaming contract are the same
+  as for every other dialect: each item goes out when its run of text ends.
+
+A caller can request `GENERIC` explicitly, including for a document a
+specific dialect would claim. An explicitly requested specific dialect is
+never replaced by the fallback: a JATS request on a file that is not JATS
+still maps with the JATS rules, as it always did.
 
 ### Known v1 gaps
 
@@ -320,12 +354,13 @@ proto/ai/pipestream/document/v1/  the Document plane, vendored from gRParse
 src/security.rs                   what the parser refuses and what it records
 src/sniff.rs                      dialect resolution and its evidence
 src/archive.rs                    the .dclx and METS-GBS drivers: unpack in memory, cap inflated bytes
-src/dialect.rs                    per-family mapping rules, one pure function each
+src/dialect.rs                    per-family mapping rules, one pure function each, plus the generic rule
 src/parse.rs                      the streaming driver: XML events to protobuf events
 src/document_fold.rs              the opt-in fold from those events to one Document
 src/service.rs                    tonic wiring, byte cap, admission control
 src/metrics.rs                    counters and the interval line
 tests/dialects.rs                 golden mappings for the four XML families
+tests/generic.rs                  the generic fallback: sniff, mapping, streaming
 tests/archives.rs                 the archive dialects, fixtures built in-test, bomb caps
 tests/document_fold.rs            the fold per dialect, and the wire event's placement
 tests/security.rs                 XXE, entity bombs, truncation, caps, refusals

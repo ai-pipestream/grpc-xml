@@ -16,6 +16,12 @@
 //! vocabulary, `path` carries the element's position, and
 //! `ParseOptions.include_attributes` carries every attribute the rule did not
 //! consume.
+//!
+//! The generic dialect is the one family that is not a vocabulary. Its rule
+//! descends into everything and answers a different question, asked by
+//! [`own_text`]: what the character data an element holds directly becomes.
+//! Every element with any becomes a paragraph whose role is the element's own
+//! name, so a document nobody wrote rules for still loses no text.
 
 use crate::proto::v1 as pb;
 use crate::sniff::{Dialect, NS_XBRL_INSTANCE, NS_XBRL_LINKBASE};
@@ -231,8 +237,9 @@ pub fn inline(dialect: Dialect, ctx: &ElementCtx<'_>) -> Option<Inline> {
         Dialect::Uspto => uspto_inline(ctx),
         Dialect::Doclang | Dialect::Dclx => doclang_inline(ctx),
         // An XBRL instance has no prose, and a METS export's hOCR is walked
-        // by the archive driver rather than by a capture.
-        Dialect::Xbrl | Dialect::MetsGbs => None,
+        // by the archive driver rather than by a capture. The generic rules
+        // open no capture, so nothing is ever inside one.
+        Dialect::Xbrl | Dialect::MetsGbs | Dialect::Generic => None,
     }
 }
 
@@ -368,11 +375,17 @@ pub trait Ancestors {
     fn innermost(&self) -> Option<&str>;
     /// True when any ancestor has this local name.
     fn contains(&self, name: &str) -> bool;
+    /// How many ancestors are open: 0 at the root, 1 for its children.
+    fn depth(&self) -> usize;
 }
 
 impl Ancestors for Vec<String> {
     fn innermost(&self) -> Option<&str> {
         self.last().map(String::as_str)
+    }
+
+    fn depth(&self) -> usize {
+        self.len()
     }
 
     fn contains(&self, name: &str) -> bool {
@@ -446,8 +459,9 @@ pub fn list_container(dialect: Dialect, ctx: &ElementCtx<'_>) -> Option<bool> {
             _ => None,
         },
         // An XBRL instance has no prose, and a METS export's hOCR is lines
-        // on a page rather than a document tree.
-        Dialect::Xbrl | Dialect::MetsGbs => None,
+        // on a page rather than a document tree. The generic rules know no
+        // element names, so they cannot know which ones are lists.
+        Dialect::Xbrl | Dialect::MetsGbs | Dialect::Generic => None,
     }
 }
 
@@ -457,7 +471,7 @@ pub const fn section_containers(dialect: Dialect) -> &'static [&'static str] {
     match dialect {
         Dialect::Jats => &["sec"],
         Dialect::Uspto => &["description", "section"],
-        Dialect::Xbrl | Dialect::MetsGbs => &[],
+        Dialect::Xbrl | Dialect::MetsGbs | Dialect::Generic => &[],
         Dialect::Doclang | Dialect::Dclx => &["section", "group"],
     }
 }
@@ -468,15 +482,41 @@ pub fn action(dialect: Dialect, ctx: &ElementCtx<'_>) -> Action {
     match dialect {
         Dialect::Jats => jats(ctx),
         Dialect::Uspto => uspto(ctx),
-        // Neither of these is element-mapped. An XBRL instance is contexts,
+        // None of these is element-mapped. An XBRL instance is contexts,
         // units and facts, which the driver reads directly; a METS-GBS
         // export is read whole by the archive driver in `crate::archive`,
-        // which never consults these rules.
-        Dialect::Xbrl | Dialect::MetsGbs => Action::Descend,
+        // which never consults these rules; the generic rules walk the whole
+        // tree and map each element's own text through `own_text`, so
+        // nothing is captured or skipped.
+        Dialect::Xbrl | Dialect::MetsGbs | Dialect::Generic => Action::Descend,
         // A DocLang archive's `document.xml` member is a DocLang document,
         // so the archive dialect maps with the same rules.
         Dialect::Doclang | Dialect::Dclx => doclang(ctx),
     }
+}
+
+/// What the character data an element holds directly becomes, or `None`
+/// when the dialect maps elements through [`action`] instead.
+///
+/// Only [`Dialect::Generic`] answers. Its rule knows no vocabulary, so it
+/// keeps everything and names it: each element whose own text is not blank
+/// becomes a paragraph with `role` set to the element's local name, which is
+/// the only thing the document says about what the text is. Text a child
+/// element holds belongs to that child's item, not to its parent's, so
+/// nested markup splits into one item per element instead of flattening
+/// into the outermost one. A `title` element directly under the root is the
+/// one name with an obvious meaning, and it becomes the title.
+#[must_use]
+pub fn own_text(dialect: Dialect, ctx: &ElementCtx<'_>) -> Option<Capture> {
+    if dialect != Dialect::Generic {
+        return None;
+    }
+    let label = if ctx.ancestors.depth() == 1 && ctx.local.eq_ignore_ascii_case("title") {
+        pb::XmlItemLabel::Title
+    } else {
+        pb::XmlItemLabel::Paragraph
+    };
+    Some(Capture::new(label, ctx.local))
 }
 
 /// True when this element is an XBRL structural element rather than a fact.
@@ -849,6 +889,42 @@ mod tests {
         assert!(jats_inline(&ctx("named-content", &ancestors, &attrs)).is_none());
         // An XBRL instance has no prose, so nothing in it is an inline run.
         assert!(inline(Dialect::Xbrl, &ctx("italic", &ancestors, &attrs)).is_none());
+    }
+
+    #[test]
+    fn generic_elements_descend_and_name_their_own_text() {
+        let ancestors = path(&["Properties"]);
+        let attrs = Attrs::default();
+        let element = ctx("Application", &ancestors, &attrs);
+        assert!(matches!(
+            action(Dialect::Generic, &element),
+            Action::Descend
+        ));
+        let capture = own_text(Dialect::Generic, &element).expect("generic maps own text");
+        assert_eq!(capture.label, pb::XmlItemLabel::Paragraph);
+        assert_eq!(capture.role, "Application");
+        // The other dialects map through `action` and never answer here.
+        assert!(own_text(Dialect::Jats, &element).is_none());
+        assert!(inline(Dialect::Generic, &element).is_none());
+        assert!(list_container(Dialect::Generic, &element).is_none());
+    }
+
+    #[test]
+    fn a_generic_title_counts_only_directly_under_the_root() {
+        let attrs = Attrs::default();
+        let top = path(&["book"]);
+        let capture = own_text(Dialect::Generic, &ctx("title", &top, &attrs)).unwrap();
+        assert_eq!(capture.label, pb::XmlItemLabel::Title);
+        assert_eq!(capture.role, "title");
+
+        let nested = path(&["book", "chapter"]);
+        let capture = own_text(Dialect::Generic, &ctx("title", &nested, &attrs)).unwrap();
+        assert_eq!(capture.label, pb::XmlItemLabel::Paragraph);
+
+        // The root itself is not under the root.
+        let root = Vec::new();
+        let capture = own_text(Dialect::Generic, &ctx("title", &root, &attrs)).unwrap();
+        assert_eq!(capture.label, pb::XmlItemLabel::Paragraph);
     }
 
     #[test]

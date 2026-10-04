@@ -5,6 +5,9 @@
 - Map the JATS, USPTO, XBRL, and DocLang XML dialects, plus the two
   archive formats that carry XML: `DCLX` (a DocLang OPC zip) and
   `METS_GBS` (a Google Books `tar.gz`).
+- Parse every other well-formed XML document too, with a `GENERIC`
+  fallback that keeps all element text without interpreting the vocabulary
+  (see section 4.4).
 - One process, one port, format selected on the request.
 - Stream elements of large instances (USPTO claims, XBRL facts) as
   table rows / paragraphs rather than materializing a DOM of the whole
@@ -17,6 +20,11 @@
 ## 2. Non-goals (v1)
 
 - Generic XML-to-JSON or XSLT hosting.
+- *Understanding* arbitrary XML. The `GENERIC` fallback guarantees that
+  well-formed XML parses and that its text is kept, named and located; it
+  does not infer headings, lists, tables, titles beyond a root-level
+  `title`, or meaning from attribute values. A vocabulary that deserves
+  structure gets its own dialect.
 - Fetching remote taxonomies, DTDs, or XInclude.
 - Decoding archive images. A METS/GBS export and a DCLX archive both carry
   scans; this service maps their XML text planes and counts the image bytes
@@ -37,7 +45,7 @@ rpc GetServiceInfo(GetServiceInfoRequest) returns (ServiceInfo);
 Options:
 
 - `dialect`: `JATS` / `USPTO` / `XBRL` / `DOCLANG` / `DCLX` /
-  `METS_GBS` / `UNSPECIFIED` (sniff)
+  `METS_GBS` / `GENERIC` / `UNSPECIFIED` (sniff)
 - `taxonomy`: optional bytes (XBRL only), a zip of schemas/linkbases
 - `max_document_mib`
 
@@ -71,6 +79,7 @@ The mapping follows the document model, not a 1:1 XML clone:
 | DocLang | already-close-to-Document; mostly a typed decode |
 | DCLX | the zip's root `document.xml`, mapped exactly as DocLang; images stay compressed |
 | METS_GBS | one text item per hOCR `ocr_line`, pages in manifest order, `x_wconf` as source confidence, per-line and per-word boxes, the `structMap` as the outline and the `dmdSec` as the catalogue record; no pixels |
+| GENERIC | one paragraph per run of an element's own text, `role` = the element's local name; a root-level `title` as the title |
 
 Every item: `CollectorSource.collector = "xml"`, `model` = dialect
 name, `version` = this server's version, `confidence` unset, because a
@@ -222,7 +231,7 @@ plane stays compatible with. `origin.mimetype = "application/xml"` (the
 archive dialects state the archive's own type), with
 `origin.mimetype_evidence` naming the signal that resolved the dialect the
 mimetype is derived from: `requested`, `root-namespace`, `public-id`,
-`root-element` or `archive-magic`. `name`
+`root-element`, `archive-magic` or `generic-fallback`. `name`
 = `XmlInfo.title` when the dialect exposed one, otherwise the first `TITLE`
 item's text (none of the four dialects currently fill `XmlInfo.title`, so
 in practice it is the title item). Root namespace, root local name and
@@ -435,16 +444,35 @@ taxonomy reader.
 and an ordinal, and that is what they fold to; the claim numbering is in
 `xml.ordinal`.
 
+### 4.4 The generic fallback
+
+A document no specific dialect claims is mapped, not refused. The rule in
+`src/dialect.rs` (`own_text`) answers for every element: the character data
+the element holds directly, between its children, becomes a `PARAGRAPH`
+item with `role` = the element's local name, the usual positional `path`,
+`element_name`, `namespace` and byte range. Text inside a child is the
+child's item. The driver collects that text on the element's stack frame
+and emits it when the run ends, at the next child start tag or at the
+element's own end tag, so mixed content comes out in reading order as
+several items of the same element and the buffered text is bounded by one
+run. A blank run (indentation between elements) is no item. A `title`
+directly under the root is the `TITLE` item; nothing else is promoted.
+Attributes follow `include_attributes` and ride on the element's first item;
+an element with no text of its own has no item for them to ride on. No
+lists, sections, tables, inline runs or metadata decodes: the vocabulary is
+unknown, so none of them can be justified.
+
 ## 5. Sniffing
 
 Order: request dialect if set → archive magic bytes (`PK\x03\x04` means
 DCLX, `\x1f\x8b` means METS_GBS; checked before any XML is read, since an
 archived document is not XML at byte 0) → root xmlns → DOCTYPE public id →
 well-known root local-name (`article`+JATS ns, `us-patent-grant`,
-`xbrl`, DocLang root). Two matches that disagree →
-`INVALID_ARGUMENT` with both names in the message; that includes a stated
-dialect against contradicting archive magic, and a stated archive dialect
-on a payload without its magic.
+`xbrl`, DocLang root) → `GENERIC` when none of those matched. Two matches
+that disagree → `INVALID_ARGUMENT` with both names in the message; that
+includes a stated dialect against contradicting archive magic, and a stated
+archive dialect on a payload without its magic. The fallback applies only
+to a sniff: a stated dialect is used as stated, matching or not.
 
 ## 6. Tests
 
@@ -453,8 +481,9 @@ One fixture per dialect, asserted against a golden `Document` (item labels
 (`<!DOCTYPE … SYSTEM "file:///etc/passwd">`) must produce a parse error
 with no file read. An entity bomb must produce `RESOURCE_EXHAUSTED` or a
 parse error in bounded time. XBRL without taxonomy still returns facts,
-with labels staying local-name. Sniff tests cover each root, and an
-ambiguous tiny `<root/>` fails closed. Archive fixtures are constructed in
+with labels staying local-name. Sniff tests cover each root, a tiny
+`<root/>` falls back to `GENERIC`, and disagreeing strong signals fail
+closed. Archive fixtures are constructed in
 the test with the zip/tar/flate2 crates rather than committed as binaries:
 happy path per format, a zip or tar that is not the format, a
 small-on-the-wire bomb that must trip the inflated-byte cap, and the

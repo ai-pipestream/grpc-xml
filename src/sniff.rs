@@ -15,6 +15,11 @@
 //! prolog to sniff. This module still owns the [`Dialect`] vocabulary they
 //! resolve to.
 //!
+//! When nothing matches, the document is not refused: it resolves to
+//! [`Dialect::Generic`] with [`Evidence::GenericFallback`], whose rules map
+//! every element's own text without interpreting the vocabulary. That
+//! fallback applies only to a sniff; an explicit request is never overruled.
+//!
 //! Two strong signals that disagree are an error, not a tie broken by
 //! precedence. A document whose namespace says JATS and whose public
 //! identifier says USPTO is not a JATS document with a stale DOCTYPE as far
@@ -42,6 +47,9 @@ pub enum Dialect {
     Dclx,
     /// Google Books exports (`.tar.gz`): a METS manifest plus per-page hOCR.
     MetsGbs,
+    /// Any other well-formed XML, mapped with vocabulary-blind rules: each
+    /// element's own text becomes one item whose role is the element name.
+    Generic,
 }
 
 impl Dialect {
@@ -55,6 +63,7 @@ impl Dialect {
             Self::Doclang => "doclang",
             Self::Dclx => "dclx",
             Self::MetsGbs => "mets-gbs",
+            Self::Generic => "generic",
         }
     }
 
@@ -68,6 +77,7 @@ impl Dialect {
             Self::Doclang => pb::XmlDialect::Doclang,
             Self::Dclx => pb::XmlDialect::Dclx,
             Self::MetsGbs => pb::XmlDialect::MetsGbs,
+            Self::Generic => pb::XmlDialect::Generic,
         }
     }
 
@@ -82,12 +92,13 @@ impl Dialect {
             pb::XmlDialect::Doclang => Some(Self::Doclang),
             pb::XmlDialect::Dclx => Some(Self::Dclx),
             pb::XmlDialect::MetsGbs => Some(Self::MetsGbs),
+            pb::XmlDialect::Generic => Some(Self::Generic),
         }
     }
 
     /// Every dialect this build maps, in wire-enum order.
     #[must_use]
-    pub const fn all() -> [Self; 6] {
+    pub const fn all() -> [Self; 7] {
         [
             Self::Jats,
             Self::Uspto,
@@ -95,6 +106,7 @@ impl Dialect {
             Self::Doclang,
             Self::Dclx,
             Self::MetsGbs,
+            Self::Generic,
         ]
     }
 
@@ -138,6 +150,9 @@ pub enum Evidence {
     RootElement,
     /// The payload's archive magic bytes matched, before any XML was read.
     ArchiveMagic,
+    /// Nothing matched, so the generic rules were used. The absence of a
+    /// signal rather than a match.
+    GenericFallback,
 }
 
 impl Evidence {
@@ -150,11 +165,15 @@ impl Evidence {
             Self::PublicId => pb::DialectEvidence::PublicId,
             Self::RootElement => pb::DialectEvidence::RootElement,
             Self::ArchiveMagic => pb::DialectEvidence::ArchiveMagic,
+            Self::GenericFallback => pb::DialectEvidence::GenericFallback,
         }
     }
 }
 
 /// Why a document could not be assigned a dialect.
+///
+/// There is one reason left. A document no rule recognizes is not an error:
+/// it resolves to [`Dialect::Generic`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SniffError {
     /// Two strong signals named different dialects. Maps to
@@ -168,15 +187,6 @@ pub enum SniffError {
         namespace_uri: String,
         /// The public identifier, quoted back to the caller.
         public_id_text: String,
-    },
-    /// Nothing matched. Maps to `UNIMPLEMENTED`: the document may be
-    /// perfectly good XML, it is simply not one of the four families this
-    /// service maps.
-    Unrecognized {
-        /// Root namespace URI, empty when the root is unqualified.
-        namespace: String,
-        /// Root element local name.
-        local_name: String,
     },
 }
 
@@ -195,14 +205,6 @@ impl std::fmt::Display for SniffError {
                  request to resolve it",
                 namespace.model(),
                 public_id.model()
-            ),
-            Self::Unrecognized {
-                namespace,
-                local_name,
-            } => write!(
-                f,
-                "unsupported XML dialect: root element {{{namespace}}}{local_name} is not JATS, \
-                 USPTO, XBRL or DocLang; this service does not map arbitrary XML"
             ),
         }
     }
@@ -224,7 +226,8 @@ pub struct Signals {
 /// # Errors
 ///
 /// [`SniffError::Conflict`] when the namespace and the public identifier
-/// disagree, [`SniffError::Unrecognized`] when nothing matches.
+/// disagree. Nothing matching is not an error: it resolves to
+/// [`Dialect::Generic`] with [`Evidence::GenericFallback`].
 pub fn resolve(
     requested: Option<Dialect>,
     signals: &Signals,
@@ -245,12 +248,10 @@ pub fn resolve(
         }),
         (Some(ns), _) => Ok((ns, Evidence::RootNamespace)),
         (None, Some(pid)) => Ok((pid, Evidence::PublicId)),
-        (None, None) => from_root_element(&signals.root_local_name)
-            .map(|dialect| (dialect, Evidence::RootElement))
-            .ok_or_else(|| SniffError::Unrecognized {
-                namespace: signals.root_namespace.clone(),
-                local_name: signals.root_local_name.clone(),
-            }),
+        (None, None) => Ok(from_root_element(&signals.root_local_name)
+            .map_or((Dialect::Generic, Evidence::GenericFallback), |dialect| {
+                (dialect, Evidence::RootElement)
+            })),
     }
 }
 
@@ -402,8 +403,66 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_root_is_unrecognized_rather_than_guessed() {
-        let err = resolve(None, &signals("", "root", None)).unwrap_err();
-        assert!(matches!(err, SniffError::Unrecognized { .. }), "{err}");
+    fn a_root_nothing_claims_falls_back_to_generic() {
+        for (ns, local) in [
+            ("", "root"),
+            ("", "airQualityMonitoringStations"),
+            (
+                "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
+                "Properties",
+            ),
+            ("http://www.opengis.net/ows/1.1", "ExceptionReport"),
+        ] {
+            assert_eq!(
+                resolve(None, &signals(ns, local, None)).unwrap(),
+                (Dialect::Generic, Evidence::GenericFallback),
+                "{{{ns}}}{local}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_doctype_nothing_claims_still_falls_back_to_generic() {
+        let s = signals(
+            "",
+            "menupopup",
+            Some("-//OpenOffice.org//DTD OfficeDocument 1.0//EN"),
+        );
+        assert_eq!(
+            resolve(None, &s).unwrap(),
+            (Dialect::Generic, Evidence::GenericFallback)
+        );
+    }
+
+    #[test]
+    fn an_explicit_request_is_never_replaced_by_the_fallback() {
+        // A JATS request on a document nothing recognizes stays JATS: the
+        // fallback is a sniff outcome, not an override.
+        let s = signals("", "root", None);
+        assert_eq!(
+            resolve(Some(Dialect::Jats), &s).unwrap(),
+            (Dialect::Jats, Evidence::Requested)
+        );
+        assert_eq!(
+            resolve(
+                Some(Dialect::Generic),
+                &signals(NS_XBRL_INSTANCE, "xbrl", None)
+            )
+            .unwrap(),
+            (Dialect::Generic, Evidence::Requested)
+        );
+    }
+
+    #[test]
+    fn the_fallback_does_not_hide_a_conflict() {
+        let s = signals(
+            NS_DOCLANG,
+            "doclang",
+            Some("-//USPTO//DTD ICE Patent Grant V4.5 2014//EN"),
+        );
+        assert!(matches!(
+            resolve(None, &s),
+            Err(SniffError::Conflict { .. })
+        ));
     }
 }

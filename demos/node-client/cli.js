@@ -7,7 +7,7 @@
 //   node cli.js ../sample-data/jats-article.xml [DIALECT]
 //
 // DIALECT is an XmlDialect name without the XML_DIALECT_ prefix (JATS, USPTO,
-// XBRL, DOCLANG, DCLX, METS_GBS); omitted means "sniff".
+// XBRL, DOCLANG, DCLX, METS_GBS, GENERIC); omitted means "sniff".
 // Honours XML_SERVER_ADDR (default 127.0.0.1:50066).
 
 import { readFile } from "node:fs/promises";

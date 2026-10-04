@@ -25,9 +25,10 @@ option java_package = "ai.pipestream.xml.v1";
 // One process serves all of them; the dialect decides which mapper runs, and
 // it is either stated on the request or sniffed. Archive dialects are sniffed
 // from their magic bytes before any XML is read; XML dialects are sniffed
-// from the prolog and root element. Dialects outside this list are refused
-// with `UNIMPLEMENTED`: this service is not a generic XML-to-Document
-// converter.
+// from the prolog and root element. A well-formed document that none of the
+// specific families claims is not refused: an unstated dialect resolves to
+// `XML_DIALECT_GENERIC`, which maps every element's own text without
+// interpreting the vocabulary.
 enum XmlDialect {
   // Not stated. On a request this means "sniff"; the server never reports
   // it back on a successful parse.
@@ -59,6 +60,16 @@ enum XmlDialect {
   // manifest with `PROFILE="gbs"` plus per-page hOCR files. Pages map in
   // manifest order, one text item per OCR line.
   XML_DIALECT_METS_GBS = 6;
+
+  // Any other well-formed XML, mapped with vocabulary-blind rules: every
+  // element whose own character data is not blank becomes one paragraph
+  // `TextItem` with `role` set to the element's local name and `path` to its
+  // position, and a `title` child of the root becomes the title. Element
+  // names are not interpreted beyond that, and attributes reach the wire only
+  // through `ParseOptions.include_attributes`. Sniffing resolves to this
+  // dialect, with `DIALECT_EVIDENCE_GENERIC_FALLBACK`, when no specific
+  // dialect matched; a caller may also request it explicitly.
+  XML_DIALECT_GENERIC = 7;
 }
 
 // XmlItemLabel classifies one streamed text item.
@@ -252,6 +263,11 @@ enum DialectEvidence {
   // read before any XML sniffing because an archived document is not XML at
   // byte 0.
   DIALECT_EVIDENCE_ARCHIVE_MAGIC = 5;
+
+  // No specific dialect matched on namespace, public identifier or root
+  // element name, so the document was mapped with the generic rules of
+  // `XML_DIALECT_GENERIC`. This is the absence of a signal, not a match.
+  DIALECT_EVIDENCE_GENERIC_FALLBACK = 6;
 }
 
 // Attribute is one source attribute carried through verbatim.
@@ -1258,8 +1274,8 @@ message ParseCounts {
 //
 // A parse that fails does not send `ParseStatus`; it ends the stream with a
 // gRPC status instead (`INVALID_ARGUMENT` for malformed or truncated input,
-// `RESOURCE_EXHAUSTED` past the byte cap, `UNIMPLEMENTED` for an
-// unrecognized dialect, `INTERNAL` for a parser fault).
+// `RESOURCE_EXHAUSTED` past the byte cap, `UNIMPLEMENTED` for an archive
+// that is not one of the mapped formats, `INTERNAL` for a parser fault).
 message ParseStatus {
   // The dialect the document was mapped with. Never
   // `XML_DIALECT_UNSPECIFIED`.

@@ -1932,6 +1932,7 @@ const fn model_name(dialect: pb::XmlDialect) -> &'static str {
         pb::XmlDialect::Doclang => "doclang",
         pb::XmlDialect::Dclx => "dclx",
         pb::XmlDialect::MetsGbs => "mets-gbs",
+        pb::XmlDialect::Generic => "generic",
     }
 }
 
@@ -1947,6 +1948,7 @@ fn evidence_name(evidence: i32) -> Option<&'static str> {
         Ok(pb::DialectEvidence::PublicId) => Some("public-id"),
         Ok(pb::DialectEvidence::RootElement) => Some("root-element"),
         Ok(pb::DialectEvidence::ArchiveMagic) => Some("archive-magic"),
+        Ok(pb::DialectEvidence::GenericFallback) => Some("generic-fallback"),
         Ok(pb::DialectEvidence::Unspecified) | Err(_) => None,
     }
 }

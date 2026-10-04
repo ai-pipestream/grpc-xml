@@ -39,8 +39,10 @@ service XmlParseService {
   // Failures end the stream with a gRPC status and no `status` event:
   // `RESOURCE_EXHAUSTED` when the document exceeds the byte cap or the
   // server is at its concurrency limit, `INVALID_ARGUMENT` for malformed,
-  // truncated, or entity-declaring input, `UNIMPLEMENTED` when the dialect
-  // is not one this service maps, `INTERNAL` for a parser fault.
+  // truncated, or entity-declaring input, `UNIMPLEMENTED` for a ZIP or gzip
+  // payload that is not one of the archive formats this service maps,
+  // `INTERNAL` for a parser fault. Well-formed XML that no specific dialect
+  // claims is not refused; it is mapped as `XML_DIALECT_GENERIC`.
   rpc ParseXml(stream ParseXmlRequest) returns (stream ParseXmlResponse);
 
   // Reports the server's identity, limits, and the dialects it maps.
@@ -54,8 +56,8 @@ message ParseOptions {
   // Dialect to map with. `XML_DIALECT_UNSPECIFIED` asks the server to sniff
   // it: archive magic bytes first (ZIP means a DocLang archive, gzip means a
   // Google Books export), then the DOCTYPE public identifier and the root
-  // element; a sniff that finds nothing is `UNIMPLEMENTED` and a sniff whose
-  // signals disagree is `INVALID_ARGUMENT`. The server never guesses between
+  // element; a sniff that finds nothing resolves to `XML_DIALECT_GENERIC`
+  // and a sniff whose signals disagree is `INVALID_ARGUMENT`. The server never guesses between
   // two candidates, and a stated dialect the payload cannot be — an archive
   // dialect without its magic, an XML dialect on archive bytes — is
   // `INVALID_ARGUMENT` rather than a guess.

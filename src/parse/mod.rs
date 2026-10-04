@@ -7,7 +7,9 @@
 //! [`BufRead`] that is still being filled by the request stream. It holds
 //! exactly one item at a time — the text of the element it is currently
 //! inside — and hands each finished item to `emit` the moment its end tag is
-//! read. There is no document, no tree, and nothing that could be flushed at
+//! read. The generic rules are the one variation: an open element may hold
+//! the run of its own text that a child start tag interrupted, and that run
+//! goes out the moment the child begins. There is no document, no tree, and nothing that could be flushed at
 //! the end, which is what makes the batch-regression test in
 //! `tests/live_stream.rs` mechanical rather than aspirational.
 //!
@@ -398,6 +400,32 @@ struct Frame {
     /// a list item its nesting depth, and the innermost one says whether its
     /// list is numbered.
     list: Option<bool>,
+    /// The element's own character data being collected, for a dialect that
+    /// maps it through [`dialect::own_text`]. `None` for every other element.
+    own: Option<Box<OwnText>>,
+}
+
+/// The character data an element holds directly, between its child
+/// elements, under the generic rules.
+///
+/// Text is collected in runs: a run ends at the next child start tag or at
+/// the element's own end tag, and each non-blank run is emitted as one item
+/// right there. That keeps reading order across mixed content and keeps the
+/// buffered text bounded by one run rather than by the element.
+struct OwnText {
+    spec: dialect::Capture,
+    text: String,
+    /// True once any part of the current run came from a CDATA section.
+    from_cdata: bool,
+    /// Offset the current run's byte range starts at: the element's start
+    /// tag for the first run, the first text event after a child for later
+    /// ones. `None` between a child start tag and the next text.
+    run_start: Option<u64>,
+    element_id: Option<String>,
+    namespace: String,
+    /// Reported on the element's first item only, so a mixed-content element
+    /// does not repeat its attributes on every run.
+    attributes: Vec<pb::Attribute>,
 }
 
 impl dialect::Ancestors for Vec<Frame> {
@@ -407,6 +435,10 @@ impl dialect::Ancestors for Vec<Frame> {
 
     fn contains(&self, name: &str) -> bool {
         self.iter().any(|frame| frame.local == name)
+    }
+
+    fn depth(&self) -> usize {
+        self.len()
     }
 }
 
