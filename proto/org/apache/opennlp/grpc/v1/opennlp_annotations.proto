@@ -1,0 +1,822 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+syntax = "proto3";
+
+package org.apache.opennlp.grpc.v1;
+
+import "google/protobuf/struct.proto";
+import "org/apache/opennlp/grpc/v1/opennlp_document.proto";
+
+option java_multiple_files = true;
+option java_outer_classname = "OpenNlpAnnotationsProto";
+option java_package = "org.apache.opennlp.grpc.v1";
+
+// Strongly typed annotations for every layer OpenNLP 3.0 and its add-ons
+// produce.
+//
+// Every annotation is one Annotation: an optional span, an optional
+// probability, and a `value` oneof with one dedicated message per annotation
+// kind. GenericValue is the last arm, for a layer whose value type has no
+// dedicated message yet. New kinds are added as new oneof arms; that is a
+// backward compatible change, and a reader that predates an arm sees an
+// unset `value` and skips the annotation.
+//
+// Offsets follow OpenNlpDocument: every AnnotationSpan indexes `raw_text` in
+// `offset_encoding`, and spans found in a normalized form are mapped back to
+// `raw_text` before they are written. Within typed layers only
+// AnnotationSpan.start, end and space are set; the label and probability live
+// on the Annotation and its value.
+
+// The typed analysis of one text.
+message OpenNlpAnnotations {
+  // Caller-chosen identifier, echoed back unchanged.
+  string doc_id = 1;
+  // The analyzed text, byte-identical to what the caller sent. Every span
+  // indexes it.
+  string raw_text = 2;
+  // Unit of every span offset in this message.
+  OffsetEncoding offset_encoding = 3;
+  // The service build that produced this analysis.
+  AnalyzerInfo analyzer = 4;
+  // Every model that contributed a layer, referenced from layers and
+  // annotations by ModelProvenance.model_ref.
+  repeated ModelProvenance models = 5;
+  // The layers, in dependency order: a layer appears after any layer whose
+  // annotations it references by index.
+  repeated TypedLayer layers = 6;
+}
+
+// The build that produced an analysis.
+message AnalyzerInfo {
+  // OpenNLP library version, e.g. "3.0.0".
+  string opennlp_version = 1;
+  // Version of this wire contract.
+  string api_version = 2;
+  // The serving process (gRPC server or native library) and its version.
+  string service_version = 3;
+}
+
+// One model or resource that produced annotations.
+message ModelProvenance {
+  // Key that layers and annotations use to name this model; unique within one
+  // OpenNlpAnnotations.
+  string model_ref = 1;
+  // Human-readable model name, e.g. "en-ner-person".
+  string name = 2;
+  // Content hash of the model artifact, lowercase hex SHA-256 when known.
+  optional string sha256 = 3;
+  // The OpenNLP component kind, e.g. "TokenNameFinder", "Tokenizer",
+  // "DependencyParser", "WordNetLexicon", "Gazetteer".
+  string component = 4;
+  // The engine that ran it, e.g. "opennlp-me", "onnx", "rules", "dictionary".
+  string engine = 5;
+  // Languages the model serves, as ISO 639-3 codes.
+  repeated string languages = 6;
+  // Model or resource version when the artifact states one.
+  optional string version = 7;
+}
+
+// A named layer of typed annotations.
+message TypedLayer {
+  // The namespaced layer id, e.g. "opennlp:entities" or an add-on's
+  // "wordnet:senses".
+  string id = 1;
+  // Typed identity of the layer.
+  LayerIdentity identity = 2;
+  // Whether annotations carry spans or whole-document values.
+  LayerScope scope = 3;
+  // Models that produced this layer (ModelProvenance.model_ref). Several
+  // entries mean the layer merges providers; each annotation may then name
+  // its own.
+  repeated string model_refs = 4;
+  // The layer whose annotation positions this layer's indexes refer to: the
+  // token layer for dependency arcs, the entity layer for relations and
+  // coreference, the source layer for embeddings. Empty when the layer holds
+  // no index references.
+  optional string indexes_layer = 5;
+  // The annotations, in layer order. Index references count from 0 in this
+  // order.
+  repeated Annotation annotations = 6;
+}
+
+// One annotation: where it is, how sure the producer is, and what it says.
+message Annotation {
+  // The annotated text. Absent for document-scope annotations.
+  optional AnnotationSpan span = 1;
+  // The producer's probability for this annotation, in [0, 1]. Absent when
+  // the producer reports none (dictionary and rule annotators); never 0 as a
+  // stand-in for unknown.
+  optional double probability = 2;
+  // The model that produced this annotation when the layer has several.
+  optional string model_ref = 3;
+
+  oneof value {
+    // ---- Segmentation -----------------------------------------------------
+    Sentence sentence = 10;
+    TokenText token = 11;
+    WordType word_type = 12;
+    Stopword stopword = 13;
+    SubwordPiece subword = 14;
+
+    // ---- Morphology -------------------------------------------------------
+    PartOfSpeech pos = 20;
+    Lemma lemma = 21;
+    Stem stem = 22;
+    Term term = 23;
+
+    // ---- Syntax -----------------------------------------------------------
+    SyntacticChunk syntactic_chunk = 30;
+    Phrase phrase = 31;
+    ParseTree parse = 32;
+    DependencyArc dependency = 33;
+
+    // ---- Entities and meaning ---------------------------------------------
+    Entity entity = 40;
+    Relation relation = 41;
+    CorefMention coref = 42;
+    Speaker speaker = 43;
+    WordNetSense wordnet_sense = 44;
+    LexicalExpansion lexical_expansion = 45;
+    GlossaryMatch glossary = 46;
+
+    // ---- Quantities and time ----------------------------------------------
+    MoneyAmount money = 50;
+    Quantity quantity = 51;
+    TemporalExpression temporal = 52;
+    CalendarDate document_date = 53;
+
+    // ---- Geography --------------------------------------------------------
+    PlaceResolution place = 60;
+    ContainmentChain containment = 61;
+    RegionVote region_vote = 62;
+
+    // ---- Document level ---------------------------------------------------
+    LanguageGuess language = 70;
+    Category category = 71;
+    Sentiment sentiment = 72;
+    DocumentAnalytics analytics = 73;
+    TermVector term_vector = 74;
+    NormalizationResult normalization = 75;
+
+    // ---- Text quality and privacy -----------------------------------------
+    PiiMention pii = 80;
+    NoiseSpan noise = 81;
+    TextArtifact artifact = 82;
+    EmbeddedAsset asset = 83;
+
+    // ---- Vectors ----------------------------------------------------------
+    Embedding embedding = 90;
+    ChunkEmbeddingGroup chunk_group = 91;
+
+    // ---- Fallback ---------------------------------------------------------
+    // A layer value with no dedicated message yet.
+    GenericValue generic = 100;
+  }
+}
+
+// ============================================================================
+// Segmentation
+// ============================================================================
+
+// A sentence. The span is the sentence.
+message Sentence {}
+
+// A token.
+message TokenText {
+  // The covered text, as written in raw_text.
+  string text = 1;
+}
+
+// The UAX #29 word class of a token.
+message WordType {
+  DocumentWordType type = 1;
+}
+
+// A token the stopword list matched.
+message Stopword {
+  // The stopword list that matched, e.g. "en-default".
+  string list_id = 1;
+}
+
+// One subword unit from a vocabulary model (SentencePiece, WordPiece, BPE).
+message SubwordPiece {
+  // The piece in the vocabulary's normalized form; need not equal the text.
+  string piece = 1;
+  // The vocabulary id.
+  int32 vocabulary_id = 2;
+  // True for model control pieces (BOS, EOS, UNK), whose span is empty.
+  bool control = 3;
+}
+
+// ============================================================================
+// Morphology
+// ============================================================================
+
+// A part-of-speech tag.
+message PartOfSpeech {
+  // The tag, e.g. "NOUN" or "NN".
+  string tag = 1;
+  // The tag set the model emits, e.g. "UD", "PTB".
+  string tagset = 2;
+}
+
+// A lemma.
+message Lemma {
+  string lemma = 1;
+}
+
+// A stem and the stemmer configuration that produced it.
+message Stem {
+  string stem = 1;
+  StemmerAlgorithm algorithm = 2;
+  // ISO 639-3 language of the stemmer.
+  optional string language = 3;
+  optional string hunspell_dictionary_id = 4;
+}
+
+// An index term for a token under a named normalization (the qualifier of a
+// STANDARD_LAYER_TERMS layer, e.g. FULL_CASE_FOLD).
+message Term {
+  string term = 1;
+}
+
+// ============================================================================
+// Syntax
+// ============================================================================
+
+// A shallow syntactic chunk.
+message SyntacticChunk {
+  // The chunk tag, e.g. "NP", "VP".
+  string tag = 1;
+}
+
+// A constituent phrase from the parser.
+message Phrase {
+  // The phrase label, e.g. "NP".
+  string label = 1;
+  // The phrase's head word.
+  AnnotationSpan head = 2;
+}
+
+// A dependency arc between two tokens of the layer named by
+// TypedLayer.indexes_layer.
+message DependencyArc {
+  // Index of the head token; -1 for the root.
+  int32 head = 1;
+  // Index of the dependent token.
+  int32 dependent = 2;
+  // The dependency relation, e.g. "nsubj".
+  string relation = 3;
+}
+
+// ============================================================================
+// Entities and meaning
+// ============================================================================
+
+// A named entity, with every recognizer that voted for it.
+message Entity {
+  // The entity type, e.g. "person", "location".
+  string type = 1;
+  // The covered text.
+  string text = 2;
+  // One entry per recognizer that found this entity. With one provider this
+  // has one entry; with several, agreement is the number of entries and the
+  // Annotation.probability is the highest vote.
+  repeated EntityVote votes = 3;
+}
+
+// One recognizer's vote for an entity.
+message EntityVote {
+  // The configured recognizer id, e.g. "person".
+  string recognizer_id = 1;
+  // The model behind the vote (ModelProvenance.model_ref).
+  string model_ref = 2;
+  // This recognizer's probability, when it reports one.
+  optional double probability = 3;
+  // This recognizer's own span, when it differs from the entity's.
+  optional AnnotationSpan span = 4;
+}
+
+// A relation between two entities of the layer named by
+// TypedLayer.indexes_layer.
+message Relation {
+  // The relation type, e.g. "works_for".
+  string type = 1;
+  // Index of the subject entity.
+  int32 subject = 2;
+  // Index of the object entity.
+  int32 object = 3;
+}
+
+// One mention in a coreference chain.
+message CorefMention {
+  // The chain this mention belongs to; equal ids are coreferent.
+  int32 chain = 1;
+  CorefMentionKind kind = 2;
+  // Index of the matching entity in the layer named by
+  // TypedLayer.indexes_layer, when the mention is an entity.
+  optional int32 entity = 3;
+}
+
+enum CorefMentionKind {
+  COREF_MENTION_KIND_UNSPECIFIED = 0;
+  // A named entity mention.
+  COREF_MENTION_KIND_ENTITY = 1;
+  // A common noun phrase.
+  COREF_MENTION_KIND_NOMINAL = 2;
+  // A pronoun.
+  COREF_MENTION_KIND_PRONOUN = 3;
+  // A gold-standard mention from training data.
+  COREF_MENTION_KIND_GOLD = 4;
+}
+
+// The speaker of a span (dialogue and transcripts).
+message Speaker {
+  string speaker = 1;
+}
+
+// A WordNet sense assigned to a span.
+message WordNetSense {
+  // The synset id in the lexicon, e.g. "oewn-02084071-n".
+  string synset_id = 1;
+  // The sense id, when the lexicon has sense ids.
+  optional string sense_id = 2;
+  WordNetPos pos = 3;
+  // The lemma the span was matched as.
+  string lemma = 4;
+  // All lemmas of the synset.
+  repeated string synset_lemmas = 5;
+  // The synset definition.
+  string gloss = 6;
+  // One-based rank of this sense among the lemma's senses.
+  int32 sense_rank = 7;
+  // The lexicon, e.g. "oewn:2024".
+  string lexicon_id = 8;
+}
+
+enum WordNetPos {
+  WORD_NET_POS_UNSPECIFIED = 0;
+  WORD_NET_POS_NOUN = 1;
+  WORD_NET_POS_VERB = 2;
+  WORD_NET_POS_ADJECTIVE = 3;
+}
+
+// A term related to the span through a lexical relation.
+message LexicalExpansion {
+  // The related term.
+  string term = 1;
+  WordNetRelation relation = 2;
+  // Graph distance from the source sense.
+  int32 depth = 3;
+  // One-based rank of the source sense used.
+  int32 sense_rank = 4;
+  // The weight the expander assigned.
+  double weight = 5;
+  string lexicon_id = 6;
+  // The synset the term was reached in.
+  optional string synset_id = 7;
+}
+
+// WordNet and Global WordNet LMF relations, mirroring
+// opennlp.tools.wordnet.WordNetRelation.
+enum WordNetRelation {
+  WORD_NET_RELATION_UNSPECIFIED = 0;
+  WORD_NET_RELATION_ANTONYM = 1;
+  WORD_NET_RELATION_HYPERNYM = 2;
+  WORD_NET_RELATION_INSTANCE_HYPERNYM = 3;
+  WORD_NET_RELATION_HYPONYM = 4;
+  WORD_NET_RELATION_INSTANCE_HYPONYM = 5;
+  WORD_NET_RELATION_MEMBER_HOLONYM = 6;
+  WORD_NET_RELATION_SUBSTANCE_HOLONYM = 7;
+  WORD_NET_RELATION_PART_HOLONYM = 8;
+  WORD_NET_RELATION_MEMBER_MERONYM = 9;
+  WORD_NET_RELATION_SUBSTANCE_MERONYM = 10;
+  WORD_NET_RELATION_PART_MERONYM = 11;
+  WORD_NET_RELATION_ATTRIBUTE = 12;
+  WORD_NET_RELATION_DERIVATIONALLY_RELATED = 13;
+  WORD_NET_RELATION_ENTAILMENT = 14;
+  WORD_NET_RELATION_ENTAILED_BY = 15;
+  WORD_NET_RELATION_CAUSE = 16;
+  WORD_NET_RELATION_CAUSED_BY = 17;
+  WORD_NET_RELATION_ALSO_SEE = 18;
+  WORD_NET_RELATION_VERB_GROUP = 19;
+  WORD_NET_RELATION_SIMILAR_TO = 20;
+  WORD_NET_RELATION_PARTICIPLE = 21;
+  WORD_NET_RELATION_PERTAINYM = 22;
+  WORD_NET_RELATION_DOMAIN_TOPIC = 23;
+  WORD_NET_RELATION_MEMBER_OF_DOMAIN_TOPIC = 24;
+  WORD_NET_RELATION_DOMAIN_REGION = 25;
+  WORD_NET_RELATION_MEMBER_OF_DOMAIN_REGION = 26;
+  WORD_NET_RELATION_DOMAIN_USAGE = 27;
+  WORD_NET_RELATION_MEMBER_OF_DOMAIN_USAGE = 28;
+  WORD_NET_RELATION_AGENT = 29;
+  WORD_NET_RELATION_BE_IN_STATE = 30;
+  WORD_NET_RELATION_CLASSIFIED_BY = 31;
+  WORD_NET_RELATION_CLASSIFIES = 32;
+  WORD_NET_RELATION_CO_AGENT_INSTRUMENT = 33;
+  WORD_NET_RELATION_CO_AGENT_PATIENT = 34;
+  WORD_NET_RELATION_CO_AGENT_RESULT = 35;
+  WORD_NET_RELATION_CO_INSTRUMENT_AGENT = 36;
+  WORD_NET_RELATION_CO_INSTRUMENT_PATIENT = 37;
+  WORD_NET_RELATION_CO_INSTRUMENT_RESULT = 38;
+  WORD_NET_RELATION_CO_PATIENT_AGENT = 39;
+  WORD_NET_RELATION_CO_PATIENT_INSTRUMENT = 40;
+  WORD_NET_RELATION_CO_RESULT_AGENT = 41;
+  WORD_NET_RELATION_CO_RESULT_INSTRUMENT = 42;
+  WORD_NET_RELATION_CO_ROLE = 43;
+  WORD_NET_RELATION_DIRECTION = 44;
+  WORD_NET_RELATION_EQ_SYNONYM = 45;
+  WORD_NET_RELATION_LOCATION_HOLONYM = 46;
+  WORD_NET_RELATION_PORTION_HOLONYM = 47;
+  WORD_NET_RELATION_HOLONYM = 48;
+  WORD_NET_RELATION_IN_MANNER = 49;
+  WORD_NET_RELATION_INSTRUMENT = 50;
+  WORD_NET_RELATION_LOCATION = 51;
+  WORD_NET_RELATION_INVOLVED = 52;
+  WORD_NET_RELATION_INVOLVED_AGENT = 53;
+  WORD_NET_RELATION_INVOLVED_DIRECTION = 54;
+  WORD_NET_RELATION_INVOLVED_INSTRUMENT = 55;
+  WORD_NET_RELATION_INVOLVED_LOCATION = 56;
+  WORD_NET_RELATION_INVOLVED_PATIENT = 57;
+  WORD_NET_RELATION_INVOLVED_RESULT = 58;
+  WORD_NET_RELATION_INVOLVED_SOURCE_DIRECTION = 59;
+  WORD_NET_RELATION_INVOLVED_TARGET_DIRECTION = 60;
+  WORD_NET_RELATION_IR_SYNONYM = 61;
+  WORD_NET_RELATION_IS_SUBEVENT_OF = 62;
+  WORD_NET_RELATION_MANNER_OF = 63;
+  WORD_NET_RELATION_LOCATION_MERONYM = 64;
+  WORD_NET_RELATION_PORTION_MERONYM = 65;
+  WORD_NET_RELATION_MERONYM = 66;
+  WORD_NET_RELATION_PATIENT = 67;
+  WORD_NET_RELATION_RESTRICTED_BY = 68;
+  WORD_NET_RELATION_RESTRICTS = 69;
+  WORD_NET_RELATION_RESULT = 70;
+  WORD_NET_RELATION_ROLE = 71;
+  WORD_NET_RELATION_SOURCE_DIRECTION = 72;
+  WORD_NET_RELATION_STATE_OF = 73;
+  WORD_NET_RELATION_SUBEVENT = 74;
+  WORD_NET_RELATION_TARGET_DIRECTION = 75;
+  WORD_NET_RELATION_FEMININE = 76;
+  WORD_NET_RELATION_HAS_FEMININE = 77;
+  WORD_NET_RELATION_MASCULINE = 78;
+  WORD_NET_RELATION_HAS_MASCULINE = 79;
+  WORD_NET_RELATION_YOUNG = 80;
+  WORD_NET_RELATION_HAS_YOUNG = 81;
+  WORD_NET_RELATION_DIMINUTIVE = 82;
+  WORD_NET_RELATION_HAS_DIMINUTIVE = 83;
+  WORD_NET_RELATION_AUGMENTATIVE = 84;
+  WORD_NET_RELATION_HAS_AUGMENTATIVE = 85;
+  WORD_NET_RELATION_ANTO_GRADABLE = 86;
+  WORD_NET_RELATION_ANTO_SIMPLE = 87;
+  WORD_NET_RELATION_ANTO_CONVERSE = 88;
+  WORD_NET_RELATION_SIMPLE_ASPECT_IP = 89;
+  WORD_NET_RELATION_SECONDARY_ASPECT_IP = 90;
+  WORD_NET_RELATION_SIMPLE_ASPECT_PI = 91;
+  WORD_NET_RELATION_SECONDARY_ASPECT_PI = 92;
+  WORD_NET_RELATION_METAPHOR = 93;
+  WORD_NET_RELATION_HAS_METAPHOR = 94;
+  WORD_NET_RELATION_METONYM = 95;
+  WORD_NET_RELATION_HAS_METONYM = 96;
+  WORD_NET_RELATION_MATERIAL = 97;
+  WORD_NET_RELATION_EVENT = 98;
+  WORD_NET_RELATION_BY_MEANS_OF = 99;
+  WORD_NET_RELATION_UNDERGOER = 100;
+  WORD_NET_RELATION_PROPERTY = 101;
+  WORD_NET_RELATION_STATE = 102;
+  WORD_NET_RELATION_USES = 103;
+  WORD_NET_RELATION_DESTINATION = 104;
+  WORD_NET_RELATION_BODY_PART = 105;
+}
+
+// A glossary entry matched in the text.
+message GlossaryMatch {
+  // The glossary entry id.
+  string id = 1;
+  // The canonical term of the entry.
+  string term = 2;
+  // The glossary, e.g. a configured resource id.
+  string glossary_id = 3;
+}
+
+// ============================================================================
+// Quantities and time
+// ============================================================================
+
+// A money amount.
+message MoneyAmount {
+  // Exact decimal amount as text, e.g. "1250.00"; never a binary float.
+  string amount = 1;
+  // ISO 4217 currency code, e.g. "USD".
+  string currency = 2;
+  // Set on a converted layer: the amount and currency as written in the text.
+  optional string original_amount = 3;
+  optional string original_currency = 4;
+}
+
+// A measured quantity.
+message Quantity {
+  // Exact decimal value as text.
+  string value = 1;
+  // The unit, e.g. "km", "kg", "%".
+  string unit = 2;
+}
+
+// A temporal expression.
+message TemporalExpression {
+  // The normalized value, e.g. "2026-10-03", "2026-W40", "2026-Q4".
+  string value = 1;
+  TemporalGranularity granularity = 2;
+  TemporalOrigin origin = 3;
+}
+
+enum TemporalGranularity {
+  TEMPORAL_GRANULARITY_UNSPECIFIED = 0;
+  TEMPORAL_GRANULARITY_DAY = 1;
+  TEMPORAL_GRANULARITY_WEEK = 2;
+  TEMPORAL_GRANULARITY_MONTH = 3;
+  TEMPORAL_GRANULARITY_QUARTER = 4;
+  TEMPORAL_GRANULARITY_YEAR = 5;
+}
+
+enum TemporalOrigin {
+  TEMPORAL_ORIGIN_UNSPECIFIED = 0;
+  // A fixed calendar reference in the text.
+  TEMPORAL_ORIGIN_ABSOLUTE = 1;
+  // Resolved against the document date ("next week").
+  TEMPORAL_ORIGIN_RELATIVE = 2;
+}
+
+// A calendar date, used for the document date.
+message CalendarDate {
+  int32 year = 1;
+  int32 month = 2;
+  int32 day = 3;
+}
+
+// ============================================================================
+// Geography
+// ============================================================================
+
+// A place mention resolved against a gazetteer.
+message PlaceResolution {
+  GazetteerPlace place = 1;
+  // Resolution confidence in [0, 1].
+  double confidence = 2;
+}
+
+// A gazetteer record, mirroring opennlp.tools.geo.GazetteerEntry.
+message GazetteerPlace {
+  // The gazetteer, e.g. "geonames", "census".
+  string source = 1;
+  // The record id within the source.
+  string record_id = 2;
+  string name = 3;
+  repeated string alternate_names = 4;
+  GeoPoint location = 5;
+  optional GeoBoundingBox bounding_box = 6;
+  // ISO 3166-1 alpha-2 country code.
+  optional string country_code = 7;
+  // Enclosing place names, nearest first.
+  repeated string containment = 8;
+  int64 population = 9;
+  PlaceFeatureClass feature_class = 10;
+  // Cross-references keyed by scheme: "geonames", "wikidata", "whosonfirst",
+  // "fips", "geoid", "zcta".
+  map<string, PlaceAttribute> attributes = 11;
+}
+
+message GeoPoint {
+  double latitude = 1;
+  double longitude = 2;
+}
+
+message GeoBoundingBox {
+  double west = 1;
+  double south = 2;
+  double east = 3;
+  double north = 4;
+}
+
+enum PlaceFeatureClass {
+  PLACE_FEATURE_CLASS_UNSPECIFIED = 0;
+  PLACE_FEATURE_CLASS_CITY = 1;
+  PLACE_FEATURE_CLASS_ADMIN = 2;
+  PLACE_FEATURE_CLASS_POI = 3;
+}
+
+// One cross-reference value with where it came from.
+message PlaceAttribute {
+  string value = 1;
+  string source = 2;
+  optional string notes = 3;
+}
+
+// The administrative ancestry of a resolved place.
+message ContainmentChain {
+  // Ancestors, nearest first.
+  repeated PlaceAncestor ancestors = 1;
+}
+
+message PlaceAncestor {
+  string id = 1;
+  string name = 2;
+  // The ancestor's level, e.g. "county", "state", "country".
+  string type = 3;
+}
+
+// One country's share of a document's region ballot. A region layer holds
+// one document-scope annotation per candidate, highest share first.
+message RegionVote {
+  // ISO 3166-1 alpha-2 country code.
+  string country_code = 1;
+  // The candidate's share of the ballot, in [0, 1].
+  double share = 2;
+  // True for the candidate the annotator chose; no candidate is chosen when
+  // the lead is below the configured margin.
+  bool chosen = 3;
+}
+
+// ============================================================================
+// Document level
+// ============================================================================
+
+// One language prediction. A language layer holds one document-scope
+// annotation per prediction, best first; the probability is on Annotation.
+message LanguageGuess {
+  // ISO 639-3 code.
+  string code = 1;
+  // One-based rank.
+  int32 rank = 2;
+}
+
+// A document category from a classifier.
+message Category {
+  string label = 1;
+  // The classifier's score for the label.
+  double score = 2;
+  // True for the best category.
+  bool best = 3;
+}
+
+// A sentiment label.
+message Sentiment {
+  // e.g. "positive", "negative", "neutral".
+  string label = 1;
+  double score = 2;
+}
+
+// Aggregate frequency of one term with every occurrence.
+message TermVector {
+  string term = 1;
+  int32 frequency = 2;
+  // Empty in TERM_VECTOR_MODE_SCORING_ONLY.
+  repeated AnnotationSpan occurrences = 3;
+  TermVectorMode mode = 4;
+}
+
+// ============================================================================
+// Text quality and privacy
+// ============================================================================
+
+// Personally identifying data found in the text.
+message PiiMention {
+  PiiType type = 1;
+  // The canonical form, e.g. digits only for a phone number.
+  string normalized = 2;
+}
+
+enum PiiType {
+  PII_TYPE_UNSPECIFIED = 0;
+  PII_TYPE_EMAIL = 1;
+  PII_TYPE_PHONE = 2;
+  PII_TYPE_IBAN = 3;
+  PII_TYPE_CARD = 4;
+  PII_TYPE_MAC = 5;
+  PII_TYPE_AWS_ACCESS_KEY = 6;
+  PII_TYPE_GITHUB_TOKEN = 7;
+  PII_TYPE_JWT = 8;
+  PII_TYPE_BTC_ADDRESS = 9;
+  PII_TYPE_ETH_ADDRESS = 10;
+  PII_TYPE_ABA_ROUTING = 11;
+  PII_TYPE_URL_CREDENTIAL = 12;
+  PII_TYPE_US_SSN = 13;
+  PII_TYPE_US_ITIN = 14;
+  PII_TYPE_UK_NHS = 15;
+  PII_TYPE_DE_STEUER_ID = 16;
+  PII_TYPE_IMEI = 17;
+  PII_TYPE_CA_SIN = 18;
+}
+
+// A span of damaged or low-quality text.
+message NoiseSpan {
+  NoiseSeverity severity = 1;
+  double score = 2;
+}
+
+enum NoiseSeverity {
+  NOISE_SEVERITY_UNSPECIFIED = 0;
+  NOISE_SEVERITY_MISSPELLED = 1;
+  NOISE_SEVERITY_DAMAGED = 2;
+  NOISE_SEVERITY_GIBBERISH = 3;
+  NOISE_SEVERITY_BINARYISH = 4;
+}
+
+// A character-level artifact (encoding damage, invisible characters).
+message TextArtifact {
+  TextArtifactType type = 1;
+}
+
+enum TextArtifactType {
+  TEXT_ARTIFACT_TYPE_UNSPECIFIED = 0;
+  TEXT_ARTIFACT_TYPE_REPLACEMENT = 1;
+  TEXT_ARTIFACT_TYPE_CONTROL = 2;
+  TEXT_ARTIFACT_TYPE_NONCHARACTER = 3;
+  TEXT_ARTIFACT_TYPE_UNPAIRED_SURROGATE = 4;
+  TEXT_ARTIFACT_TYPE_PRIVATE_USE = 5;
+  TEXT_ARTIFACT_TYPE_BIDI_CONTROL = 6;
+  TEXT_ARTIFACT_TYPE_ZERO_WIDTH = 7;
+  TEXT_ARTIFACT_TYPE_UNICODE_TAG = 8;
+  TEXT_ARTIFACT_TYPE_MOJIBAKE = 9;
+}
+
+// An encoded binary payload embedded in the text (a data URI, base64 block).
+message EmbeddedAsset {
+  // The encoded payload inside the annotation's span.
+  AnnotationSpan payload = 1;
+  AssetFormat format = 2;
+  // The declared or sniffed media type, e.g. "image/png".
+  string media_type = 3;
+  // Size in bytes once decoded.
+  int64 decoded_length = 4;
+  // Pixel size for images; 0 when not an image or unknown.
+  int32 width = 5;
+  int32 height = 6;
+}
+
+enum AssetFormat {
+  ASSET_FORMAT_UNSPECIFIED = 0;
+  ASSET_FORMAT_PNG = 1;
+  ASSET_FORMAT_JPEG = 2;
+  ASSET_FORMAT_GIF = 3;
+  ASSET_FORMAT_WEBP = 4;
+  ASSET_FORMAT_WAV = 5;
+  ASSET_FORMAT_PDF = 6;
+  ASSET_FORMAT_ZIP = 7;
+  ASSET_FORMAT_TIFF = 8;
+  ASSET_FORMAT_GZIP = 9;
+  ASSET_FORMAT_SEVEN_ZIP = 10;
+  ASSET_FORMAT_RAR = 11;
+  ASSET_FORMAT_FLAC = 12;
+  ASSET_FORMAT_OGG = 13;
+  ASSET_FORMAT_MIDI = 14;
+}
+
+// ============================================================================
+// Vectors
+// ============================================================================
+
+// A dense vector for one annotation of the layer named by
+// TypedLayer.indexes_layer, or for the span.
+message Embedding {
+  repeated float vector = 1;
+  // Index of the source annotation; absent when the span alone identifies it.
+  optional int32 source = 2;
+  EmbeddingGranularity granularity = 3;
+  VectorNormalization normalization = 4;
+  optional EmbeddingRoute route = 5;
+}
+
+// ============================================================================
+// Fallback
+// ============================================================================
+
+// A layer value with no dedicated message: an add-on layer the contract does
+// not type yet. Readers should prefer the typed arms; a value moves out of
+// here once it has its own message.
+message GenericValue {
+  // The producer's value type, e.g. the Java class name.
+  string value_type = 1;
+  oneof value {
+    string text = 2;
+    double number = 3;
+    bool flag = 4;
+    google.protobuf.Struct structured = 5;
+  }
+}

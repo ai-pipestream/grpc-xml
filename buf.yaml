@@ -18,6 +18,11 @@ lint:
     # follows that schema, not this repo's comment rule.
     COMMENTS:
       - proto/ai/pipestream/document/v1/document.proto
+      # The OpenNLP contracts document.proto imports are vendored byte-identical
+      # from the gRParse repo (collectors/); their comment coverage follows
+      # OpenNLP's upstream files, not this repo's comment rule.
+      - proto/org/apache/opennlp/grpc/v1/opennlp_annotations.proto
+      - proto/org/apache/opennlp/grpc/v1/opennlp_document.proto
 breaking:
   use:
     - FILE
