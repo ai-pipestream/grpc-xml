@@ -66,11 +66,36 @@ pub mod proto {
 /// `proto::v1::parse_xml_response` names `super::super::super::document::v1`,
 /// which is `crate::document::v1`. Moving this module changes nothing but
 /// the compile error.
-#[allow(missing_docs, clippy::all, clippy::pedantic, clippy::nursery)]
+#[allow(
+    missing_docs,
+    rustdoc::all,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery
+)]
 pub mod document {
     /// Messages for the `ai.pipestream.document.v1` package.
     pub mod v1 {
         tonic::include_proto!("ai.pipestream.document.v1");
+    }
+}
+
+/// Generated protobuf messages for `org.apache.opennlp.grpc.v1`, the OpenNLP
+/// analyses `Document.analyses` carries. Vendored byte-identical from the
+/// gRParse repository; this collector never fills them. `build.rs` maps the
+/// package here with `extern_path`, because prost's own relative path from
+/// [`document`] would climb past the crate root.
+#[allow(
+    missing_docs,
+    rustdoc::all,
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery
+)]
+pub mod opennlp {
+    /// Messages for the `org.apache.opennlp.grpc.v1` package.
+    pub mod v1 {
+        tonic::include_proto!("org.apache.opennlp.grpc.v1");
     }
 }
 
