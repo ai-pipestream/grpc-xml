@@ -1,9 +1,11 @@
 name: Publish Images
 
 # Builds the service and viewer images and pushes them to
-# docker.io/pipestreamai. Every push to main republishes :latest; a manual
-# dispatch with a version input also tags that version. Docker Hub
-# credentials come from the DOCKER_USER / DOCKER_TOKEN org secrets.
+# docker.io/pipestreamai. Every push to main republishes :latest.
+# A push of a v<version> tag (the fleet release, cut on main) publishes
+# :<version> beside :latest; so does a manual dispatch with a version
+# input. Docker Hub credentials come from the DOCKER_USER / DOCKER_TOKEN
+# org secrets.
 #
 # Multi-arch (amd64 + arm64): the runtime base (dhi.io/debian-base) and the
 # viewer base (dhi.io/node) are both published for the two platforms, and
@@ -11,6 +13,7 @@ name: Publish Images
 on:
   push:
     branches: [main]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
@@ -33,14 +36,32 @@ jobs:
           registry: docker.io
           username: ${{ secrets.DOCKER_USER }}
           password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Resolve the version
+        id: version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/tags/v*) version="${GITHUB_REF_NAME#v}" ;;
+            *) version="${INPUT_VERSION:-}" ;;
+          esac
+          if [ -n "$version" ] && ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z][0-9A-Za-z.-]{0,63})?$ ]]; then
+            echo "::error::version '$version' is not a semantic version such as 0.3.0"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Compute tags
         id: tags
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           svc="docker.io/pipestreamai/grpc-xml:latest"
           ui="docker.io/pipestreamai/grpc-xml-ui:latest"
-          if [ -n "${{ inputs.version }}" ]; then
-            svc="$svc,docker.io/pipestreamai/grpc-xml:${{ inputs.version }}"
-            ui="$ui,docker.io/pipestreamai/grpc-xml-ui:${{ inputs.version }}"
+          if [ -n "$VERSION" ]; then
+            svc="$svc,docker.io/pipestreamai/grpc-xml:$VERSION"
+            ui="$ui,docker.io/pipestreamai/grpc-xml-ui:$VERSION"
           fi
           echo "svc=$svc" >> "$GITHUB_OUTPUT"
           echo "ui=$ui" >> "$GITHUB_OUTPUT"
