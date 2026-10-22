@@ -52,6 +52,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Log in to Docker Hardened Images (dhi.io)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_TOKEN }}
       # The image build runs the suite itself, so this also proves the tests
       # pass in a clean container with no host toolchain state.
       - name: docker build
