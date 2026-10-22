@@ -19,6 +19,8 @@
 //! "diskless" means in practice: there is no spill path because there is
 //! nothing large enough to want one.
 
+use std::collections::VecDeque;
+use std::future::Future as _;
 use std::io::{self, Read};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -28,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use prost::Message as _;
 use tokio::sync::{Semaphore, mpsc};
+use tokio::time::Sleep;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -271,12 +274,7 @@ impl XmlParseService for XmlGrpc {
             capacity: timeouts.event_queue_bytes,
             stall: timeouts.consumer_stall,
         };
-        let stream = ParseStream {
-            rx: event_rx,
-            bytes: Arc::clone(&queue.bytes),
-            stats: stats.clone(),
-            finished: false,
-        };
+        let stream = ParseStream::new(event_rx, Arc::clone(&queue.bytes), stats.clone());
         let forward_tx = queue.tx.clone();
         let panic_tx = queue.tx.clone();
 
@@ -640,6 +638,19 @@ impl EventQueue {
     }
 }
 
+/// Queued event bytes a batch gathers before the transport gets it. tonic
+/// packs the messages that are ready together into one HTTP/2 DATA frame, and
+/// h2 (0.4.18 and later) charges every DATA frame under 256 bytes against a
+/// per-connection budget that refills only as the application reads. A client
+/// that sends its document before it reads the responses would otherwise get
+/// one small frame per event and close the connection with GOAWAY
+/// `too_many_data_frames` after about a hundred of them.
+const BATCH_BYTES: usize = 256;
+
+/// The longest a small batch waits for more events, so a sparse stream still
+/// reaches the client while the upload continues.
+const BATCH_WAIT: Duration = Duration::from_millis(2);
+
 /// The response stream of one parse.
 ///
 /// It returns each event's queue bytes as the transport takes the event, and
@@ -647,42 +658,98 @@ impl EventQueue {
 /// before its `ParseStatus` trailer or an error status ends with an error
 /// status instead. Dropping it, which tonic does when the client cancels or
 /// disconnects, tells the parse to stop.
+///
+/// Events go out in batches of at least [`BATCH_BYTES`], after [`BATCH_WAIT`],
+/// or at once when the stream is ending, so the transport writes a few full
+/// DATA frames rather than one per event.
 pub struct ParseStream {
     rx: mpsc::UnboundedReceiver<Queued>,
     bytes: Arc<Semaphore>,
     stats: InputStats,
     finished: bool,
+    /// Events taken from the queue and not yet handed to the transport.
+    batch: VecDeque<Queued>,
+    /// The queue bytes held by `batch`.
+    batch_bytes: usize,
+    /// The batch holds the last event of the stream.
+    batch_final: bool,
+    /// The batch is going out: every event in it is handed over before the
+    /// stream gathers again.
+    releasing: bool,
+    /// Runs while a small batch waits for more events.
+    wait: Option<Pin<Box<Sleep>>>,
+}
+
+impl ParseStream {
+    fn new(rx: mpsc::UnboundedReceiver<Queued>, bytes: Arc<Semaphore>, stats: InputStats) -> Self {
+        Self {
+            rx,
+            bytes,
+            stats,
+            finished: false,
+            batch: VecDeque::new(),
+            batch_bytes: 0,
+            batch_final: false,
+            releasing: false,
+            wait: None,
+        }
+    }
 }
 
 impl Stream for ParseStream {
     type Item = Result<pb::ParseXmlResponse, Status>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.finished {
+        let this = &mut *self;
+        if this.finished {
             return Poll::Ready(None);
         }
-        match self.rx.poll_recv(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Queued { cost, item })) => {
-                if cost > 0 {
-                    self.bytes.add_permits(cost as usize);
+        while !this.batch_final {
+            match this.rx.poll_recv(cx) {
+                Poll::Pending => break,
+                Poll::Ready(Some(queued)) => {
+                    this.batch_final = match &queued.item {
+                        Err(_) => true,
+                        Ok(event) => {
+                            matches!(event.event, Some(pb::parse_xml_response::Event::Status(_)))
+                        }
+                    };
+                    this.batch_bytes += queued.cost as usize;
+                    this.batch.push_back(queued);
                 }
-                let terminal = match &item {
-                    Err(_) => true,
-                    Ok(event) => {
-                        matches!(event.event, Some(pb::parse_xml_response::Event::Status(_)))
-                    }
-                };
-                self.finished = terminal;
-                Poll::Ready(Some(item))
-            }
-            Poll::Ready(None) => {
-                self.finished = true;
-                Poll::Ready(Some(Err(Status::internal(
-                    "the parse ended without a ParseStatus trailer",
-                ))))
+                Poll::Ready(None) => {
+                    this.batch_final = true;
+                    this.batch.push_back(Queued::failure(Status::internal(
+                        "the parse ended without a ParseStatus trailer",
+                    )));
+                }
             }
         }
+        if this.batch.is_empty() {
+            return Poll::Pending;
+        }
+        if !this.releasing && !this.batch_final && this.batch_bytes < BATCH_BYTES {
+            let wait = this
+                .wait
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(BATCH_WAIT)));
+            if wait.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+        }
+        this.releasing = true;
+        this.wait = None;
+        let Some(Queued { cost, item }) = this.batch.pop_front() else {
+            return Poll::Pending;
+        };
+        this.batch_bytes -= cost as usize;
+        if cost > 0 {
+            this.bytes.add_permits(cost as usize);
+        }
+        if this.batch.is_empty() {
+            this.releasing = false;
+            this.finished = this.batch_final;
+        }
+        Poll::Ready(Some(item))
     }
 }
 
