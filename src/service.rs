@@ -659,7 +659,7 @@ const BATCH_WAIT: Duration = Duration::from_millis(2);
 /// status instead. Dropping it, which tonic does when the client cancels or
 /// disconnects, tells the parse to stop.
 ///
-/// Events go out in batches of at least [`BATCH_BYTES`], after [`BATCH_WAIT`],
+/// Events go out in batches of at least `BATCH_BYTES`, after `BATCH_WAIT`,
 /// or at once when the stream is ending, so the transport writes a few full
 /// DATA frames rather than one per event.
 pub struct ParseStream {
