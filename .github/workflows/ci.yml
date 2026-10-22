@@ -13,9 +13,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: bufbuild/buf-action@v1
-        with:
-          setup_only: true
+      # A checksummed release download behaves the same on GitHub and Forgejo.
+      - name: Install buf
+        env:
+          BUF_VERSION: 1.71.0
+        run: |
+          base="https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}"
+          bin="buf-Linux-$(uname -m)"
+          cd "$RUNNER_TEMP"
+          curl -sSfLO "$base/$bin"
+          curl -sSfL "$base/sha256.txt" | grep " $bin\$" | sha256sum -c -
+          install -m 0755 "$bin" /usr/local/bin/buf
+          buf --version
       - name: buf lint
         run: buf lint
       - name: buf format
@@ -29,13 +38,24 @@ jobs:
 
   rust:
     runs-on: ubuntu-latest
+    # Docker Hardened Images Rust toolchain, the image the Dockerfile builds
+    # from. dhi.io signs in with the Docker Hub org credentials.
+    container:
+      image: dhi.io/rust:1-dev
+      credentials:
+        username: ${{ secrets.DOCKER_USER }}
+        password: ${{ secrets.DOCKER_TOKEN }}
     steps:
+      # The hardened image ships the Rust toolchain (rustfmt and clippy
+      # included) and a C linker only. The build needs protoc, the actions
+      # need git and node.
+      - name: Install job tooling
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git nodejs protobuf-compiler libprotobuf-dev
+          # The workspace mount belongs to the runner user, not root.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: rustfmt
         run: cargo fmt --check
