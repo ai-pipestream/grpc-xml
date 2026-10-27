@@ -3,6 +3,7 @@
 //! XBRL instances: contexts and units read whole, facts streamed one event
 //! each as their end tags close.
 
+use std::collections::HashMap;
 use std::io::BufRead;
 
 use super::{Driver, ParseError, Step, collapse};
@@ -329,18 +330,34 @@ impl<R: BufRead> Driver<'_, R> {
     /// text exists, and dropping it would repeat the bug this fixes.
     pub(super) fn read_note_link(&mut self, kind: pb::XbrlNoteKind) -> Result<(), ParseError> {
         let link = self.read_note_link_body(kind)?;
+        // Resolving each note by scanning every arc and then, for every
+        // matching arc, every locator is cubic in the size of one extended
+        // link. The element count is already bounded, but that bound still
+        // leaves room for a link whose notes, arcs and locators multiply into
+        // seconds of work. Indexing the locators by label and grouping the
+        // arcs by their target label first makes each note's resolution
+        // proportional to the arcs that point at it, so the whole pass is
+        // linear in the link.
+        let mut href_by_label: HashMap<&str, &str> = HashMap::new();
+        for (label, href) in &link.locators {
+            // The first locator with a label wins, matching the `find` this
+            // replaces.
+            href_by_label.entry(label).or_insert(href);
+        }
+        let mut froms_by_to: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (from, to) in &link.arcs {
+            froms_by_to.entry(to).or_default().push(from);
+        }
         for mut note in link.notes {
-            note.targets = link
-                .arcs
-                .iter()
-                .filter(|(_, to)| *to == note.label)
-                .filter_map(|(from, _)| {
-                    link.locators
-                        .iter()
-                        .find(|(label, _)| label == from)
-                        .map(|(_, href)| href.clone())
-                })
+            // Arc order inside a target group is document order, and a `from`
+            // with no locator resolves to nothing, exactly as before.
+            let targets = froms_by_to
+                .get(note.label.as_str())
+                .into_iter()
+                .flatten()
+                .filter_map(|from| href_by_label.get(*from).map(|href| (*href).to_owned()))
                 .collect();
+            note.targets = targets;
             self.counts.xbrl_notes += 1;
             self.send(pb::parse_xml_response::Event::XbrlNote(note))?;
         }
