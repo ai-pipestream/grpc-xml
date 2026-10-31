@@ -2032,6 +2032,9 @@ fn boolean(value: bool) -> doc::CellValue {
     doc::CellValue {
         kind: Some(doc::cell_value::Kind::Boolean(value)),
         number_format: None,
+        formula_source: None,
+        number_format_id: None,
+        style_id: None,
     }
 }
 
@@ -2053,6 +2056,9 @@ fn numeric_value(fact: &pb::Fact) -> Option<doc::CellValue> {
     Some(doc::CellValue {
         kind: Some(doc::cell_value::Kind::Number(number)),
         number_format: None,
+        formula_source: None,
+        number_format_id: None,
+        style_id: None,
     })
 }
 
@@ -2070,6 +2076,9 @@ fn accuracy_value(raw: Option<&str>) -> Option<doc::CellValue> {
     Some(doc::CellValue {
         kind: Some(doc::cell_value::Kind::Number(number)),
         number_format: None,
+        formula_source: None,
+        number_format_id: None,
+        style_id: None,
     })
 }
 
