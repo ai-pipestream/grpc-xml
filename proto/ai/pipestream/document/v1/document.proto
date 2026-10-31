@@ -159,6 +159,16 @@ message Document {
   // under the collector that raised it, verbatim. Warnings are not
   // failures: the parse stands. Extension beyond the upstream dialect.
   repeated CollectorWarning warnings = 31;
+
+  // Every decode step of every generative collector that read this
+  // document, one entry per page per collector, kept whole beside the
+  // items those steps produced. Nothing a model returns is dropped: the
+  // items above are a reading of these steps, and a consumer that wants
+  // the model's own output, its per-token confidence or the steps a logit
+  // rule overrode finds them here. Merges append; entries from different
+  // collectors never collide because each names its source. Extension
+  // beyond the upstream dialect.
+  repeated GenerationTrace generation_traces = 32;
 }
 
 // CollectorWarning is one warning a collector raised while reading the
@@ -388,6 +398,14 @@ message CollectorSource {
   optional string raw_score_kind = 6;
   // How many samples the score aggregates, so a three-token mean and a
   // three-thousand-token mean stay distinguishable.
+  //
+  // A generative collector (a document VLM decoding token by token) has no
+  // self-reported quality score; its only confidence signal is the
+  // log-probability of each token it chose. Such a collector sets
+  // raw_score to the aggregate over the item's tokens, raw_score_kind to
+  // the aggregate's name ("mean_logprob"), and raw_score_samples to the
+  // token count. The per-token values themselves are in
+  // Document.generation_traces.
   optional uint64 raw_score_samples = 7;
 }
 
@@ -527,6 +545,18 @@ enum DocItemLabel {
   DOC_ITEM_LABEL_FIELD_VALUE = 28;
   DOC_ITEM_LABEL_FIELD_HINT = 29;
   DOC_ITEM_LABEL_MARKER = 30;
+  // The three below have no upstream name. Producers put them on the item
+  // type a consumer that does not know them still reads sensibly, and the
+  // canonical renderer writes the nearest upstream label.
+  // A stamp or seal impression; carried on a PictureItem, rendered as
+  // "picture".
+  DOC_ITEM_LABEL_SEAL = 31;
+  // Marginal or sidebar text set apart from the body flow; carried on a
+  // TextItem, rendered as "text".
+  DOC_ITEM_LABEL_ASIDE = 32;
+  // An algorithm or pseudocode listing; carried on a CodeItem (or a
+  // TextItem), rendered as "code".
+  DOC_ITEM_LABEL_ALGORITHM = 33;
 }
 
 // Script defines the vertical positioning of text.
@@ -1939,11 +1969,99 @@ message GenerationSource {
   string model = 1;
   optional string endpoint = 2;
   // The provider's stop reason, verbatim; a length stop means the content
-  // is truncated.
+  // is truncated. This is the raw companion of `stop_reason`: it is kept
+  // even when stop_reason classifies it, and it is the only carrier when
+  // the value has no VlmStopReason.
   optional string finish_reason = 3;
   optional uint64 prompt_tokens = 4;
   optional uint64 completion_tokens = 5;
   optional double temperature = 6;
+  // Why the generation ended early, when it did; unset when it ran to its
+  // natural end or the producer does not say.
+  optional GenerationTruncation truncation = 7;
+  // finish_reason classified the way docling 2.140 classifies a VLM
+  // response (VlmPrediction.stop_reason). UNSPECIFIED when the producer
+  // gave no stop reason or one docling has no name for; finish_reason then
+  // keeps the verbatim value.
+  VlmStopReason stop_reason = 8;
+}
+
+// VlmStopReason mirrors docling's VlmStopReason (docling 2.140): why a VLM
+// generation ended. Upstream's "unspecified" member is the zero value.
+enum VlmStopReason {
+  VLM_STOP_REASON_UNSPECIFIED = 0;
+  // The token budget ran out ("length"); the content is truncated.
+  VLM_STOP_REASON_LENGTH = 1;
+  // A configured stop sequence matched ("stop_sequence").
+  VLM_STOP_REASON_STOP_SEQUENCE = 2;
+  // The model emitted its end-of-text token ("end_of_sequence"; OpenAI
+  // "stop").
+  VLM_STOP_REASON_END_OF_SEQUENCE = 3;
+  // The provider withheld content under its safety policy
+  // ("content_filter").
+  VLM_STOP_REASON_CONTENT_FILTERED = 4;
+  // The inference call failed and produced no output ("inference_error").
+  VLM_STOP_REASON_INFERENCE_ERROR = 5;
+}
+
+// GenerationTruncation names why a model generation was cut short.
+enum GenerationTruncation {
+  GENERATION_TRUNCATION_UNSPECIFIED = 0;
+  // The generation kept repeating the same short unit and was cancelled
+  // while streaming; the content is the output before the repeated tail.
+  GENERATION_TRUNCATION_REPETITION = 1;
+}
+
+// GenerationTrace is one page of one generative collector's decode: every
+// step it took on that page, in order, exactly as chosen, the closing
+// end-of-sequence step included. Steps are numbered document-wide per
+// collector, so a page's steps run first_step .. first_step + len(steps) - 1
+// and the pages of one collector tile its whole decode with no gap. The
+// field numbers 1 to 4 match the Unlimited-OCR collector's PageTokens, and
+// GenerationStep matches its TokenStep, so that record maps here without
+// loss.
+message GenerationTrace {
+  // The page the steps read, as keyed in Document.pages.
+  int32 page_no = 1;
+  // Document-wide index of steps[0] within this collector's decode.
+  uint64 first_step = 2;
+  // The steps, in decode order.
+  repeated GenerationStep steps = 3;
+  // The steps decoded to text, special tokens kept: the model's raw
+  // output for the page, byte for byte.
+  string text = 4;
+  // The collector and model that produced the steps.
+  CollectorSource source = 5;
+}
+
+// GenerationStep is one decode step.
+message GenerationStep {
+  // The chosen token id, in the model's own vocabulary.
+  uint32 token = 1;
+  // The token's vocabulary entry before byte decoding ("Ġpage").
+  string piece = 2;
+  // Log-probability of the chosen token under the raw logits.
+  float logprob = 3;
+  // The model's own top token under the raw logits. Equal to token unless
+  // a decoding rule overrode it.
+  uint32 model_token = 4;
+  // Log-probability of the model's top token.
+  float model_logprob = 5;
+  // Which decoding rule, if any, chose the token instead of the model.
+  GenerationIntervention intervention = 6;
+}
+
+// GenerationIntervention names the decoding rule that overrode a model's
+// top token.
+enum GenerationIntervention {
+  // The producer did not say.
+  GENERATION_INTERVENTION_UNSPECIFIED = 0;
+  // The model's top token was chosen.
+  GENERATION_INTERVENTION_NONE = 1;
+  // A no-repeat n-gram rule banned the model's top token.
+  GENERATION_INTERVENTION_REPEAT_BAN = 2;
+  // A structural guard (page count, per-page step cap) chose the token.
+  GENERATION_INTERVENTION_PAGE_GUARD = 3;
 }
 
 // OutlineEntry is one row of the source's own table of contents.
