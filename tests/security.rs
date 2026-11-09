@@ -570,3 +570,64 @@ async fn parses_past_the_concurrency_limit_are_refused_not_queued() {
         error.message()
     );
 }
+
+// --------------------------------------------------------- linkbase joins
+
+/// An XBRL instance whose footnote linkbase has `n` locators, `n` arcs and
+/// `n` footnotes, shaped so every arc points at every note's label and no
+/// arc's source names a locator. Resolving a note by scanning the arcs and
+/// then the locators for each match is cubic in `n`, and the bound on the
+/// element count leaves that product plenty of room.
+fn hostile_footnote_link(n: usize) -> String {
+    let mut document = String::from(
+        "<xbrl xmlns=\"http://www.xbrl.org/2003/instance\" \
+         xmlns:link=\"http://www.xbrl.org/2003/linkbase\" \
+         xmlns:xlink=\"http://www.w3.org/1999/xlink\">\
+         <link:footnoteLink xlink:type=\"extended\">",
+    );
+    for _ in 0..n {
+        document.push_str("<link:loc xlink:label=\"src\" xlink:href=\"#h\"/>");
+    }
+    for _ in 0..n {
+        document.push_str("<link:footnoteArc xlink:from=\"none\" xlink:to=\"note\"/>");
+    }
+    for _ in 0..n {
+        document.push_str("<link:footnote xlink:label=\"note\">t</link:footnote>");
+    }
+    document.push_str("</link:footnoteLink></xbrl>");
+    document
+}
+
+#[test]
+fn a_dense_footnote_linkbase_resolves_in_linear_time() {
+    // 1300 of each is about 180 KiB, far under any byte cap and just inside
+    // the element bound on one link. The link is well formed and every
+    // element is read, so only the cost of resolving the notes can push
+    // this past its bound.
+    let document = hostile_footnote_link(1300);
+    let stats = grpc_xml::parse::InputStats::with_limit(1 << 30);
+    let mut notes = 0usize;
+    let mut emit = |event: pb::ParseXmlResponse| {
+        if matches!(
+            event.event,
+            Some(pb::parse_xml_response::Event::XbrlNote(_))
+        ) {
+            notes += 1;
+        }
+        true
+    };
+    let started = Instant::now();
+    grpc_xml::parse::parse(
+        std::io::BufReader::new(document.as_bytes()),
+        &grpc_xml::parse::ParseConfig::default(),
+        &stats,
+        &mut emit,
+    )
+    .expect("a well-formed linkbase parses");
+    let elapsed = started.elapsed();
+    assert_eq!(notes, 1300, "every footnote reaches the wire");
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "resolving a dense linkbase must be linear in the link, not cubic; took {elapsed:?}"
+    );
+}
