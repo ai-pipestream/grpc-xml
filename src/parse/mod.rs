@@ -56,6 +56,35 @@ use xbrl::PendingFact;
 /// the same bound to its own warning map.
 pub(crate) const MAX_WARNING_KINDS: usize = 64;
 
+/// Count one warning in a parse's aggregated warning map.
+///
+/// Past [`MAX_WARNING_KINDS`] distinct kinds a new kind is not listed, but
+/// it is still counted, under one `WARNING_CODE_LIMIT_REACHED` entry whose
+/// slot is reserved, so the trailer never under-reports how many warnings a
+/// document raised.
+pub(crate) fn record_warning(
+    warnings: &mut BTreeMap<(i32, String), u64>,
+    code: pb::WarningCode,
+    message: &str,
+) {
+    let key = (code as i32, message.to_owned());
+    if let Some(count) = warnings.get_mut(&key) {
+        *count += 1;
+    } else if warnings.len() < MAX_WARNING_KINDS - 1 {
+        warnings.insert(key, 1);
+    } else {
+        let overflow = (
+            pb::WarningCode::LimitReached as i32,
+            format!(
+                "more than {} kinds of warning: the kinds past that are counted here and not \
+                 listed",
+                MAX_WARNING_KINDS - 1
+            ),
+        );
+        *warnings.entry(overflow).or_insert(0) += 1;
+    }
+}
+
 /// Upper bound on inline runs recorded inside one captured element.
 ///
 /// The runs are recorded while the capture is open, so a paragraph made of a

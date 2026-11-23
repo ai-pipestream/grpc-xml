@@ -1435,3 +1435,153 @@ async fn every_award_licence_paragraph_and_statement_word_is_kept() {
         "a statement with a marked-up funder keeps its prose"
     );
 }
+
+/// The `WARNING_CODE_LIMIT_REACHED` entries of a parse's trailer.
+fn limits(events: &[pb::ParseXmlResponse]) -> Vec<&pb::ParseWarning> {
+    status(events)
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == pb::WarningCode::LimitReached as i32)
+        .collect()
+}
+
+#[tokio::test]
+async fn warnings_past_the_kinds_cap_are_counted_not_discarded() {
+    // Seventy processing instructions, each with its own target, mint
+    // seventy distinct warnings. The trailer keeps 64 kinds; the ones past
+    // that used to vanish, so the trailer under-reported exactly when a
+    // document was worst.
+    use std::fmt::Write as _;
+    let mut pis = String::new();
+    for n in 0..70 {
+        write!(pis, "<?target{n} x?>").expect("a String takes any write");
+    }
+    let document = format!(
+        r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <front><article-meta><title-group><article-title>T</article-title></title-group></article-meta></front>
+  <body><sec><title>S</title><p>x</p>{pis}</sec></body>
+</article>"#
+    );
+    let client = client().await;
+    let events = parse_ok(&client, &document, options()).await;
+    let warnings = &status(&events).warnings;
+    assert!(
+        warnings.len() <= 64,
+        "the cap still holds: {}",
+        warnings.len()
+    );
+    let total: u64 = warnings
+        .iter()
+        .filter(|w| w.code == pb::WarningCode::UnmappedElement as i32)
+        .map(|w| w.count)
+        .sum();
+    let overflow = limits(&events);
+    assert_eq!(overflow.len(), 1, "{warnings:?}");
+    assert_eq!(
+        total + overflow[0].count,
+        70,
+        "every warning is counted, listed or not"
+    );
+}
+
+#[tokio::test]
+async fn a_paragraph_past_the_inline_span_cap_says_so() {
+    use std::fmt::Write as _;
+    let mut runs = String::new();
+    for n in 0..600 {
+        write!(runs, "<bold>w{n}</bold> ").expect("a String takes any write");
+    }
+    let document = format!(
+        r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <front><article-meta><title-group><article-title>T</article-title></title-group></article-meta></front>
+  <body><sec><title>S</title><p>{runs}</p></sec></body>
+</article>"#
+    );
+    let client = client().await;
+    let events = parse_ok(&client, &document, with_spans()).await;
+    let paragraph = text_items(&events)
+        .into_iter()
+        .find(|item| item.text.starts_with("w0 "))
+        .expect("the paragraph");
+    assert_eq!(paragraph.spans.len(), 512);
+    assert!(paragraph.text.ends_with("w599"), "the text is all there");
+    let limit = limits(&events);
+    assert_eq!(limit.len(), 1, "{:?}", status(&events).warnings);
+    assert_eq!(limit[0].count, 600 - 512, "one per run not recorded");
+    assert!(limit[0].message.contains("512"), "{}", limit[0].message);
+}
+
+#[tokio::test]
+async fn a_metadata_record_past_its_element_cap_keeps_its_own_text_and_says_so() {
+    // A copyright statement holding 300 inline elements. The 257th start
+    // was not recorded but its end tag still closed a recorded element: the
+    // statement closed early, its own words after that point fell out of
+    // it, and nothing said so.
+    let marks: String = (0..300).map(|_| "<italic>a</italic>").collect();
+    let document = format!(
+        r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <front><article-meta>
+    <title-group><article-title>T</article-title></title-group>
+    <permissions>
+      <copyright-statement>Owned {marks} by the tail</copyright-statement>
+    </permissions>
+  </article-meta></front>
+  <body><sec><title>S</title><p>x</p></sec></body>
+</article>"#
+    );
+    let client = client().await;
+    let events = parse_ok(&client, &document, with_metadata()).await;
+    let license = common::meta_items(&events)
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::License(license)) => Some(license.clone()),
+            _ => None,
+        })
+        .expect("the permissions block");
+    let statement = license.copyright_statement.expect("the statement");
+    assert!(statement.starts_with("Owned"), "{statement}");
+    assert!(statement.ends_with("by the tail"), "{statement}");
+    let limit = limits(&events);
+    assert_eq!(limit.len(), 1, "{:?}", status(&events).warnings);
+    assert!(limit[0].message.contains("256"), "{}", limit[0].message);
+}
+
+#[tokio::test]
+async fn cells_with_no_row_around_them_keep_their_text() {
+    // Loosely authored fragments put cells straight under the table or its
+    // body. Each such cell closed with no row to join and its text was
+    // dropped without a word.
+    let document = r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <front><article-meta><title-group><article-title>T</article-title></title-group></article-meta></front>
+  <body><sec><title>S</title>
+    <table-wrap><table>
+      <tbody>
+        <td>loose a</td><td>loose b</td>
+        <tr><td>row c</td><td>row d</td></tr>
+        <td>tail e</td>
+      </tbody>
+    </table></table-wrap>
+  </sec></body>
+</article>"#;
+    let client = client().await;
+    let events = parse_ok(&client, document, options()).await;
+    let rows: Vec<Vec<&str>> = table_rows(&events)
+        .iter()
+        .map(|row| row.cells.iter().map(|c| c.text.as_str()).collect())
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            vec!["loose a", "loose b"],
+            vec!["row c", "row d"],
+            vec!["tail e"]
+        ]
+    );
+    let row_indexes: Vec<u32> = table_rows(&events).iter().map(|r| r.row_index).collect();
+    assert_eq!(row_indexes, [0, 1, 2]);
+    assert_eq!(table_ends(&events)[0].row_count, 3);
+}
