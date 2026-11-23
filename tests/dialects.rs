@@ -1363,3 +1363,75 @@ async fn an_xbrl_footnote_link_past_its_cap_says_how_much_it_did_not_read() {
     assert_eq!(limit[0].count, (3 * NOTES - 4096) as u64);
     assert!(limit[0].message.contains("4096"), "{}", limit[0].message);
 }
+
+#[tokio::test]
+async fn every_award_licence_paragraph_and_statement_word_is_kept() {
+    // An award group naming two funders and two awards, a funding statement
+    // whose prose wraps a marked-up institution, and a licence of two
+    // paragraphs with inline markup. The decoders kept the first award and
+    // the first paragraph, dropped a statement's prose whenever it had a
+    // child element, and lost the text inside inline markup.
+    let document = r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/"
+         xmlns:xlink="http://www.w3.org/1999/xlink">
+  <front><article-meta>
+    <title-group><article-title>T</article-title></title-group>
+    <permissions>
+      <license xlink:href="https://creativecommons.org/licenses/by/4.0/">
+        <license-p>Distributed under <ext-link>CC BY 4.0</ext-link>.</license-p>
+        <license-p>Second paragraph.</license-p>
+      </license>
+    </permissions>
+    <funding-group>
+      <award-group>
+        <funding-source><institution>National Science Foundation</institution></funding-source>
+        <funding-source><institution>Wellcome Trust</institution></funding-source>
+        <award-id>NSF-1</award-id>
+        <award-id>WT-2</award-id>
+      </award-group>
+      <funding-statement>Supported by <institution>NIH</institution> grant R01-77.</funding-statement>
+    </funding-group>
+  </article-meta></front>
+  <body><sec><title>S</title><p>x</p></sec></body>
+</article>"#;
+    let client = client().await;
+    let events = parse_ok(&client, document, with_metadata()).await;
+    let items = common::meta_items(&events);
+
+    let license = items
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::License(license)) => Some(license),
+            _ => None,
+        })
+        .expect("the permissions block");
+    assert_eq!(
+        license.paragraphs,
+        ["Distributed under CC BY 4.0.", "Second paragraph."],
+        "every paragraph, with the text inside its inline markup"
+    );
+    assert_eq!(
+        license.statement.as_deref(),
+        Some("Distributed under CC BY 4.0.\n\nSecond paragraph.")
+    );
+
+    let funding: Vec<&pb::MetaFunding> = items
+        .iter()
+        .filter_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::Funding(funding)) => Some(funding),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(funding.len(), 2, "{funding:?}");
+    assert_eq!(
+        funding[0].funders,
+        ["National Science Foundation", "Wellcome Trust"]
+    );
+    assert_eq!(funding[0].award_ids, ["NSF-1", "WT-2"]);
+    assert_eq!(funding[1].funders, ["NIH"]);
+    assert_eq!(
+        funding[1].statement.as_deref(),
+        Some("Supported by NIH grant R01-77."),
+        "a statement with a marked-up funder keeps its prose"
+    );
+}
