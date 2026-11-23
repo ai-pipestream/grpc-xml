@@ -129,7 +129,7 @@ event:
 | Condition | Code |
 |---|---|
 | Over the byte cap, or past the concurrency limit | `RESOURCE_EXHAUSTED` |
-| Malformed, truncated, entity-declaring, ambiguous, or nested deeper than 1024 elements | `INVALID_ARGUMENT` |
+| Malformed, truncated, entity-declaring, ambiguous, nested deeper than 1024 elements, or with anything but whitespace, comments and processing instructions after the root element (a concatenation of documents included) | `INVALID_ARGUMENT` |
 | A ZIP or gzip payload that is not a DCLX or METS-GBS archive | `UNIMPLEMENTED` |
 | The `grpc-timeout` deadline passed, no request message for 30 s, or nothing read for 30 s while 4 MiB of events waited | `DEADLINE_EXCEEDED` |
 | A parser fault | `INTERNAL` |
@@ -264,7 +264,7 @@ wanted.
 |---|---|---|
 | JATS | `http://jats.nlm.nih.gov*` namespace, `//NLM//` or JATS public id, root `article` | title, contributors, affiliations, abstract, keywords, nested sections, paragraphs, lists, formulas, figures, captioned tables, references |
 | USPTO | `//USPTO//` public id, ST.96 namespace, root `us-patent-grant` / `us-patent-application` / `patent-document` | title, inventors, assignees, document and application numbers, abstract, headings, description, drawing descriptions, numbered claims, drawing references, CALS tables |
-| XBRL | `http://www.xbrl.org/2003/instance` namespace, root `xbrl` | contexts (entity, period, segment/scenario dimensions), units (simple and divide), facts with `contextRef` / `unitRef` resolved inline, `decimals`, `precision`, `sign`, `xsi:nil`, `@id`, plus the footnote and label linkbases inside the instance |
+| XBRL | `http://www.xbrl.org/2003/instance` namespace, root `xbrl` | contexts (entity, period, segment/scenario dimensions), units (simple and divide), facts with `contextRef` / `unitRef` resolved inline, `decimals`, `precision`, `sign`, `xsi:nil`, `@id`, plus the footnote and label linkbases inside the instance (at most 4096 elements read from one link; the rest are counted in a `LIMIT_REACHED` warning) |
 | DocLang | the `NS_DOCLANG` namespace URI (defined in `src/sniff.rs`), root `doclang`; an alternate root name is also accepted | typed decode of label-named elements and of a generic `item` carrying a `DocItemLabel` short name, including the `text`, `heading`, `footnote` and `page_header` / `page_footer` element names and the `superscript` / `subscript` / `strikethrough` runs |
 | DCLX | ZIP magic `PK\x03\x04` | the archive's root `document.xml` member, mapped exactly as DocLang; `assets/` and `pages/` images stay compressed and undecoded |
 | METS_GBS | gzip magic `\x1f\x8b`, then a tar holding a METS manifest with `PROFILE="gbs"` | pages in manifest (`div TYPE="page" ORDER`) order, one `TextItem` with `role = "ocr-line"` per hOCR `ocr_line` span of each page's `coordOCR` file, `x_wconf` as the item's source confidence (unset when the line states none, and an unreadable one is left unset and warned about as `MALFORMED_VALUE`); scans and plain OCR text are counted, warned about and never decoded |

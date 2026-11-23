@@ -33,13 +33,37 @@ const MAX_META_ELEMENTS: usize = 256;
 /// names rather than by nesting, so a flat list of named leaves decodes
 /// every shape below without a per-shape walker.
 pub(super) struct MetaTree {
+    /// Local name of the element that opened the subtree.
+    root: String,
     /// Attributes of the element that opened the subtree.
     attrs: Attrs,
-    /// One entry per descendant element that had text: its local name, its
-    /// own attributes, and its collapsed text, in document order.
-    leaves: Vec<(String, Attrs, String)>,
+    /// One entry per descendant element, in the order their end tags close.
+    leaves: Vec<Leaf>,
     /// Every descendant's text, flattened, for the shapes that are prose.
     text: String,
+    /// The subtree's text read as running prose: every text node in
+    /// document order, inline markup included, collapsed once.
+    prose_text: String,
+}
+
+/// One descendant element of a metadata subtree.
+struct Leaf {
+    name: String,
+    attrs: Attrs,
+    /// The element's own text, without the text of its child elements.
+    text: String,
+    /// All of the element's text, its children's included, in document
+    /// order: what a paragraph or a statement with inline markup says.
+    prose: String,
+}
+
+/// An element of a metadata subtree whose end tag has not arrived yet.
+struct OpenLeaf {
+    name: String,
+    attrs: Attrs,
+    text: String,
+    /// Raw text of the element and every descendant, in document order.
+    prose: String,
 }
 
 impl MetaTree {
@@ -47,24 +71,33 @@ impl MetaTree {
     fn leaf(&self, local: &str) -> Option<&str> {
         self.leaves
             .iter()
-            .find(|(name, _, _)| name == local)
-            .map(|(_, _, text)| text.as_str())
+            .find(|leaf| leaf.name == local)
+            .map(|leaf| leaf.text.as_str())
     }
 
     /// The texts of every descendant with this local name, in order.
     fn leaves_named<'a>(&'a self, local: &'a str) -> impl Iterator<Item = &'a str> {
         self.leaves
             .iter()
-            .filter(move |(name, _, _)| name == local)
-            .map(|(_, _, text)| text.as_str())
+            .filter(move |leaf| leaf.name == local)
+            .map(|leaf| leaf.text.as_str())
+    }
+
+    /// The prose of every descendant with this local name that has any, in
+    /// order, inline markup's text included.
+    fn prose_named<'a>(&'a self, local: &'a str) -> impl Iterator<Item = String> + 'a {
+        self.leaves
+            .iter()
+            .filter(move |leaf| leaf.name == local && !leaf.prose.is_empty())
+            .map(|leaf| leaf.prose.clone())
     }
 
     /// An attribute of the first descendant with this local name.
     fn leaf_attr(&self, local: &str, attr: &str) -> Option<&str> {
         self.leaves
             .iter()
-            .find(|(name, _, _)| name == local)
-            .and_then(|(_, attrs, _)| attrs.get(attr))
+            .find(|leaf| leaf.name == local)
+            .and_then(|leaf| leaf.attrs.get(attr))
     }
 
     /// A leaf's text, or `None` when it is absent or empty.
@@ -72,11 +105,6 @@ impl MetaTree {
         self.leaf(local)
             .filter(|t| !t.is_empty())
             .map(str::to_owned)
-    }
-
-    /// The whole subtree's text, or `None` when it has none.
-    fn prose(&self) -> Option<String> {
-        (!self.text.is_empty()).then(|| self.text.clone())
     }
 }
 
@@ -88,7 +116,12 @@ impl<R: BufRead> Driver<'_, R> {
     /// driver back in the middle of a record it does not map.
     pub(super) fn emit_meta(&mut self, shape: &MetaShape, attrs: &Attrs) -> Result<(), ParseError> {
         let path = self.path();
-        let tree = self.read_meta_tree(attrs)?;
+        let root = self
+            .stack
+            .last()
+            .map(|frame| frame.local.clone())
+            .unwrap_or_default();
+        let tree = self.read_meta_tree(root, attrs)?;
         let value = decode(shape, &tree);
         let item = pb::MetaItem {
             path,
@@ -101,13 +134,17 @@ impl<R: BufRead> Driver<'_, R> {
 
     /// Read a subtree whole, from just after its start tag through its
     /// matching end tag.
-    fn read_meta_tree(&mut self, attrs: &Attrs) -> Result<MetaTree, ParseError> {
+    fn read_meta_tree(&mut self, root: String, attrs: &Attrs) -> Result<MetaTree, ParseError> {
         let mut tree = MetaTree {
+            root,
             attrs: attrs.clone(),
             leaves: Vec::new(),
             text: String::new(),
+            prose_text: String::new(),
         };
-        let mut open: Vec<(String, Attrs, String)> = Vec::new();
+        let mut open: Vec<OpenLeaf> = Vec::new();
+        // The root's raw prose: every text node in the subtree, in order.
+        let mut root_prose = String::new();
         let mut depth = 1usize;
         let mut elements = 0usize;
         // Text that sits in no open child: the subtree's own prose. A
@@ -128,33 +165,53 @@ impl<R: BufRead> Driver<'_, R> {
                     elements += 1;
                     self.counts.elements_visited += 1;
                     if elements <= MAX_META_ELEMENTS {
-                        open.push((local, attrs, String::new()));
+                        open.push(OpenLeaf {
+                            name: local,
+                            attrs,
+                            text: String::new(),
+                            prose: String::new(),
+                        });
                     }
                 }
                 Step::End => {
                     depth -= 1;
                     if depth == 0 {
+                        tree.prose_text = collapse(&root_prose);
                         return Ok(tree);
                     }
-                    if let Some((local, attrs, text)) = open.pop() {
-                        let text = collapse(&text);
+                    if let Some(done) = open.pop() {
+                        let text = collapse(&done.text);
                         if !text.is_empty() {
                             push_text(&mut tree.text, &text);
                         }
-                        tree.leaves.push((local, attrs, text));
+                        // The child's prose is part of its parent's: a
+                        // paragraph's text runs through its inline markup.
+                        if let Some(parent) = open.last_mut() {
+                            parent.prose.push_str(&done.prose);
+                        }
+                        tree.leaves.push(Leaf {
+                            name: done.name,
+                            attrs: done.attrs,
+                            text,
+                            prose: collapse(&done.prose),
+                        });
                     }
                 }
                 Step::Text(chunk) | Step::CData(chunk) => {
-                    if let Some((_, _, text)) = open.last_mut() {
-                        text.push_str(&chunk);
+                    root_prose.push_str(&chunk);
+                    if let Some(leaf) = open.last_mut() {
+                        leaf.text.push_str(&chunk);
+                        leaf.prose.push_str(&chunk);
                     } else {
                         loose.push_str(&chunk);
                     }
                 }
                 Step::GeneralRef { name, resolved } => {
                     let reference = self.reference_text(&name, resolved.as_deref());
-                    if let Some((_, _, text)) = open.last_mut() {
-                        text.push_str(&reference);
+                    root_prose.push_str(&reference);
+                    if let Some(leaf) = open.last_mut() {
+                        leaf.text.push_str(&reference);
+                        leaf.prose.push_str(&reference);
                     } else {
                         loose.push_str(&reference);
                     }
@@ -284,31 +341,60 @@ fn classification(scheme: &str, tree: &MetaTree) -> pb::MetaClassification {
 }
 
 /// Licence and copyright terms.
+///
+/// A licence is often several paragraphs, each with links or emphasis in
+/// it: every paragraph is kept, with the text inside its markup.
 fn license(tree: &MetaTree) -> pb::MetaLicense {
+    let paragraphs: Vec<String> = tree.prose_named("license-p").collect();
+    let statement = if paragraphs.is_empty() {
+        tree.prose_named("license-statement").next()
+    } else {
+        Some(paragraphs.join("\n\n"))
+    };
     pb::MetaLicense {
         type_uri: tree
             .leaf_attr("license", "href")
             .or_else(|| tree.leaf_attr("license", "license-type"))
             .map(str::to_owned),
-        statement: tree
-            .owned("license-p")
-            .or_else(|| tree.owned("license-statement")),
+        statement,
         copyright_statement: tree.owned("copyright-statement"),
         copyright_year: tree.owned("copyright-year"),
         copyright_holder: tree.owned("copyright-holder"),
+        paragraphs,
     }
 }
 
 /// A funding award or a funding statement.
+///
+/// An award group may name several funders and several awards, and a
+/// statement is prose that may mark its funder up inline: every funder and
+/// award is kept, and a statement keeps its whole sentence.
 fn funding(tree: &MetaTree) -> pb::MetaFunding {
+    let mut funders: Vec<String> = tree
+        .leaves
+        .iter()
+        .filter(|leaf| leaf.name == "institution" && !leaf.text.is_empty())
+        .map(|leaf| leaf.text.clone())
+        .collect();
+    if funders.is_empty() {
+        funders = tree.prose_named("funding-source").collect();
+    }
+    let award_ids: Vec<String> = tree
+        .leaves_named("award-id")
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let statement = if tree.root == "funding-statement" {
+        (!tree.prose_text.is_empty()).then(|| tree.prose_text.clone())
+    } else {
+        tree.prose_named("funding-statement").next()
+    };
     pb::MetaFunding {
-        funder: tree
-            .owned("institution")
-            .or_else(|| tree.owned("funding-source")),
-        award_id: tree.owned("award-id"),
-        statement: tree
-            .owned("funding-statement")
-            .or_else(|| tree.prose().filter(|_| tree.leaves.is_empty())),
+        funder: funders.first().cloned(),
+        award_id: award_ids.first().cloned(),
+        statement,
+        funders,
+        award_ids,
     }
 }
 

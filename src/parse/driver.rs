@@ -31,6 +31,7 @@ impl<R: BufRead> Driver<'_, R> {
     pub(super) fn run(&mut self) -> Result<Dialect, ParseError> {
         self.read_prolog()?;
         self.content_loop()?;
+        self.read_epilog()?;
         self.emit_status()?;
         Ok(self.dialect)
     }
@@ -211,6 +212,36 @@ impl<R: BufRead> Driver<'_, R> {
                     )));
                 }
             }
+        }
+    }
+
+    /// Read what follows the root element's end tag, to the end of input.
+    ///
+    /// XML allows only whitespace, comments and processing instructions
+    /// there. Anything else is a second document or garbage, and leaving it
+    /// unread would report a concatenation (a USPTO weekly bulk file is one)
+    /// as a successful parse of its first document alone.
+    pub(super) fn read_epilog(&mut self) -> Result<(), ParseError> {
+        loop {
+            let found = match self.next_step()? {
+                Step::Eof => return Ok(()),
+                Step::Ignorable => continue,
+                Step::ProcessingInstruction(target) => {
+                    self.warn_processing_instruction(&target);
+                    continue;
+                }
+                Step::Text(text) if is_xml_whitespace(&text) => continue,
+                Step::Declaration { .. } => "an XML declaration, so a second document",
+                Step::Start { .. } => "a second root element",
+                Step::DocType(_) => "a DOCTYPE",
+                Step::Text(_) | Step::CData(_) | Step::GeneralRef { .. } => "text",
+                Step::End => "an end tag",
+            };
+            return Err(ParseError::Malformed(format!(
+                "{found} after the root element closed, at byte {}. One call parses one XML \
+                 document; split a concatenation of documents before sending it",
+                self.event_start
+            )));
         }
     }
 
@@ -1268,4 +1299,10 @@ pub(crate) fn schema_locations(attrs: &Attrs) -> Vec<pb::SchemaLocation> {
         });
     }
     locations
+}
+
+/// Whether `text` is nothing but XML whitespace (space, tab, CR, LF).
+fn is_xml_whitespace(text: &str) -> bool {
+    text.bytes()
+        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
 }

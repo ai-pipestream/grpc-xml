@@ -1311,3 +1311,127 @@ async fn a_jats_list_declares_its_own_kind_rather_than_leaving_it_to_the_items()
     );
     assert!(items.iter().all(|i| i.ordinal.is_none()));
 }
+
+/// An extended link has a cap on the elements read from it. Past the cap the
+/// notes and arcs used to vanish with a clean trailer; the trailer now says
+/// how many elements were not read.
+#[tokio::test]
+async fn an_xbrl_footnote_link_past_its_cap_says_how_much_it_did_not_read() {
+    use std::fmt::Write as _;
+
+    const NOTES: usize = 2000;
+    let mut link = String::new();
+    for n in 0..NOTES {
+        // Three elements per note: a locator, an arc and the footnote.
+        write!(
+            link,
+            "    <link:loc xlink:type=\"locator\" xlink:href=\"#f-{n}\" xlink:label=\"fact-{n}\"/>\n\
+             <link:footnoteArc xlink:type=\"arc\" xlink:from=\"fact-{n}\" xlink:to=\"fn-{n}\"/>\n\
+             <link:footnote xlink:type=\"resource\" xlink:label=\"fn-{n}\" xml:lang=\"en\">Note {n}.</link:footnote>\n"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    let start = common::XBRL
+        .find("  <link:footnoteLink")
+        .expect("the fixture has a footnote link");
+    let end = common::XBRL
+        .find("  </link:footnoteLink>")
+        .expect("and its end");
+    let body_start = common::XBRL[start..].find('\n').expect("one line") + start + 1;
+    let document = format!(
+        "{}{}{}",
+        &common::XBRL[..body_start],
+        link,
+        &common::XBRL[end..]
+    );
+
+    let client = client().await;
+    let events = parse_ok(&client, &document, options()).await;
+    let read = common::xbrl_notes(&events).len();
+    assert!(
+        read < NOTES,
+        "the cap is below {NOTES} notes, so this exercises it"
+    );
+    let limit: Vec<&pb::ParseWarning> = status(&events)
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == pb::WarningCode::LimitReached as i32)
+        .collect();
+    assert_eq!(limit.len(), 1, "{:?}", status(&events).warnings);
+    // The cap is 4096 elements: every element past it is counted, and no
+    // more.
+    assert_eq!(limit[0].count, (3 * NOTES - 4096) as u64);
+    assert!(limit[0].message.contains("4096"), "{}", limit[0].message);
+}
+
+#[tokio::test]
+async fn every_award_licence_paragraph_and_statement_word_is_kept() {
+    // An award group naming two funders and two awards, a funding statement
+    // whose prose wraps a marked-up institution, and a licence of two
+    // paragraphs with inline markup. The decoders kept the first award and
+    // the first paragraph, dropped a statement's prose whenever it had a
+    // child element, and lost the text inside inline markup.
+    let document = r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/"
+         xmlns:xlink="http://www.w3.org/1999/xlink">
+  <front><article-meta>
+    <title-group><article-title>T</article-title></title-group>
+    <permissions>
+      <license xlink:href="https://creativecommons.org/licenses/by/4.0/">
+        <license-p>Distributed under <ext-link>CC BY 4.0</ext-link>.</license-p>
+        <license-p>Second paragraph.</license-p>
+      </license>
+    </permissions>
+    <funding-group>
+      <award-group>
+        <funding-source><institution>National Science Foundation</institution></funding-source>
+        <funding-source><institution>Wellcome Trust</institution></funding-source>
+        <award-id>NSF-1</award-id>
+        <award-id>WT-2</award-id>
+      </award-group>
+      <funding-statement>Supported by <institution>NIH</institution> grant R01-77.</funding-statement>
+    </funding-group>
+  </article-meta></front>
+  <body><sec><title>S</title><p>x</p></sec></body>
+</article>"#;
+    let client = client().await;
+    let events = parse_ok(&client, document, with_metadata()).await;
+    let items = common::meta_items(&events);
+
+    let license = items
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::License(license)) => Some(license),
+            _ => None,
+        })
+        .expect("the permissions block");
+    assert_eq!(
+        license.paragraphs,
+        ["Distributed under CC BY 4.0.", "Second paragraph."],
+        "every paragraph, with the text inside its inline markup"
+    );
+    assert_eq!(
+        license.statement.as_deref(),
+        Some("Distributed under CC BY 4.0.\n\nSecond paragraph.")
+    );
+
+    let funding: Vec<&pb::MetaFunding> = items
+        .iter()
+        .filter_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::Funding(funding)) => Some(funding),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(funding.len(), 2, "{funding:?}");
+    assert_eq!(
+        funding[0].funders,
+        ["National Science Foundation", "Wellcome Trust"]
+    );
+    assert_eq!(funding[0].award_ids, ["NSF-1", "WT-2"]);
+    assert_eq!(funding[1].funders, ["NIH"]);
+    assert_eq!(
+        funding[1].statement.as_deref(),
+        Some("Supported by NIH grant R01-77."),
+        "a statement with a marked-up funder keeps its prose"
+    );
+}

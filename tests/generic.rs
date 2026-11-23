@@ -393,3 +393,47 @@ async fn generic_keeps_the_entity_policy() {
         .expect_err("an internal subset is refused whatever the dialect");
     assert_eq!(error.code(), tonic::Code::InvalidArgument, "{error}");
 }
+
+/// A document is one root element. Bytes after it used to be left unread,
+/// so a concatenation of documents (a USPTO weekly bulk file is exactly
+/// that) or trailing garbage came back as a successful parse of the first
+/// document alone, with no word of the rest.
+#[tokio::test]
+async fn content_after_the_root_element_is_refused() {
+    let client = client().await;
+    for (case, document) in [
+        (
+            "a second document",
+            "<?xml version=\"1.0\"?><doc><p>one</p></doc>\n<?xml version=\"1.0\"?><doc><p>two</p></doc>",
+        ),
+        (
+            "a second root",
+            "<doc><p>one</p></doc><doc><p>two</p></doc>",
+        ),
+        ("trailing text", "<doc><p>one</p></doc>\ngarbage"),
+    ] {
+        let error = common::parse(&client, document, options())
+            .await
+            .expect_err(case);
+        assert_eq!(
+            error.code(),
+            tonic::Code::InvalidArgument,
+            "{case}: {error}"
+        );
+        assert!(
+            error.message().contains("after the root element"),
+            "{case}: {}",
+            error.message()
+        );
+    }
+
+    // What XML allows after the root is still fine.
+    let events = common::parse(
+        &client,
+        "<doc><p>one</p></doc>\n<!-- a comment -->\n<?pi data?>\n  \n",
+        options(),
+    )
+    .await
+    .expect("whitespace, comments and processing instructions may follow the root");
+    assert_eq!(texts(&common::text_items(&events)), ["one"]);
+}

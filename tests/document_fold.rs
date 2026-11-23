@@ -2253,3 +2253,54 @@ fn a_list_group_knows_it_is_ordered_from_the_list_rather_than_from_an_ordinal() 
         "no item here carries an ordinal; the container is what says so"
     );
 }
+
+#[test]
+fn every_award_and_every_funder_reach_the_document() {
+    // One award group, two funders, two awards: the source does not say
+    // which funder made which award, so the fold pairs none of them, and
+    // every name and every identifier still lands in a typed field.
+    let document_xml = r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <front><article-meta>
+    <title-group><article-title>T</article-title></title-group>
+    <funding-group>
+      <award-group>
+        <funding-source><institution>National Science Foundation</institution></funding-source>
+        <funding-source><institution>Wellcome Trust</institution></funding-source>
+        <award-id>NSF-1</award-id>
+        <award-id>WT-2</award-id>
+      </award-group>
+      <award-group>
+        <funding-source><institution>NIH</institution></funding-source>
+        <award-id>R01-1</award-id>
+        <award-id>R01-2</award-id>
+      </award-group>
+    </funding-group>
+  </article-meta></front>
+  <body><sec><title>S</title><p>x</p></sec></body>
+</article>"#;
+    let (_, document) = fold(
+        document_xml,
+        &ParseConfig {
+            emit_source_metadata: true,
+            ..ParseConfig::default()
+        },
+    );
+    let meta = document.source_meta.as_ref().expect("declared metadata");
+    let awards: Vec<(Option<&str>, Option<&str>)> = meta
+        .funding
+        .iter()
+        .map(|f| (f.funder.as_deref(), f.award_id.as_deref()))
+        .collect();
+    assert_eq!(
+        awards,
+        [
+            (None, Some("NSF-1")),
+            (None, Some("WT-2")),
+            (Some("National Science Foundation"), None),
+            (Some("Wellcome Trust"), None),
+            (Some("NIH"), Some("R01-1")),
+            (Some("NIH"), Some("R01-2")),
+        ]
+    );
+}

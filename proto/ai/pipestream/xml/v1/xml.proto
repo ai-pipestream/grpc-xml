@@ -1025,7 +1025,9 @@ message MetaLicense {
   // URI naming the licence, from a JATS `license/@xlink:href`.
   optional string type_uri = 1;
 
-  // The licence text as written.
+  // The licence text as written: every paragraph in `paragraphs`, separated
+  // by a blank line, or a `license-statement` when the source writes no
+  // paragraphs.
   optional string statement = 2;
 
   // The copyright line as written.
@@ -1036,19 +1038,33 @@ message MetaLicense {
 
   // Copyright holder, as written.
   optional string copyright_holder = 5;
+
+  // Every licence paragraph, in document order, each with the text inside
+  // its inline markup.
+  repeated string paragraphs = 6;
 }
 
 // MetaFunding is one funding award or funding statement.
 message MetaFunding {
-  // Name of the funding source.
+  // Name of the first funding source: the first of `funders`, kept for
+  // readers that predate the repeated field.
   optional string funder = 1;
 
-  // Award, grant or contract identifier.
+  // The first award, grant or contract identifier: the first of
+  // `award_ids`, kept for readers that predate the repeated field.
   optional string award_id = 2;
 
   // The funding statement as written, when the source gives prose instead
-  // of, or as well as, the structured parts.
+  // of, or as well as, the structured parts. A statement that names its
+  // funder in markup keeps the whole sentence.
   optional string statement = 3;
+
+  // Every funding source the record names, in document order.
+  repeated string funders = 4;
+
+  // Every award, grant or contract identifier the record names, in
+  // document order.
+  repeated string award_ids = 5;
 }
 
 // MetaCitation is one entry of a cited-reference list that is metadata
@@ -1222,6 +1238,12 @@ enum WarningCode {
   // `x_wconf` that is not a number from 0 to 100, for one. `count` is how
   // many times.
   WARNING_CODE_MALFORMED_VALUE = 9;
+
+  // A structure held more than this server reads of it, and the rest of it
+  // was skipped: an XBRL footnote or label link past its element cap, for
+  // one. `message` names the structure and the cap, and `count` is how many
+  // elements were not read, so what is missing is never silent.
+  WARNING_CODE_LIMIT_REACHED = 10;
 }
 
 // ParseWarning is one non-fatal finding, carried on the trailer.
