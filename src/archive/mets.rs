@@ -569,7 +569,9 @@ fn descriptive(field: &str, value: String) -> pb::meta_item::Value {
 struct OcrLine {
     text: String,
     element_id: Option<String>,
-    confidence: f64,
+    /// The line's own `x_wconf`, scaled to 0.0..=1.0, or `None` when the
+    /// source stated none it could be read from.
+    confidence: Option<f64>,
     /// The line's box, in the page's pixel coordinates. A line without one
     /// is dropped, so this is always set on a line that reaches the wire.
     bbox: pb::BoundingBox,
@@ -587,7 +589,7 @@ struct OcrCapture {
     chars: usize,
     span_depth: usize,
     element_id: Option<String>,
-    confidence: f64,
+    confidence: Option<f64>,
     bbox: Option<pb::BoundingBox>,
     attributes: Vec<pb::Attribute>,
     /// Words closed so far, measured against the raw captured text.
@@ -810,7 +812,7 @@ impl MetsDriver<'_> {
         }))?;
         for (n, line) in page.lines.into_iter().enumerate() {
             let mut source = self.source.clone();
-            source.confidence = Some(line.confidence);
+            source.confidence = line.confidence;
             let item = pb::TextItem {
                 index: self.next_index(),
                 label: pb::XmlItemLabel::Text as i32,
@@ -888,7 +890,7 @@ impl MetsDriver<'_> {
                         buf.clear();
                         continue;
                     }
-                    self.open_hocr_span(&start, &mut capture);
+                    self.open_hocr_span(member, &start, &mut capture);
                 }
                 Event::End(end) => {
                     if end.local_name().as_ref() != "span" {
@@ -923,7 +925,8 @@ impl MetsDriver<'_> {
     /// Take one opening `span` in an hOCR page: a word or nested span while
     /// a line is being captured, or the start of a new line capture.
     fn open_hocr_span(
-        &self,
+        &mut self,
+        member: &str,
         start: &quick_xml::events::BytesStart<'_>,
         capture: &mut Option<OcrCapture>,
     ) {
@@ -937,11 +940,12 @@ impl MetsDriver<'_> {
                 && open.words.len() < parse::MAX_INLINE_SPANS
             {
                 let title = attr(start, "title").unwrap_or_default();
+                let confidence = self.stated_confidence(member, &title);
                 open.open_word = parse_bbox(&title).map(|bbox| WordBuild {
                     start: open.chars,
                     end: open.chars,
                     bbox,
-                    confidence: stated_confidence(&title),
+                    confidence,
                 });
             }
             open.span_depth += 1;
@@ -957,7 +961,7 @@ impl MetsDriver<'_> {
                 chars: 0,
                 span_depth: 0,
                 element_id: attr(start, "id"),
-                confidence: extract_confidence(&title),
+                confidence: self.stated_confidence(member, &title),
                 bbox: parse_bbox(&title),
                 attributes,
                 words: Vec::new(),
@@ -1012,6 +1016,23 @@ impl MetsDriver<'_> {
             );
         }
         Ok(())
+    }
+
+    /// The `x_wconf` a `title` attribute states, scaled to 0.0..=1.0, or
+    /// `None` when it states none. A value that is present and unreadable is
+    /// `None` too, and is reported, because leaving it unset silently would
+    /// look the same as an engine that never measured.
+    fn stated_confidence(&mut self, member: &str, title: &str) -> Option<f64> {
+        x_wconf(title).unwrap_or_else(|()| {
+            self.warn(
+                pb::WarningCode::MalformedValue,
+                &format!(
+                    "hOCR member {member}: an x_wconf that is not a number from 0 to 100 \
+                     was left unset"
+                ),
+            );
+            None
+        })
     }
 
     fn next_index(&mut self) -> u64 {
@@ -1181,37 +1202,23 @@ fn parse_bbox(title: &str) -> Option<pb::BoundingBox> {
     })
 }
 
-/// The `x_wconf` confidence a `title` attribute states, or `None` when it
-/// states none.
+/// The `x_wconf` confidence a `title` attribute states, scaled to
+/// 0.0..=1.0: `Ok(None)` when it states none, `Err` when the clause is there
+/// and is not a number from 0 to 100.
 ///
-/// A line defaults to 1.0 when it says nothing, matching what a line-level
-/// confidence has always meant here. A word does not: a word with no
-/// `x_wconf` has no confidence of its own, and claiming certainty for it
-/// would be inventing a measurement the engine did not make.
-fn stated_confidence(title: &str) -> Option<f64> {
-    title.split(';').find_map(|part| {
-        let value = part.trim().strip_prefix("x_wconf")?;
-        value
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .map(|parsed| parsed / 100.0)
-    })
-}
-
-/// The `x_wconf` OCR confidence of an hOCR `title` attribute, scaled to
-/// 0.0..=1.0. Defaults to 1.0 when absent or unparsable, as upstream does.
-fn extract_confidence(title: &str) -> f64 {
-    for part in title.split(';') {
-        let part = part.trim();
-        if let Some(value) = part.strip_prefix("x_wconf") {
-            if let Ok(parsed) = value.trim().parse::<f64>() {
-                return parsed / 100.0;
-            }
-            return 1.0;
-        }
+/// Neither a line nor a word with no `x_wconf` has a confidence: claiming
+/// certainty for it would be inventing a measurement the engine did not make.
+fn x_wconf(title: &str) -> Result<Option<f64>, ()> {
+    let Some(value) = title
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("x_wconf"))
+    else {
+        return Ok(None);
+    };
+    match value.trim().parse::<f64>() {
+        Ok(parsed) if (0.0..=100.0).contains(&parsed) => Ok(Some(parsed / 100.0)),
+        _ => Err(()),
     }
-    1.0
 }
 
 #[cfg(test)]
@@ -1229,10 +1236,15 @@ mod tests {
         assert!(parse_bbox("bbox 1 2 3").is_none());
         assert!(parse_bbox("bbox 1 2 3 4 5").is_none(), "five is not a box");
         assert!(parse_bbox("bbox one two three four").is_none());
-        let confidence = extract_confidence("bbox 1 2 3 4; x_wconf 97");
-        assert!((confidence - 0.97).abs() < f64::EPSILON);
-        let confidence = extract_confidence("bbox 1 2 3 4");
-        assert!((confidence - 1.0).abs() < f64::EPSILON);
+        let confidence = x_wconf("bbox 1 2 3 4; x_wconf 97").expect("a number");
+        assert!((confidence.expect("stated") - 0.97).abs() < f64::EPSILON);
+        assert_eq!(x_wconf("bbox 1 2 3 4"), Ok(None), "absent is not 1.0");
+        assert_eq!(x_wconf("bbox 1 2 3 4; x_wconf high"), Err(()));
+        assert_eq!(
+            x_wconf("x_wconf 140"),
+            Err(()),
+            "past 100 is not a percentage"
+        );
     }
 
     #[test]

@@ -1216,6 +1216,12 @@ enum WarningCode {
   // character XML 1.0 forbids was dropped. `count` is the number of repairs.
   // Never reported for a request that did not opt in.
   WARNING_CODE_TEXT_REPAIRED = 8;
+
+  // A value the format defines was present but could not be read, so the
+  // field it would have filled was left unset rather than guessed: an hOCR
+  // `x_wconf` that is not a number from 0 to 100, for one. `count` is how
+  // many times.
+  WARNING_CODE_MALFORMED_VALUE = 9;
 }
 
 // ParseWarning is one non-fatal finding, carried on the trailer.
