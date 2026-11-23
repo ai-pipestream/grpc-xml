@@ -816,6 +816,63 @@ async fn xbrl_footnotes_are_content_and_reach_the_wire_attached_to_their_fact() 
 }
 
 #[tokio::test]
+async fn references_in_jats_metadata_are_kept_like_references_in_body_text() {
+    // A reference is an event of its own, between the text on either side of
+    // it. The metadata readers used to keep one only when it resolved and
+    // drop it otherwise, so a name written with a DTD entity lost a letter
+    // and nothing said so.
+    let document = r#"<?xml version="1.0"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/"
+         xmlns:xlink="http://www.w3.org/1999/xlink">
+  <front><article-meta>
+    <title-group><article-title>T</article-title></title-group>
+    <permissions>
+      <copyright-statement>&#169; 2026 Garc&iacute;a &amp; Sons</copyright-statement>
+      <license xlink:href="https://creativecommons.org/licenses/by/4.0/">
+        <license-p>Free to read &amp; share.</license-p>
+      </license>
+    </permissions>
+  </article-meta></front>
+  <body><sec><title>S</title><p>x</p></sec></body>
+</article>"#;
+    let client = client().await;
+    let events = parse_ok(&client, document, with_metadata()).await;
+    let items = common::meta_items(&events);
+    let license = items
+        .iter()
+        .find_map(|i| match i.value.as_ref() {
+            Some(pb::meta_item::Value::License(license)) => Some(license),
+            _ => None,
+        })
+        .expect("the permissions block");
+    assert_eq!(
+        license.copyright_statement.as_deref(),
+        Some("\u{a9} 2026 Garc&iacute;a & Sons"),
+        "what the specification resolves is resolved; a DTD entity stays as written"
+    );
+    assert_eq!(license.statement.as_deref(), Some("Free to read & share."));
+    assert!(
+        warned(&events, pb::WarningCode::UnexpandedEntity),
+        "a reference kept verbatim is reported, as it is in body text"
+    );
+}
+
+#[tokio::test]
+async fn references_in_an_xbrl_footnote_are_kept() {
+    let instance = XBRL.replace(
+        "Includes restricted cash of 12 million.",
+        "Cash &amp; equivalents of &euro;12 million.",
+    );
+    assert_ne!(instance, XBRL, "the fixture still holds the footnote");
+    let client = client().await;
+    let events = parse_ok(&client, &instance, options()).await;
+    let notes = common::xbrl_notes(&events);
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].text, "Cash & equivalents of &euro;12 million.");
+    assert!(warned(&events, pb::WarningCode::UnexpandedEntity));
+}
+
+#[tokio::test]
 async fn xbrl_records_the_schema_reference_without_fetching_it() {
     let client = client().await;
     let events = parse_ok(&client, XBRL, options()).await;

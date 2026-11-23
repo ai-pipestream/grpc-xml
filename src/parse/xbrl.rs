@@ -218,10 +218,9 @@ impl<R: BufRead> Driver<'_, R> {
                     }
                 }
                 Step::Text(chunk) | Step::CData(chunk) => text.push_str(&chunk),
-                Step::GeneralRef { resolved, .. } => {
-                    if let Some(resolved) = resolved {
-                        text.push_str(&resolved);
-                    }
+                Step::GeneralRef { name, resolved } => {
+                    let reference = self.reference_text(&name, resolved.as_deref());
+                    text.push_str(&reference);
                 }
                 // A comment or a processing instruction inside one of these
                 // records is not part of the record.
@@ -275,10 +274,9 @@ impl<R: BufRead> Driver<'_, R> {
                     }
                 }
                 Step::Text(chunk) | Step::CData(chunk) => text.push_str(&chunk),
-                Step::GeneralRef { resolved, .. } => {
-                    if let Some(resolved) = resolved {
-                        text.push_str(&resolved);
-                    }
+                Step::GeneralRef { name, resolved } => {
+                    let reference = self.reference_text(&name, resolved.as_deref());
+                    text.push_str(&reference);
                 }
                 // A comment or a processing instruction inside one of these
                 // records is not part of the record.
@@ -435,9 +433,10 @@ impl<R: BufRead> Driver<'_, R> {
                         note.text.push_str(&chunk);
                     }
                 }
-                Step::GeneralRef { resolved, .. } => {
-                    if let (Some(resolved), Some((note, _))) = (resolved, open.as_mut()) {
-                        note.text.push_str(&resolved);
+                Step::GeneralRef { name, resolved } => {
+                    if let Some((note, _)) = open.as_mut() {
+                        let reference = self.reference_text(&name, resolved.as_deref());
+                        note.text.push_str(&reference);
                     }
                 }
                 // A comment or a processing instruction inside one of these

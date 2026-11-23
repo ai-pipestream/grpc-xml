@@ -110,8 +110,19 @@ impl<R: BufRead> Driver<'_, R> {
         let mut open: Vec<(String, Attrs, String)> = Vec::new();
         let mut depth = 1usize;
         let mut elements = 0usize;
+        // Text that sits in no open child: the subtree's own prose. A
+        // reference arrives as an event of its own between two text chunks,
+        // so the run is gathered whole and collapsed once, at the next tag.
+        let mut loose = String::new();
         loop {
-            match self.next_step()? {
+            let step = self.next_step()?;
+            if matches!(step, Step::Start { .. } | Step::End) {
+                let run = collapse(&std::mem::take(&mut loose));
+                if !run.is_empty() {
+                    push_text(&mut tree.text, &run);
+                }
+            }
+            match step {
                 Step::Start { local, attrs, .. } => {
                     depth += 1;
                     elements += 1;
@@ -137,15 +148,15 @@ impl<R: BufRead> Driver<'_, R> {
                     if let Some((_, _, text)) = open.last_mut() {
                         text.push_str(&chunk);
                     } else {
-                        let chunk = collapse(&chunk);
-                        if !chunk.is_empty() {
-                            push_text(&mut tree.text, &chunk);
-                        }
+                        loose.push_str(&chunk);
                     }
                 }
-                Step::GeneralRef { resolved, .. } => {
-                    if let (Some(resolved), Some((_, _, text))) = (resolved, open.last_mut()) {
-                        text.push_str(&resolved);
+                Step::GeneralRef { name, resolved } => {
+                    let reference = self.reference_text(&name, resolved.as_deref());
+                    if let Some((_, _, text)) = open.last_mut() {
+                        text.push_str(&reference);
+                    } else {
+                        loose.push_str(&reference);
                     }
                 }
                 // A comment or a processing instruction inside one of these
