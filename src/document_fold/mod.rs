@@ -381,14 +381,49 @@ impl DocumentFold {
             Some(pb::meta_item::Value::Descriptive(statement)) => {
                 self.on_descriptive(statement);
             }
-            Some(pb::meta_item::Value::Funding(funding)) => {
+            Some(pb::meta_item::Value::Funding(funding)) => self.on_funding(funding),
+            None => {}
+        }
+    }
+
+    /// Fold one funding record into `DocumentMeta.funding`, one
+    /// `FundingAward` per award.
+    ///
+    /// A record that names one funder made every award it lists, so each
+    /// award carries that funder. A record that names several does not say
+    /// which made which: its awards carry no funder, and each funder gets an
+    /// entry of its own, so every name and identifier is kept and no pairing
+    /// is invented. The statement goes on the record's first entry only.
+    fn on_funding(&mut self, funding: &pb::MetaFunding) {
+        let mut statement = funding.statement.clone();
+        let sole_funder = match funding.funders.as_slice() {
+            [one] => Some(one.clone()),
+            _ => None,
+        };
+        let before = self.source_meta.funding.len();
+        for award in &funding.award_ids {
+            self.source_meta.funding.push(doc::FundingAward {
+                funder: sole_funder.clone(),
+                award_id: Some(award.clone()),
+                statement: statement.take(),
+            });
+        }
+        let named = self.source_meta.funding.len() > before && sole_funder.is_some();
+        if !named {
+            for funder in &funding.funders {
                 self.source_meta.funding.push(doc::FundingAward {
-                    funder: funding.funder.clone(),
-                    award_id: funding.award_id.clone(),
-                    statement: funding.statement.clone(),
+                    funder: Some(funder.clone()),
+                    award_id: None,
+                    statement: statement.take(),
                 });
             }
-            None => {}
+        }
+        if self.source_meta.funding.len() == before {
+            self.source_meta.funding.push(doc::FundingAward {
+                funder: None,
+                award_id: None,
+                statement,
+            });
         }
     }
 

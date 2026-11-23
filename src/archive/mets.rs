@@ -544,6 +544,8 @@ impl ManifestWalk {
                 copyright_statement: None,
                 copyright_year: None,
                 copyright_holder: None,
+                // A Dublin Core rights statement is one value, not paragraphs.
+                paragraphs: Vec::new(),
             }),
             _ => descriptive(open.field, value),
         };
