@@ -1276,3 +1276,45 @@ async fn the_gbs_document_carries_the_outline_and_the_catalogue_record() {
     assert!(!meta.extra.contains_key("title"), "{:?}", meta.extra);
     assert!(!meta.extra.contains_key("subject"), "{:?}", meta.extra);
 }
+
+/// A line that states no `x_wconf`, or one that is not a number, used to be
+/// published with confidence 1.0, indistinguishable from a perfect read.
+/// Now it states none, and an unreadable value is reported as such.
+#[tokio::test]
+async fn a_line_confidence_the_source_did_not_state_is_not_invented() {
+    let page = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+        <html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\n\
+        <div class=\"ocr_page\" id=\"page_1\" title=\"bbox 0 0 640 480\">\n\
+        <span class=\"ocr_line\" id=\"a\" title=\"bbox 10 20 300 40\">Unscored.</span>\n\
+        <span class=\"ocr_line\" id=\"b\" title=\"bbox 10 50 300 70; x_wconf garbled\">Garbled.</span>\n\
+        <span class=\"ocr_line\" id=\"c\" title=\"bbox 10 80 300 100; x_wconf 88\">Scored.</span>\n\
+        </div></body></html>\n";
+    let archive = targz_of(&[
+        ("UOM_39015012345678.mets.xml", GBS_METS.as_bytes()),
+        ("00000001.html", page.as_bytes()),
+    ]);
+    let client = client().await;
+    let events = parse_bytes_ok(&client, &archive, options()).await;
+    let lines = items_with_role(&events, "ocr-line");
+    assert_eq!(texts(&lines), ["Unscored.", "Garbled.", "Scored."]);
+    let stated: Vec<Option<f64>> = lines
+        .iter()
+        .map(|line| line.source.as_ref().expect("a source").confidence)
+        .collect();
+    assert_eq!(stated[0], None, "no x_wconf, no confidence");
+    assert_eq!(stated[1], None, "an unreadable x_wconf is not a confidence");
+    assert!((stated[2].expect("x_wconf 88") - 0.88).abs() < 1e-9);
+
+    let malformed: Vec<&pb::ParseWarning> = status(&events)
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == pb::WarningCode::MalformedValue as i32)
+        .collect();
+    assert_eq!(malformed.len(), 1, "{:?}", status(&events).warnings);
+    assert_eq!(malformed[0].count, 1);
+    assert!(
+        malformed[0].message.contains("x_wconf"),
+        "{}",
+        malformed[0].message
+    );
+}
