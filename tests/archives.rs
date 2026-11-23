@@ -602,15 +602,18 @@ async fn mets_gbs_carries_the_page_geometry_the_hocr_states() {
     assert!(second.top > first.top);
 }
 
+/// A line whose `title` states no box, or one that is not four integers,
+/// still has its text. It used to be dropped with no warning, so the page
+/// came back shorter and the call ended OK. Now it is sent without
+/// geometry, and a box that is there and unreadable is reported.
 #[tokio::test]
-async fn a_line_without_a_box_is_still_dropped() {
-    // The box is now carried rather than only validated, and the rule that
-    // a line without one is not a mapped line is unchanged.
+async fn a_line_without_a_usable_box_keeps_its_text() {
     let page = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
         <html xmlns=\"http://www.w3.org/1999/xhtml\"><body>\n\
         <div class=\"ocr_page\" id=\"page_1\" title=\"bbox 0 0 640 480\">\n\
         <span class=\"ocr_line\" id=\"a\" title=\"x_wconf 90\">No box here.</span>\n\
-        <span class=\"ocr_line\" id=\"b\" title=\"bbox 10 20 30 40\">Boxed.</span>\n\
+        <span class=\"ocr_line\" id=\"b\" title=\"bbox 10 20 30\">A broken box.</span>\n\
+        <span class=\"ocr_line\" id=\"c\" title=\"bbox 10 20 30 40\">Boxed.</span>\n\
         </div></body></html>\n";
     let archive = targz_of(&[
         ("UOM_39015012345678.mets.xml", GBS_METS.as_bytes()),
@@ -618,7 +621,24 @@ async fn a_line_without_a_box_is_still_dropped() {
     ]);
     let client = client().await;
     let events = parse_bytes_ok(&client, &archive, options()).await;
-    assert_eq!(texts(&items_with_role(&events, "ocr-line")), ["Boxed."]);
+    let lines = items_with_role(&events, "ocr-line");
+    assert_eq!(texts(&lines), ["No box here.", "A broken box.", "Boxed."]);
+    assert_eq!(lines[0].bbox, None, "no box stated, none sent");
+    assert_eq!(lines[1].bbox, None, "an unreadable box is not a box");
+    assert!(lines[2].bbox.is_some());
+
+    let malformed: Vec<&pb::ParseWarning> = status(&events)
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == pb::WarningCode::MalformedValue as i32)
+        .collect();
+    assert_eq!(malformed.len(), 1, "{:?}", status(&events).warnings);
+    assert_eq!(malformed[0].count, 1);
+    assert!(
+        malformed[0].message.contains("bbox"),
+        "{}",
+        malformed[0].message
+    );
 }
 
 #[tokio::test]

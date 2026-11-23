@@ -586,9 +586,10 @@ struct OcrLine {
     /// The line's own `x_wconf`, scaled to 0.0..=1.0, or `None` when the
     /// source stated none it could be read from.
     confidence: Option<f64>,
-    /// The line's box, in the page's pixel coordinates. A line without one
-    /// is dropped, so this is always set on a line that reaches the wire.
-    bbox: pb::BoundingBox,
+    /// The line's box, in the page's pixel coordinates, or `None` when the
+    /// source states none that can be read. The line's text is kept either
+    /// way: losing the geometry is no reason to lose the words.
+    bbox: Option<pb::BoundingBox>,
     attributes: Vec<pb::Attribute>,
     /// The boxes of the words inside the line, in reading order.
     words: Vec<pb::WordBox>,
@@ -815,11 +816,11 @@ impl MetsDriver<'_> {
     /// Walk one hOCR page, announce the page, and emit a text item per
     /// `ocr_line` span.
     ///
-    /// A line without a `bbox` in its `title` is dropped, as it always was.
-    /// The box itself is now carried: `METS_GBS` is the one dialect in this
-    /// service with real page coordinates, and parsing all four integers
-    /// only to decide whether to keep the line threw away the single most
-    /// valuable thing the format states.
+    /// Every line with text is emitted. Its box is carried when the `title`
+    /// states one: `METS_GBS` is the one dialect in this service with real
+    /// page coordinates. A line whose box is missing keeps its text with no
+    /// box, and one whose box is unreadable does too and is reported, so a
+    /// broken coordinate never costs the words on the line.
     fn emit_page(&mut self, order: u32, member: &str, bytes: &[u8]) -> Result<(), ParseError> {
         let page = self.read_hocr(member, bytes)?;
         let extent = page.bbox.as_ref();
@@ -853,7 +854,7 @@ impl MetsDriver<'_> {
                 // hOCR marks words and their boxes, not emphasis: an OCR
                 // line has no inline markup to record.
                 spans: Vec::new(),
-                bbox: Some(line.bbox),
+                bbox: line.bbox,
                 page_no: Some(order),
                 // hOCR writes a line as a `span`, in HTML's namespace or in
                 // none at all depending on how the file was serialized; the
@@ -907,7 +908,8 @@ impl MetsDriver<'_> {
                     if has_class(&start, "ocr_page") && page.bbox.is_none() {
                         // The page element states the image's extent, which
                         // is the frame every line box on it is measured in.
-                        page.bbox = parse_bbox(&attr(&start, "title").unwrap_or_default());
+                        let title = attr(&start, "title").unwrap_or_default();
+                        page.bbox = self.stated_bbox(member, "ocr_page", &title);
                     }
                     if start.local_name().as_ref() != "span" {
                         buf.clear();
@@ -963,13 +965,17 @@ impl MetsDriver<'_> {
                 && open.words.len() < parse::MAX_INLINE_SPANS
             {
                 let title = attr(start, "title").unwrap_or_default();
+                // A word box exists to carry geometry: a word that states
+                // none is not one, and its text stays in the line.
                 let confidence = self.stated_confidence(member, &title);
-                open.open_word = parse_bbox(&title).map(|bbox| WordBuild {
-                    start: open.chars,
-                    end: open.chars,
-                    bbox,
-                    confidence,
-                });
+                open.open_word =
+                    self.stated_bbox(member, "ocrx_word", &title)
+                        .map(|bbox| WordBuild {
+                            start: open.chars,
+                            end: open.chars,
+                            bbox,
+                            confidence,
+                        });
             } else if open.span_depth == 0
                 && open.open_word.is_none()
                 && has_class(start, "ocrx_word")
@@ -997,7 +1003,7 @@ impl MetsDriver<'_> {
                 span_depth: 0,
                 element_id: attr(start, "id"),
                 confidence: self.stated_confidence(member, &title),
-                bbox: parse_bbox(&title),
+                bbox: self.stated_bbox(member, "ocr_line", &title),
                 attributes,
                 words: Vec::new(),
                 open_word: None,
@@ -1070,6 +1076,23 @@ impl MetsDriver<'_> {
         })
     }
 
+    /// The `bbox` a `title` attribute states, or `None` when it states none.
+    /// A clause that is present and is not four integers is `None` too, and
+    /// is reported: the element it belongs to is still emitted, without
+    /// geometry, rather than dropped with its text.
+    fn stated_bbox(&mut self, member: &str, class: &str, title: &str) -> Option<pb::BoundingBox> {
+        parse_bbox(title).unwrap_or_else(|()| {
+            self.warn(
+                pb::WarningCode::MalformedValue,
+                &format!(
+                    "hOCR member {member}: an {class} bbox that is not four integers was left \
+                     unset; the element was kept without a box"
+                ),
+            );
+            None
+        })
+    }
+
     fn next_index(&mut self) -> u64 {
         let index = self.index;
         self.index += 1;
@@ -1109,10 +1132,6 @@ impl MetsDriver<'_> {
     }
 }
 
-/// Look a manifest `href` up among the tar members. Exact name first, then
-/// with a leading `./` stripped or added, then as a suffix under any single
-/// leading directory — real exports nest their members under a barcode
-/// directory the hrefs do not repeat.
 /// Take one closing `span` in an hOCR page: close the open word when its
 /// own end tag arrives, or finish the line when the capture's does.
 fn close_hocr_span(capture: &mut Option<OcrCapture>, page: &mut HocrPage) {
@@ -1130,19 +1149,23 @@ fn close_hocr_span(capture: &mut Option<OcrCapture>, page: &mut HocrPage) {
     } else if let Some(done) = capture.take() {
         let (text, positions) = collapse_positions(&done.text);
         debug_assert_eq!(text, collapse(&done.text));
-        if let Some(bbox) = done.bbox.filter(|_| !text.is_empty()) {
+        if !text.is_empty() {
             page.lines.push(OcrLine {
                 words: finish_words(&done.words, &positions),
                 text,
                 element_id: done.element_id,
                 confidence: done.confidence,
-                bbox,
+                bbox: done.bbox,
                 attributes: done.attributes,
             });
         }
     }
 }
 
+/// Look a manifest `href` up among the tar members. Exact name first, then
+/// with a leading `./` stripped or added, then as a suffix under any single
+/// leading directory — real exports nest their members under a barcode
+/// directory the hrefs do not repeat.
 fn member_by_href<'a>(members: &'a BTreeMap<String, Vec<u8>>, href: &str) -> Option<&'a [u8]> {
     if let Some(bytes) = members.get(href) {
         return Some(bytes);
@@ -1205,31 +1228,37 @@ fn has_class(start: &quick_xml::events::BytesStart<'_>, class: &str) -> bool {
 
 /// The `bbox` clause of an hOCR `title` attribute.
 ///
-/// The format writes four integers in image pixels, left top right bottom.
-/// A clause with any other shape is not a box, and a line that states no
-/// box carries no geometry: both return `None`, which is what drops the
-/// line.
-fn parse_bbox(title: &str) -> Option<pb::BoundingBox> {
-    title.split(';').find_map(|part| {
-        let coords = part.trim().strip_prefix("bbox ")?;
-        let mut values = [0i64; 4];
-        let mut seen = 0usize;
-        for token in coords.split_whitespace() {
-            let value = token.parse::<i64>().ok()?;
-            *values.get_mut(seen)? = value;
-            seen += 1;
-        }
-        (seen == 4).then(|| pb::BoundingBox {
-            #[allow(clippy::cast_precision_loss)]
-            left: values[0] as f64,
-            #[allow(clippy::cast_precision_loss)]
-            top: values[1] as f64,
-            #[allow(clippy::cast_precision_loss)]
-            right: values[2] as f64,
-            #[allow(clippy::cast_precision_loss)]
-            bottom: values[3] as f64,
-        })
-    })
+/// The format writes four integers in image pixels, left top right bottom:
+/// `Ok(None)` when the title states no box, `Err` when the clause is there
+/// with any other shape.
+fn parse_bbox(title: &str) -> Result<Option<pb::BoundingBox>, ()> {
+    let Some(coords) = title.split(';').find_map(|part| {
+        part.trim()
+            .strip_prefix("bbox")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+    }) else {
+        return Ok(None);
+    };
+    let mut values = [0i64; 4];
+    let mut seen = 0usize;
+    for token in coords.split_whitespace() {
+        let value = token.parse::<i64>().map_err(|_| ())?;
+        *values.get_mut(seen).ok_or(())? = value;
+        seen += 1;
+    }
+    if seen != 4 {
+        return Err(());
+    }
+    Ok(Some(pb::BoundingBox {
+        #[allow(clippy::cast_precision_loss)]
+        left: values[0] as f64,
+        #[allow(clippy::cast_precision_loss)]
+        top: values[1] as f64,
+        #[allow(clippy::cast_precision_loss)]
+        right: values[2] as f64,
+        #[allow(clippy::cast_precision_loss)]
+        bottom: values[3] as f64,
+    }))
 }
 
 /// The `x_wconf` confidence a `title` attribute states, scaled to
@@ -1257,15 +1286,18 @@ mod tests {
 
     #[test]
     fn hocr_title_clauses_parse_as_the_format_defines_them() {
-        let bbox = parse_bbox("bbox 279 177 306 214; x_wconf 97").expect("four integers is a box");
+        let bbox = parse_bbox("bbox 279 177 306 214; x_wconf 97")
+            .expect("four integers is a box")
+            .expect("stated");
         assert!((bbox.left - 279.0).abs() < f64::EPSILON);
         assert!((bbox.top - 177.0).abs() < f64::EPSILON);
         assert!((bbox.right - 306.0).abs() < f64::EPSILON);
         assert!((bbox.bottom - 214.0).abs() < f64::EPSILON);
-        assert!(parse_bbox("x_wconf 97").is_none());
-        assert!(parse_bbox("bbox 1 2 3").is_none());
-        assert!(parse_bbox("bbox 1 2 3 4 5").is_none(), "five is not a box");
-        assert!(parse_bbox("bbox one two three four").is_none());
+        assert_eq!(parse_bbox("x_wconf 97"), Ok(None), "absent is not a box");
+        assert_eq!(parse_bbox("bbox 1 2 3"), Err(()));
+        assert_eq!(parse_bbox("bbox 1 2 3 4 5"), Err(()), "five is not a box");
+        assert_eq!(parse_bbox("bbox one two three four"), Err(()));
+        assert_eq!(parse_bbox("bbox"), Err(()), "an empty clause is not a box");
         let confidence = x_wconf("bbox 1 2 3 4; x_wconf 97").expect("a number");
         assert!((confidence.expect("stated") - 0.97).abs() < f64::EPSILON);
         assert_eq!(x_wconf("bbox 1 2 3 4"), Ok(None), "absent is not 1.0");
