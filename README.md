@@ -129,7 +129,7 @@ event:
 | Condition | Code |
 |---|---|
 | Over the byte cap, or past the concurrency limit | `RESOURCE_EXHAUSTED` |
-| Malformed, truncated, entity-declaring, ambiguous, or nested deeper than 1024 elements | `INVALID_ARGUMENT` |
+| Malformed, truncated, entity-declaring, ambiguous, nested deeper than 1024 elements, or with anything but whitespace, comments and processing instructions after the root element (a concatenation of documents included) | `INVALID_ARGUMENT` |
 | A ZIP or gzip payload that is not a DCLX or METS-GBS archive | `UNIMPLEMENTED` |
 | The `grpc-timeout` deadline passed, no request message for 30 s, or nothing read for 30 s while 4 MiB of events waited | `DEADLINE_EXCEEDED` |
 | A parser fault | `INTERNAL` |
