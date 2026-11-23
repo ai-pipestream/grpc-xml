@@ -315,8 +315,17 @@ struct NoteLink {
 /// Upper bound on elements read from one extended link.
 ///
 /// An extended link is bounded by the instance it annotates in practice;
-/// this bounds it in the pathological case, where the rest is consumed.
+/// this bounds it in the pathological case, where the rest is consumed and
+/// counted in a `LIMIT_REACHED` warning.
 const MAX_NOTE_LINK_ELEMENTS: usize = 4096;
+
+/// What the trailer calls a note link of this kind.
+const fn note_link_name(kind: pb::XbrlNoteKind) -> &'static str {
+    match kind {
+        pb::XbrlNoteKind::Label => "label",
+        _ => "footnote",
+    }
+}
 
 impl<R: BufRead> Driver<'_, R> {
     /// Read one `link:footnoteLink` or `link:labelLink` whole and emit a
@@ -380,6 +389,16 @@ impl<R: BufRead> Driver<'_, R> {
                     elements += 1;
                     self.counts.elements_visited += 1;
                     if elements > MAX_NOTE_LINK_ELEMENTS {
+                        // Counted once per element skipped, so the warning's
+                        // count is how much of the link was not read.
+                        self.warn(
+                            pb::WarningCode::LimitReached,
+                            &format!(
+                                "an XBRL {} link held more than {MAX_NOTE_LINK_ELEMENTS} \
+                                 elements; the locators, arcs and notes past that were not read",
+                                note_link_name(kind)
+                            ),
+                        );
                         continue;
                     }
                     if open.is_some() {
