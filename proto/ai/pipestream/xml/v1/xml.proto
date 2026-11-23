@@ -1222,6 +1222,12 @@ enum WarningCode {
   // `x_wconf` that is not a number from 0 to 100, for one. `count` is how
   // many times.
   WARNING_CODE_MALFORMED_VALUE = 9;
+
+  // A structure held more than this server reads of it, and the rest of it
+  // was skipped: an XBRL footnote or label link past its element cap, for
+  // one. `message` names the structure and the cap, and `count` is how many
+  // elements were not read, so what is missing is never silent.
+  WARNING_CODE_LIMIT_REACHED = 10;
 }
 
 // ParseWarning is one non-fatal finding, carried on the trailer.

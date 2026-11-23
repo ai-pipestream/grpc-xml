@@ -1311,3 +1311,55 @@ async fn a_jats_list_declares_its_own_kind_rather_than_leaving_it_to_the_items()
     );
     assert!(items.iter().all(|i| i.ordinal.is_none()));
 }
+
+/// An extended link has a cap on the elements read from it. Past the cap the
+/// notes and arcs used to vanish with a clean trailer; the trailer now says
+/// how many elements were not read.
+#[tokio::test]
+async fn an_xbrl_footnote_link_past_its_cap_says_how_much_it_did_not_read() {
+    use std::fmt::Write as _;
+
+    const NOTES: usize = 2000;
+    let mut link = String::new();
+    for n in 0..NOTES {
+        // Three elements per note: a locator, an arc and the footnote.
+        write!(
+            link,
+            "    <link:loc xlink:type=\"locator\" xlink:href=\"#f-{n}\" xlink:label=\"fact-{n}\"/>\n\
+             <link:footnoteArc xlink:type=\"arc\" xlink:from=\"fact-{n}\" xlink:to=\"fn-{n}\"/>\n\
+             <link:footnote xlink:type=\"resource\" xlink:label=\"fn-{n}\" xml:lang=\"en\">Note {n}.</link:footnote>\n"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    let start = common::XBRL
+        .find("  <link:footnoteLink")
+        .expect("the fixture has a footnote link");
+    let end = common::XBRL
+        .find("  </link:footnoteLink>")
+        .expect("and its end");
+    let body_start = common::XBRL[start..].find('\n').expect("one line") + start + 1;
+    let document = format!(
+        "{}{}{}",
+        &common::XBRL[..body_start],
+        link,
+        &common::XBRL[end..]
+    );
+
+    let client = client().await;
+    let events = parse_ok(&client, &document, options()).await;
+    let read = common::xbrl_notes(&events).len();
+    assert!(
+        read < NOTES,
+        "the cap is below {NOTES} notes, so this exercises it"
+    );
+    let limit: Vec<&pb::ParseWarning> = status(&events)
+        .warnings
+        .iter()
+        .filter(|warning| warning.code == pb::WarningCode::LimitReached as i32)
+        .collect();
+    assert_eq!(limit.len(), 1, "{:?}", status(&events).warnings);
+    // The cap is 4096 elements: every element past it is counted, and no
+    // more.
+    assert_eq!(limit[0].count, (3 * NOTES - 4096) as u64);
+    assert!(limit[0].message.contains("4096"), "{}", limit[0].message);
+}
