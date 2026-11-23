@@ -347,7 +347,10 @@ METS-GBS maps text and line geometry: scans are never decoded, but each page
 arrives as a `page` event with its extent in pixels and each OCR line carries
 its `bbox` and `page_no`, which fold into `Document.pages` and a per-item
 `ProvenanceItem`. Word-level `ocrx_word` spans are emitted too, each with its
-own box and its own `x_wconf` confidence.
+own box and its own `x_wconf` confidence. A line whose `bbox` is missing
+keeps its text and carries no box; one whose `bbox` is not four integers does
+the same and is counted as `WARNING_CODE_MALFORMED_VALUE`, so a broken
+coordinate never costs the words on the line.
 
 DCLX images stay in the archive: `assets/` and `pages/` members are never
 inflated, and pictures land as the same placeholder items the plain
