@@ -2079,7 +2079,11 @@ fn boolean(value: bool) -> doc::CellValue {
 /// a number (a string-valued concept) has none either: both leave the cell's
 /// display text as the only thing said about it.
 fn numeric_value(fact: &pb::Fact) -> Option<doc::CellValue> {
-    if fact.is_nil {
+    // A fact without a unit is not numeric in XBRL, whatever its text
+    // looks like, and only the decimal or double lexical form is a number:
+    // Rust's float parser also takes "inf" and "NaN", which XBRL's decimal
+    // type does not. The cell's text keeps the value as written either way.
+    if fact.is_nil || fact.unit_ref.is_none() || !is_xbrl_number(fact.value.trim()) {
         return None;
     }
     let magnitude: f64 = fact.value.trim().parse().ok()?;
@@ -2095,6 +2099,26 @@ fn numeric_value(fact: &pb::Fact) -> Option<doc::CellValue> {
         number_format_id: None,
         style_id: None,
     })
+}
+
+/// True when `text` is a finite number in the lexical form of `xs:decimal`
+/// or `xs:double`: an optional sign, digits with at most one decimal point
+/// and at least one digit, and an optional exponent.
+fn is_xbrl_number(text: &str) -> bool {
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (unsigned, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    let mantissa_ok =
+        digits(whole) && digits(fraction) && !(whole.is_empty() && fraction.is_empty());
+    let exponent_ok = exponent.is_none_or(|exponent| {
+        let unsigned = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+        !unsigned.is_empty() && digits(unsigned)
+    });
+    mantissa_ok && exponent_ok
 }
 
 /// A `decimals` or `precision` attribute as a number.

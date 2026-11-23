@@ -2304,3 +2304,45 @@ fn every_award_and_every_funder_reach_the_document() {
         ]
     );
 }
+
+#[test]
+fn a_fact_value_is_a_number_only_in_the_numeric_lexical_form() {
+    // A string-valued fact (no unitRef) reading "NaN", and a numeric fact
+    // reading "inf": Rust's float parser takes both, which published them
+    // as numeric cells. Neither is an XBRL number.
+    let instance = r#"<?xml version="1.0" encoding="UTF-8"?>
+<xbrl xmlns="http://www.xbrl.org/2003/instance"
+      xmlns:dei="http://xbrl.sec.gov/dei/2026"
+      xmlns:us-gaap="http://fasb.org/us-gaap/2026">
+  <context id="I2026">
+    <entity><identifier scheme="http://www.sec.gov/CIK">0000123456</identifier></entity>
+    <period><instant>2026-12-31</instant></period>
+  </context>
+  <unit id="usd"><measure>iso4217:USD</measure></unit>
+  <dei:TradingSymbol contextRef="I2026">NaN</dei:TradingSymbol>
+  <us-gaap:Assets contextRef="I2026" unitRef="usd" decimals="0">inf</us-gaap:Assets>
+  <us-gaap:Liabilities contextRef="I2026" unitRef="usd" decimals="2">-1.5E3</us-gaap:Liabilities>
+  <us-gaap:Equity contextRef="I2026" unitRef="usd" decimals="2">.25</us-gaap:Equity>
+</xbrl>"#;
+    let (_, document) = fold_default(instance);
+    let data = document.tables[0].data.as_ref().expect("table data");
+    let values: Vec<(&str, Option<doc::cell_value::Kind>)> = data.grid[1..]
+        .iter()
+        .map(|row| {
+            (
+                row.cells[6].text.as_str(),
+                row.cells[6].value.as_ref().and_then(|v| v.kind.clone()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        values,
+        [
+            ("NaN", None),
+            ("inf", None),
+            ("-1.5E3", Some(doc::cell_value::Kind::Number(-1500.0))),
+            (".25", Some(doc::cell_value::Kind::Number(0.25))),
+        ],
+        "the text stays as written; only a number in XBRL's own form is typed"
+    );
+}

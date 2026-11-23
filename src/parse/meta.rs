@@ -64,6 +64,9 @@ struct OpenLeaf {
     text: String,
     /// Raw text of the element and every descendant, in document order.
     prose: String,
+    /// Nesting depth of the element within the subtree, so only its own end
+    /// tag closes it.
+    depth: usize,
 }
 
 impl MetaTree {
@@ -132,6 +135,18 @@ impl<R: BufRead> Driver<'_, R> {
         self.send(pb::parse_xml_response::Event::MetaItem(item))
     }
 
+    /// Report a metadata record that held more elements than
+    /// [`MAX_META_ELEMENTS`].
+    fn warn_meta_cap(&mut self) {
+        self.warn(
+            pb::WarningCode::LimitReached,
+            &format!(
+                "a metadata record held more than {MAX_META_ELEMENTS} elements: the text of the \
+                 rest is kept in the element around them and their names are not recorded"
+            ),
+        );
+    }
+
     /// Read a subtree whole, from just after its start tag through its
     /// matching end tag.
     fn read_meta_tree(&mut self, root: String, attrs: &Attrs) -> Result<MetaTree, ParseError> {
@@ -170,16 +185,28 @@ impl<R: BufRead> Driver<'_, R> {
                             attrs,
                             text: String::new(),
                             prose: String::new(),
+                            depth,
                         });
+                    } else if elements == MAX_META_ELEMENTS + 1 {
+                        // Past the bound an element is not recorded, and its
+                        // text runs into the nearest one that is.
+                        self.warn_meta_cap();
                     }
                 }
                 Step::End => {
+                    let closing = depth;
                     depth -= 1;
                     if depth == 0 {
                         tree.prose_text = collapse(&root_prose);
                         return Ok(tree);
                     }
-                    if let Some(done) = open.pop() {
+                    // Only the end tag of a recorded element closes one: an
+                    // element past the bound was never pushed, and its end
+                    // tag closing a recorded ancestor would end that
+                    // ancestor early and drop the rest of its text.
+                    if open.last().is_some_and(|leaf| leaf.depth == closing)
+                        && let Some(done) = open.pop()
+                    {
                         let text = collapse(&done.text);
                         if !text.is_empty() {
                             push_text(&mut tree.text, &text);

@@ -13,9 +13,9 @@ use quick_xml::events::{BytesText, Event};
 use quick_xml::name::ResolveResult;
 
 use super::{
-    Capture, Frame, ListPlacement, MAX_DEPTH, MAX_INLINE_SPANS, MAX_OPEN_ELEMENTS_SHOWN,
-    MAX_WARNING_KINDS, OwnText, ParseError, PendingCaption, SpanBuild, Step, attribute_value,
-    collapse, collapse_positions, collapsed_range, convert_error, resolve_reference,
+    Capture, Frame, ListPlacement, MAX_DEPTH, MAX_INLINE_SPANS, MAX_OPEN_ELEMENTS_SHOWN, OwnText,
+    ParseError, PendingCaption, SpanBuild, Step, attribute_value, collapse, collapse_positions,
+    collapsed_range, convert_error, resolve_reference,
 };
 use crate::dialect::{self, Action, Attrs, ElementCtx};
 use crate::proto::v1 as pb;
@@ -280,8 +280,7 @@ impl<R: BufRead> Driver<'_, R> {
             return Ok(());
         }
         if self.table.is_some() {
-            self.table_start(namespace, local, qname, attrs);
-            return Ok(());
+            return self.table_start(namespace, local, qname, attrs);
         }
         if self.dialect == Dialect::Xbrl {
             return self.xbrl_start(namespace, local, qname, attrs);
@@ -738,10 +737,12 @@ impl<R: BufRead> Driver<'_, R> {
         let Some(span) = self.build_inline_span(namespace, local, qname, attrs, start) else {
             return;
         };
-        if let Some(capture) = self.capture.as_mut()
-            && capture.spans.len() < MAX_INLINE_SPANS
-        {
-            capture.spans.push(span);
+        if let Some(capture) = self.capture.as_mut() {
+            if capture.spans.len() < MAX_INLINE_SPANS {
+                capture.spans.push(span);
+            } else {
+                self.warn_span_cap();
+            }
         }
     }
 
@@ -1162,6 +1163,18 @@ impl<R: BufRead> Driver<'_, R> {
         );
     }
 
+    /// Count one inline run an element held past [`MAX_INLINE_SPANS`]: its
+    /// text stays in the item, and only its markup is not recorded.
+    pub(super) fn warn_span_cap(&mut self) {
+        self.warn(
+            pb::WarningCode::LimitReached,
+            &format!(
+                "an element held more than {MAX_INLINE_SPANS} inline runs: the text of the rest \
+                 is kept and their markup is not recorded"
+            ),
+        );
+    }
+
     pub(super) fn next_index(&mut self) -> u64 {
         let index = self.index;
         self.index += 1;
@@ -1169,12 +1182,7 @@ impl<R: BufRead> Driver<'_, R> {
     }
 
     pub(super) fn warn(&mut self, code: pb::WarningCode, message: &str) {
-        let key = (code as i32, message.to_owned());
-        if let Some(count) = self.warnings.get_mut(&key) {
-            *count += 1;
-        } else if self.warnings.len() < MAX_WARNING_KINDS {
-            self.warnings.insert(key, 1);
-        }
+        super::record_warning(&mut self.warnings, code, message);
     }
 
     pub(super) fn send(&mut self, event: pb::parse_xml_response::Event) -> Result<(), ParseError> {
