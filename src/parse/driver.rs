@@ -425,6 +425,26 @@ impl<R: BufRead> Driver<'_, R> {
         }
     }
 
+    /// The text a general entity reference stands for, wherever it sits.
+    ///
+    /// Its replacement when the XML specification fixes one (`resolved`), and
+    /// otherwise the reference exactly as written, with a warning. Body text
+    /// and every metadata reader go through here, so a reference is never
+    /// lost in one place and kept in another.
+    pub(super) fn reference_text(&mut self, name: &str, resolved: Option<&str>) -> String {
+        if let Some(text) = resolved {
+            return text.to_owned();
+        }
+        self.warn(
+            pb::WarningCode::UnexpandedEntity,
+            &format!(
+                "entity reference &{name}; was preserved verbatim; this parser declares \
+                 and expands no entities"
+            ),
+        );
+        format!("&{name};")
+    }
+
     /// A general entity reference in content.
     ///
     /// `resolved` is `Some` only for character references and the five
@@ -432,18 +452,7 @@ impl<R: BufRead> Driver<'_, R> {
     /// this parser refuses to have, so it is preserved exactly as written —
     /// dropping it would lose text, and expanding it is the vulnerability.
     pub(super) fn on_general_ref(&mut self, name: &str, resolved: Option<&str>) {
-        let text = if let Some(text) = resolved {
-            text.to_owned()
-        } else {
-            self.warn(
-                pb::WarningCode::UnexpandedEntity,
-                &format!(
-                    "entity reference &{name}; was preserved verbatim; this parser declares \
-                     and expands no entities"
-                ),
-            );
-            format!("&{name};")
-        };
+        let text = self.reference_text(name, resolved);
         if self.island.is_some() {
             let _ = self.island.as_mut().map(|island| {
                 island

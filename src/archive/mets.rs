@@ -770,6 +770,10 @@ impl MetsDriver<'_> {
                 Event::End(end) => walk.on_end(&end, &mut manifest),
                 Event::Text(text) => walk.on_text(&text.xml10_content()),
                 Event::CData(cdata) => walk.on_text(cdata.as_ref()),
+                Event::GeneralRef(reference) => {
+                    let name = reference.into_inner().into_owned();
+                    walk.on_text(&self.reference_text(&name));
+                }
                 Event::Decl(decl) => {
                     manifest.xml_version = decl.version().ok().map(Cow::into_owned);
                     manifest.encoding = decl.encoding().and_then(Result::ok).map(Cow::into_owned);
@@ -967,22 +971,27 @@ impl MetsDriver<'_> {
     /// five predefined entities — and preserving anything else verbatim with
     /// a warning, exactly as the XML driver treats content references.
     fn push_reference(&mut self, capture: Option<&mut OcrCapture>, name: &str) {
-        let resolved = parse::resolve_reference(name);
-        if resolved.is_none() {
-            self.warn(
-                pb::WarningCode::UnexpandedEntity,
-                &format!(
-                    "entity reference &{name}; was preserved verbatim; this parser declares \
-                     and expands no entities"
-                ),
-            );
-        }
+        let text = self.reference_text(name);
         if let Some(capture) = capture {
-            match resolved {
-                Some(text) => capture.push(&text),
-                None => capture.push(&format!("&{name};")),
-            }
+            capture.push(&text);
         }
+    }
+
+    /// The text one general entity reference stands for: its replacement
+    /// when the XML specification fixes one, and otherwise the reference as
+    /// written, with a warning. The manifest and the hOCR pages share it.
+    fn reference_text(&mut self, name: &str) -> String {
+        if let Some(text) = parse::resolve_reference(name) {
+            return text;
+        }
+        self.warn(
+            pb::WarningCode::UnexpandedEntity,
+            &format!(
+                "entity reference &{name}; was preserved verbatim; this parser declares \
+                 and expands no entities"
+            ),
+        );
+        format!("&{name};")
     }
 
     /// Apply the security policy to a DOCTYPE found inside an archive

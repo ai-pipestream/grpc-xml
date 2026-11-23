@@ -1075,6 +1075,53 @@ async fn the_struct_map_streams_as_the_volumes_own_table_of_contents() {
 }
 
 #[tokio::test]
+async fn references_in_a_dmd_sec_are_kept() {
+    // The manifest reader took text and CDATA and let every reference fall
+    // through, so "Smith &amp; Sons" was catalogued as "Smith Sons".
+    let manifest = GBS_METS_CATALOGUED
+        .replace("Verlag für Bücherkunde", "Smith &amp; Sons")
+        .replace("Ada Lovelace", "Ana Garc&iacute;a &#38; Co");
+    assert!(manifest.contains("Smith &amp; Sons") && manifest.contains("Garc&iacute;a"));
+    let export = targz_of(&[
+        ("UOM_39015012345678.mets.xml", manifest.as_bytes()),
+        (
+            "00000001.html",
+            hocr_page(&[("Erstes", "Blatt")]).as_bytes(),
+        ),
+        (
+            "00000002.html",
+            hocr_page(&[("Zweites", "Blatt")]).as_bytes(),
+        ),
+    ]);
+    let client = client().await;
+    let events = parse_bytes_ok(
+        &client,
+        &export,
+        pb::ParseOptions {
+            emit_source_metadata: true,
+            ..options()
+        },
+    )
+    .await;
+    let descriptive: Vec<(String, String)> = common::meta_items(&events)
+        .iter()
+        .filter_map(|item| match item.value.as_ref() {
+            Some(pb::meta_item::Value::Descriptive(d)) => Some((d.field.clone(), d.value.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        descriptive.contains(&("publisher".to_owned(), "Smith & Sons".to_owned())),
+        "{descriptive:?}"
+    );
+    assert!(
+        descriptive.contains(&("creator".to_owned(), "Ana Garc&iacute;a & Co".to_owned())),
+        "a reference only a DTD could resolve stays as written: {descriptive:?}"
+    );
+    assert!(common::warned(&events, pb::WarningCode::UnexpandedEntity));
+}
+
+#[tokio::test]
 async fn a_dmd_sec_decodes_into_the_typed_shapes_that_already_exist_for_it() {
     let client = client().await;
     let events = parse_bytes_ok(
