@@ -47,20 +47,39 @@ const DEFAULT_WINDOW_BYTES: u32 = 16 * 1024 * 1024;
 /// Default seconds between metrics lines.
 const DEFAULT_METRICS_INTERVAL_SECS: u64 = 60;
 
-/// Read a numeric environment variable, falling back to `default`.
-fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
+/// Read a numeric environment variable: `default` when it is unset, and an
+/// error naming the variable and its value when it is set and is not a
+/// number of the setting's kind. A typo such as `64MiB` stops startup
+/// rather than starting the server with a limit nobody asked for.
+fn env_num<T: std::str::FromStr>(name: &str, default: T) -> Result<T, String> {
+    setting(name, std::env::var(name), default)
+}
+
+/// Parse one setting's value as [`env_num`] reads it.
+fn setting<T: std::str::FromStr>(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+    default: T,
+) -> Result<T, String> {
+    match value {
+        Ok(raw) => raw
+            .trim()
+            .parse()
+            .map_err(|_| format!("{name}={raw:?} is not a whole number this setting accepts")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(raw)) => Err(format!(
+            "{name}={:?} is not a whole number this setting accepts",
+            raw.to_string_lossy()
+        )),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workers = env_num(
         "GRPC_XML_WORKERS",
         std::thread::available_parallelism().map_or(4, usize::from),
-    );
-    let blocking = env_num("GRPC_XML_BLOCKING_THREADS", 512usize);
+    )?;
+    let blocking = env_num("GRPC_XML_BLOCKING_THREADS", 512usize)?;
 
     // Parsing is CPU-bound and blocking; it runs in the blocking pool so it
     // never stalls the async workers moving bytes on and off the sockets.
@@ -83,22 +102,22 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         Duration::from_secs(env_num(
             "GRPC_XML_METRICS_INTERVAL_SECS",
             DEFAULT_METRICS_INTERVAL_SECS,
-        )),
+        )?),
     );
 
     let service = XmlGrpc::with_metrics(metrics)
         .with_default_max_document_mib(env_num(
             "GRPC_XML_MAX_DOCUMENT_MIB",
             DEFAULT_MAX_DOCUMENT_MIB,
-        ))
+        )?)
         .with_ceiling_max_document_mib(env_num(
             "GRPC_XML_MAX_DOCUMENT_MIB_CEILING",
             CEILING_MAX_DOCUMENT_MIB,
-        ))
+        )?)
         .with_max_concurrent_parses(env_num(
             "GRPC_XML_MAX_CONCURRENT_PARSES",
             DEFAULT_MAX_CONCURRENT_PARSES,
-        ))
+        )?)
         .into_service();
 
     // Health lets an orchestrator gate traffic; reflection lets grpcurl and
@@ -116,7 +135,7 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
         .build_v1()?;
 
-    let window: u32 = env_num("GRPC_XML_WINDOW_BYTES", DEFAULT_WINDOW_BYTES);
+    let window: u32 = env_num("GRPC_XML_WINDOW_BYTES", DEFAULT_WINDOW_BYTES)?;
     println!("grpc-xml listening on {addr} (http2 window {window} bytes)");
     Server::builder()
         .tcp_nodelay(true)
@@ -143,5 +162,26 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {}
         _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::setting;
+    use std::env::VarError;
+
+    #[test]
+    fn a_setting_that_does_not_parse_stops_startup_and_names_itself() {
+        let refused = setting::<u64>("GRPC_XML_MAX_DOCUMENT_MIB", Ok("64MiB".to_owned()), 256)
+            .expect_err("a typo is not the default");
+        assert!(refused.contains("GRPC_XML_MAX_DOCUMENT_MIB"), "{refused}");
+        assert!(refused.contains("64MiB"), "{refused}");
+        assert!(setting::<u32>("W", Ok("-1".to_owned()), 7).is_err());
+        assert_eq!(setting::<u64>("M", Ok(" 64 ".to_owned()), 256), Ok(64));
+        assert_eq!(
+            setting::<u64>("M", Err(VarError::NotPresent), 256),
+            Ok(256),
+            "unset is the default"
+        );
     }
 }

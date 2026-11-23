@@ -271,6 +271,10 @@ struct Manifest {
     outline: Vec<pb::OutlineItem>,
     /// The descriptive records of the `dmdSec`s, in document order.
     descriptive: Vec<pb::MetaItem>,
+    /// Outline entries and descriptive records past
+    /// [`MAX_MANIFEST_RECORDS`], counted so the trailer says what was not
+    /// kept.
+    records_past_cap: u64,
 }
 
 /// Upper bound on structMap entries and descriptive records kept from one
@@ -433,7 +437,11 @@ impl ManifestWalk {
                 let Some(title) = attr(start, "LABEL").map(|label| collapse(&label)) else {
                     return;
                 };
-                if title.is_empty() || manifest.outline.len() >= MAX_MANIFEST_RECORDS {
+                if title.is_empty() {
+                    return;
+                }
+                if manifest.outline.len() >= MAX_MANIFEST_RECORDS {
+                    manifest.records_past_cap += 1;
                     return;
                 }
                 manifest.outline.push(pb::OutlineItem {
@@ -522,7 +530,11 @@ impl ManifestWalk {
     /// does.
     fn finish_descriptive(open: OpenDescriptive, manifest: &mut Manifest) {
         let value = collapse(&open.text);
-        if value.is_empty() || manifest.descriptive.len() >= MAX_MANIFEST_RECORDS {
+        if value.is_empty() {
+            return;
+        }
+        if manifest.descriptive.len() >= MAX_MANIFEST_RECORDS {
+            manifest.records_past_cap += 1;
             return;
         }
         let shape = match open.field {
@@ -671,6 +683,15 @@ impl MetsDriver<'_> {
     ) -> Result<(), ParseError> {
         let manifest = self.read_manifest(manifest_name, manifest_bytes)?;
         self.counts.elements_visited += manifest.elements_visited;
+        if manifest.records_past_cap > 0 {
+            let message = format!(
+                "the METS manifest {manifest_name} holds more than {MAX_MANIFEST_RECORDS} \
+                 contents entries or descriptive records of one kind: the rest were not read"
+            );
+            for _ in 0..manifest.records_past_cap {
+                self.warn(pb::WarningCode::LimitReached, &message);
+            }
+        }
 
         let info = pb::XmlInfo {
             dialect: Dialect::MetsGbs.to_proto() as i32,
@@ -955,6 +976,18 @@ impl MetsDriver<'_> {
                             bbox,
                             confidence,
                         });
+            } else if open.span_depth == 0
+                && open.open_word.is_none()
+                && has_class(start, "ocrx_word")
+            {
+                self.warn(
+                    pb::WarningCode::LimitReached,
+                    &format!(
+                        "hOCR member {member}: a line held more than {} words: the text of the \
+                         rest is kept and their boxes are not recorded",
+                        parse::MAX_INLINE_SPANS
+                    ),
+                );
             }
             open.span_depth += 1;
         } else if has_class(start, "ocr_line") {
@@ -1067,12 +1100,7 @@ impl MetsDriver<'_> {
     }
 
     fn warn(&mut self, code: pb::WarningCode, message: &str) {
-        let key = (code as i32, message.to_owned());
-        if let Some(count) = self.warnings.get_mut(&key) {
-            *count += 1;
-        } else if self.warnings.len() < parse::MAX_WARNING_KINDS {
-            self.warnings.insert(key, 1);
-        }
+        parse::record_warning(&mut self.warnings, code, message);
     }
 
     fn send(&mut self, event: pb::parse_xml_response::Event) -> Result<(), ParseError> {

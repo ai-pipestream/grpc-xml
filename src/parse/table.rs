@@ -40,6 +40,10 @@ pub(super) struct Row {
     pub(super) is_header: bool,
     pub(super) cells: Vec<pb::TableCell>,
     pub(super) next_column: u32,
+    /// True for a row this driver opened because a cell arrived with no row
+    /// element around it. No end tag closes it: the next row element or the
+    /// end of the table does.
+    pub(super) implicit: bool,
 }
 
 /// A table cell being assembled.
@@ -90,9 +94,19 @@ impl<R: BufRead> Driver<'_, R> {
         self.send(pb::parse_xml_response::Event::TableStart(start))
     }
 
-    pub(super) fn table_start(&mut self, namespace: &str, local: &str, qname: &str, attrs: &Attrs) {
+    pub(super) fn table_start(
+        &mut self,
+        namespace: &str,
+        local: &str,
+        qname: &str,
+        attrs: &Attrs,
+    ) -> Result<(), ParseError> {
+        // A row element ends the implicit row loose cells before it opened.
+        if ROW_ELEMENTS.contains(&local) {
+            self.flush_implicit_row()?;
+        }
         let Some(table) = self.table.as_mut() else {
-            return;
+            return Ok(());
         };
         if table.cell.is_some() {
             // Markup inside a cell flattens into the cell's text, and the
@@ -103,7 +117,7 @@ impl<R: BufRead> Driver<'_, R> {
                 self.open_cell_span(namespace, local, qname, attrs);
             }
             self.push_frame(local, qname);
-            return;
+            return Ok(());
         }
         if COLUMN_SPEC_ELEMENTS.contains(&local) {
             let spec = column_spec(attrs);
@@ -122,7 +136,7 @@ impl<R: BufRead> Driver<'_, R> {
                 table.columns.push(spec.clone());
             }
             self.push_frame(local, qname);
-            return;
+            return Ok(());
         }
         if HEADER_SECTION_ELEMENTS.contains(&local) {
             table.header_sections += 1;
@@ -131,8 +145,21 @@ impl<R: BufRead> Driver<'_, R> {
                 is_header: table.header_sections > 0,
                 cells: Vec::new(),
                 next_column: 0,
+                implicit: false,
             });
         } else if CELL_ELEMENTS.contains(&local) {
+            // A cell with no row element around it, which loosely authored
+            // fragments write, joins a row opened for it, as the HTML table
+            // model implies one: its text is content, and a cell with no
+            // row to join used to be dropped without a word.
+            if table.row.is_none() {
+                table.row = Some(Row {
+                    is_header: table.header_sections > 0,
+                    cells: Vec::new(),
+                    next_column: 0,
+                    implicit: true,
+                });
+            }
             // Spans are clamped the way HTML clamps them: a span is a claim
             // about the grid the consumer has to materialize, so a hostile
             // `colspan="2000000000"` must not become one.
@@ -174,6 +201,48 @@ impl<R: BufRead> Driver<'_, R> {
             });
         }
         self.push_frame(local, qname);
+        Ok(())
+    }
+
+    /// Send the implicit row loose cells opened, if one is pending.
+    fn flush_implicit_row(&mut self) -> Result<(), ParseError> {
+        let Some(table) = self.table.as_mut() else {
+            return Ok(());
+        };
+        if table.cell.is_some() || !table.row.as_ref().is_some_and(|row| row.implicit) {
+            return Ok(());
+        }
+        let Some(row) = table.row.take() else {
+            return Ok(());
+        };
+        self.send_row(row)
+    }
+
+    /// Send one finished row, widening the table to hold it.
+    fn send_row(&mut self, row: Row) -> Result<(), ParseError> {
+        let Some(table) = self.table.as_mut() else {
+            return Ok(());
+        };
+        if row.cells.is_empty() {
+            return Ok(());
+        }
+        let width = row
+            .cells
+            .iter()
+            .map(|c| c.column_index.saturating_add(c.column_span))
+            .max()
+            .unwrap_or(0);
+        table.column_count = table.column_count.max(width);
+        let is_header = row.is_header || row.cells.iter().all(|c| c.is_header);
+        let event = pb::TableRow {
+            table_ref: table.reference.clone(),
+            row_index: table.row_index,
+            is_header,
+            cells: row.cells,
+        };
+        table.row_index += 1;
+        self.counts.table_rows += 1;
+        self.send(pb::parse_xml_response::Event::TableRow(event))
     }
 
     /// Insert the word boundary a new child element implies inside a cell,
@@ -206,10 +275,12 @@ impl<R: BufRead> Driver<'_, R> {
         let Some(span) = self.build_inline_span(namespace, local, qname, attrs, start) else {
             return;
         };
-        if let Some(cell) = self.table.as_mut().and_then(|table| table.cell.as_mut())
-            && cell.spans.len() < MAX_INLINE_SPANS
-        {
-            cell.spans.push(span);
+        if let Some(cell) = self.table.as_mut().and_then(|table| table.cell.as_mut()) {
+            if cell.spans.len() < MAX_INLINE_SPANS {
+                cell.spans.push(span);
+            } else {
+                self.warn_span_cap();
+            }
         }
     }
 
@@ -285,28 +356,14 @@ impl<R: BufRead> Driver<'_, R> {
         if ROW_ELEMENTS.contains(&closing.as_str())
             && let Some(row) = table.row.take()
         {
-            if row.cells.is_empty() {
-                return Ok(());
-            }
-            let width = row
-                .cells
-                .iter()
-                .map(|c| c.column_index.saturating_add(c.column_span))
-                .max()
-                .unwrap_or(0);
-            table.column_count = table.column_count.max(width);
-            let is_header = row.is_header || row.cells.iter().all(|c| c.is_header);
-            let event = pb::TableRow {
-                table_ref: table.reference.clone(),
-                row_index: table.row_index,
-                is_header,
-                cells: row.cells,
-            };
-            table.row_index += 1;
-            self.counts.table_rows += 1;
-            return self.send(pb::parse_xml_response::Event::TableRow(event));
+            return self.send_row(row);
         }
         if depth == table.depth {
+            // Loose cells at the end of the table close their row with it.
+            self.flush_implicit_row()?;
+            let Some(table) = self.table.as_mut() else {
+                return Ok(());
+            };
             let end = pb::TableEnd {
                 table_ref: table.reference.clone(),
                 row_count: table.row_index,
