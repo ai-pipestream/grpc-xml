@@ -15,9 +15,9 @@ This file wins on *how to build it so it matches the fleet*.
 ## Fleet
 
 These services live under `/work/main/grpc-services`. Each is its own git
-repo. **PipeStream core** (`core-services/*`, engine, repository, frontend)
-is out of scope. **ProtoMolt** is the export sink (markdown/html/parquet);
-it is not this binary.
+repo. What they parse is consumed by **ProtoMolt** (the export sink:
+markdown/html/parquet), **turboembed** and **ProtoMolt search**; none of
+those is this binary.
 
 gRParse is the parse coordinator. Format collectors take bytes and stream
 typed events (gRParse maps those into a source-tagged `Document`).

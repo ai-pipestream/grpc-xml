@@ -9,7 +9,7 @@ the element's own name.
 One Rust process reads declarative XML with [`quick-xml`](https://github.com/tafia/quick-xml)
 and streams typed document items as the parser yields them: the title goes
 out before the body has been read, and the trailer only carries counts. It
-is not PipeStream core and not a wrapper around an external converter. The
+is not a wrapper around an external converter. The
 two archive dialects are unpacked in memory and fed through the same
 streaming machinery; nothing touches disk for them either.
 
