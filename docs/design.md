@@ -200,7 +200,9 @@ them: a date the source wrote as a calendar date becomes a `MetaDate` (prose
 about a date stays prose rather than being coerced into numbers), an
 `identifier` becomes a `MetaIdentifier` with the scheme its `@type` names,
 a `rights` statement becomes a `MetaLicense`, and everything else becomes a
-`MetaDescriptive` naming the field. Only the innermost element that states a
+`MetaDescriptive` naming the field, with the scheme its `@type` or
+`@xsi:type` names and its `xml:lang`. The Dublin Core `type`, `source`,
+`format`, `coverage` and `relation` elements are read too. Only the innermost element that states a
 field counts, so a MODS `titleInfo/title` and `subject/topic` are one
 statement each rather than two. The record is gated by
 `emit_source_metadata` like every other metadata decode, and a record left
@@ -210,9 +212,11 @@ On the Document plane a statement lands in the typed slot `DocumentMeta` has
 for it (`title`, `authors` for a `creator` or a `contributor`, `keywords`
 because a catalogue `subject` is a topical term and there may be several,
 which the single-string `subject` field could not hold, `language`,
-`publisher`, `description`, and `created_raw` for a date written as prose),
-and in `extra` only when the schema has no field at all. `extra` is documented as being for genuinely open vocabulary,
-so nothing with a slot goes in it.
+`publisher`, `description`, and `created_raw` for a date written as prose).
+The Dublin Core elements with no field of their own (`type`, `source`,
+`format`, `coverage`, `relation`) are `dublin_core` statements, every one in
+record order with its scheme and language. Nothing goes in `extra`, which is
+documented as being for genuinely open vocabulary.
 
 **Source metadata.** `Document.source_meta` carries what the document
 declares about itself in typed slots: `title` from the `TITLE` item,

@@ -22,6 +22,7 @@ use common::{
 };
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use grpc_xml::document::v1 as doc;
 use grpc_xml::proto::v1 as pb;
 use tonic::Code;
 
@@ -108,7 +109,8 @@ const GBS_METS_CATALOGUED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <mets:mets xmlns:mets="http://www.loc.gov/METS/"
            xmlns:xlink="http://www.w3.org/1999/xlink"
            xmlns:dc="http://purl.org/dc/elements/1.1/"
-           xmlns:mods="http://www.loc.gov/mods/v3" PROFILE="gbs">
+           xmlns:mods="http://www.loc.gov/mods/v3"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" PROFILE="gbs">
   <mets:dmdSec ID="DMD1">
     <mets:mdWrap MDTYPE="MODS">
       <mets:xmlData>
@@ -123,6 +125,12 @@ const GBS_METS_CATALOGUED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
           <dc:date>1876-05-04</dc:date>
           <dc:identifier type="oclc">123456789</dc:identifier>
           <dc:rights>Public domain in the United States.</dc:rights>
+          <dc:type xsi:type="dcterms:DCMIType">Text</dc:type>
+          <dc:source>Original im Stadtarchiv</dc:source>
+          <dc:format>text/html</dc:format>
+          <dc:coverage>Leipzig</dc:coverage>
+          <dc:relation>urn:isbn:9780000000001</dc:relation>
+          <dc:relation xml:lang="de">Teil der Sammlung Bücherkunde</dc:relation>
         </mods:mods>
       </mets:xmlData>
     </mets:mdWrap>
@@ -1175,6 +1183,15 @@ async fn a_dmd_sec_decodes_into_the_typed_shapes_that_already_exist_for_it() {
                 "description".to_owned(),
                 "Ein Bericht über Formate.".to_owned()
             ),
+            ("type".to_owned(), "Text".to_owned()),
+            ("source".to_owned(), "Original im Stadtarchiv".to_owned()),
+            ("format".to_owned(), "text/html".to_owned()),
+            ("coverage".to_owned(), "Leipzig".to_owned()),
+            ("relation".to_owned(), "urn:isbn:9780000000001".to_owned()),
+            (
+                "relation".to_owned(),
+                "Teil der Sammlung Bücherkunde".to_owned()
+            ),
         ],
         "a MODS wrapper is not a second statement of what it wraps"
     );
@@ -1301,6 +1318,75 @@ async fn the_gbs_document_carries_the_outline_and_the_catalogue_record() {
         Some("Ein Bericht über Formate.")
     );
     assert_eq!(meta.extra, std::collections::HashMap::new());
+}
+
+/// `dc:type`, `source`, `format`, `coverage` and `relation` were dropped
+/// without a word. They are `dublin_core` statements now.
+#[tokio::test]
+async fn a_catalogue_record_keeps_every_dublin_core_statement() {
+    let client = client().await;
+    let events = parse_bytes_ok(
+        &client,
+        &gbs_catalogued_export(),
+        pb::ParseOptions {
+            emit_document: true,
+            emit_source_metadata: true,
+            ..options()
+        },
+    )
+    .await;
+    let document = events
+        .iter()
+        .find_map(|e| match e.event.as_ref() {
+            Some(pb::parse_xml_response::Event::Document(d)) => Some(d),
+            _ => None,
+        })
+        .expect("emit_document produces a document event");
+
+    let meta = document.source_meta.as_ref().expect("the catalogue record");
+    // The Dublin Core statements with no field of their own, every one in
+    // record order, with the scheme and the language the record names.
+    let statement = |element: doc::DublinCoreElement,
+                     value: &str,
+                     scheme: Option<&str>,
+                     language: Option<&str>| doc::DublinCoreStatement {
+        element: element as i32,
+        value: value.to_owned(),
+        scheme: scheme.map(str::to_owned),
+        language: language.map(str::to_owned),
+        term: None,
+    };
+    assert_eq!(
+        meta.dublin_core,
+        [
+            statement(
+                doc::DublinCoreElement::Type,
+                "Text",
+                Some("dcterms:DCMIType"),
+                None
+            ),
+            statement(
+                doc::DublinCoreElement::Source,
+                "Original im Stadtarchiv",
+                None,
+                None
+            ),
+            statement(doc::DublinCoreElement::Format, "text/html", None, None),
+            statement(doc::DublinCoreElement::Coverage, "Leipzig", None, None),
+            statement(
+                doc::DublinCoreElement::Relation,
+                "urn:isbn:9780000000001",
+                None,
+                None
+            ),
+            statement(
+                doc::DublinCoreElement::Relation,
+                "Teil der Sammlung Bücherkunde",
+                None,
+                Some("de"),
+            ),
+        ]
+    );
 }
 
 /// A line that states no `x_wconf`, or one that is not a number, used to be

@@ -302,6 +302,13 @@ fn descriptive_field(local: &str) -> Option<&'static str> {
         "rights" | "accessCondition" => Some("rights"),
         "date" | "dateIssued" => Some("date"),
         "identifier" => Some("identifier"),
+        // The Dublin Core elements with no MODS counterpart of the same name.
+        // Dropping them lost a record's relations and resource type.
+        "type" => Some("type"),
+        "source" => Some("source"),
+        "format" => Some("format"),
+        "coverage" => Some("coverage"),
+        "relation" => Some("relation"),
         _ => None,
     }
 }
@@ -313,6 +320,7 @@ struct OpenDescriptive {
     depth: usize,
     field: &'static str,
     kind: Option<String>,
+    language: Option<String>,
     text: String,
 }
 
@@ -479,6 +487,7 @@ impl ManifestWalk {
                         depth: self.depth,
                         field,
                         kind: attr(start, "type"),
+                        language: attr(start, "lang"),
                         text: String::new(),
                     });
                 }
@@ -543,7 +552,7 @@ impl ManifestWalk {
             // statement rather than being coerced into numbers.
             "date" => match parse_date_parts(&value) {
                 Some(date) => pb::meta_item::Value::Date(date),
-                None => descriptive(open.field, value),
+                None => descriptive(&open, value),
             },
             "identifier" => pb::meta_item::Value::Identifier(pb::MetaIdentifier {
                 kind: open.kind.unwrap_or_else(|| "identifier".to_owned()),
@@ -559,7 +568,7 @@ impl ManifestWalk {
                 // A Dublin Core rights statement is one value, not paragraphs.
                 paragraphs: Vec::new(),
             }),
-            _ => descriptive(open.field, value),
+            _ => descriptive(&open, value),
         };
         manifest.descriptive.push(pb::MetaItem {
             // One parse spans many member documents, so the path names the
@@ -572,10 +581,12 @@ impl ManifestWalk {
 }
 
 /// One statement that has no typed shape of its own.
-fn descriptive(field: &str, value: String) -> pb::meta_item::Value {
+fn descriptive(open: &OpenDescriptive, value: String) -> pb::meta_item::Value {
     pb::meta_item::Value::Descriptive(pb::MetaDescriptive {
-        field: field.to_owned(),
+        field: open.field.to_owned(),
         value,
+        scheme: open.kind.clone(),
+        language: open.language.clone(),
     })
 }
 

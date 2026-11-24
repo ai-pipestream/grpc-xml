@@ -424,7 +424,9 @@ impl DocumentFold {
     /// `extra` is documented as being for source metadata that is genuinely
     /// open vocabulary, so it holds only what this schema has no field for
     /// and nothing that does: a publisher, a description and a date written
-    /// as prose each have a slot. A first
+    /// as prose each have a slot, and the Dublin Core elements with no field
+    /// of their own (type, source, format, coverage, relation) are
+    /// `dublin_core` statements, every one in record order. A first
     /// declaration wins for the single-valued slots: a catalogue record
     /// states a title once, and a second `dmdSec` restating it is the same
     /// title, not a correction.
@@ -470,10 +472,20 @@ impl DocumentFold {
                 }
             }
             other => {
-                self.source_meta
-                    .extra
-                    .entry(other.to_owned())
-                    .or_insert(value);
+                if let Some(element) = dublin_core_element(other) {
+                    self.source_meta.dublin_core.push(doc::DublinCoreStatement {
+                        element: element as i32,
+                        value,
+                        scheme: statement.scheme.clone(),
+                        language: statement.language.clone(),
+                        term: None,
+                    });
+                } else {
+                    self.source_meta
+                        .extra
+                        .entry(other.to_owned())
+                        .or_insert(value);
+                }
             }
         }
     }
@@ -2294,6 +2306,19 @@ fn int_from_usize(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+/// The Dublin Core element a descriptive field names, for the ones that
+/// have no typed field of their own.
+fn dublin_core_element(field: &str) -> Option<doc::DublinCoreElement> {
+    match field {
+        "type" => Some(doc::DublinCoreElement::Type),
+        "source" => Some(doc::DublinCoreElement::Source),
+        "format" => Some(doc::DublinCoreElement::Format),
+        "coverage" => Some(doc::DublinCoreElement::Coverage),
+        "relation" => Some(doc::DublinCoreElement::Relation),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2333,6 +2358,8 @@ mod tests {
                 value: Some(pb::meta_item::Value::Descriptive(pb::MetaDescriptive {
                     field: "date".to_owned(),
                     value: "circa 1876".to_owned(),
+                    scheme: None,
+                    language: None,
                 })),
                 source: None,
             })),
