@@ -1573,6 +1573,9 @@ message PictureMeta {
   // The source's alternative text for the picture (an HTML alt attribute),
   // verbatim.
   optional string alt_text = 13;
+  // The id the source's own packaging gives the image resource (an EPUB
+  // manifest item id, an office relationship id).
+  optional string source_id = 14;
   map<string, google.protobuf.Value> custom_fields = 100;
 }
 
@@ -2141,6 +2144,28 @@ message DocumentMeta {
   repeated FrontMatterEntry front_matter = 46;
   // What an XML source is, beyond its namespaces and schema locations.
   optional XmlDocumentMeta xml = 47;
+  // The publisher the source names.
+  optional string publisher = 48;
+  // The picture that is the work's cover (a book's cover image, an office
+  // file's thumbnail), when the source marks one.
+  optional RefItem cover = 49;
+  // What an EPUB package says about its own files.
+  optional EpubPackageMeta epub = 50;
+}
+
+// EpubPackageMeta names the files an EPUB package is built from, as paths
+// inside the container.
+message EpubPackageMeta {
+  // The package document.
+  optional string opf_href = 1;
+  // The navigation document (EPUB 3) and the NCX table of contents
+  // (EPUB 2), where the package has them.
+  optional string nav_href = 2;
+  optional string ncx_href = 3;
+  // The id the package's unique-identifier attribute names: the
+  // Identifier.id of the one entry in DocumentMeta.identifiers that the
+  // package declares as its own.
+  optional string unique_identifier_id = 4;
 }
 
 // HistoryDate is one dated event in a source's history.
@@ -2218,6 +2243,10 @@ message Identifier {
   string value = 2;
   // The scope the source attaches (electronic vs print ISSN).
   optional string scope = 3;
+  // The identifier's own id in the source (the id attribute of an EPUB
+  // dc:identifier), when it has one, so another field can name this
+  // identifier.
+  optional string id = 4;
 }
 
 // Classification is one classification code the source declares.
@@ -2865,9 +2894,10 @@ message MediaOverlayCue {
   // The text fragment and the audio file, as the overlay references them.
   string text_href = 1;
   string audio_href = 2;
-  // The clip's start and end in the audio file, in seconds.
-  double start_seconds = 3;
-  double end_seconds = 4;
+  // The clip's start and end in the audio file, in seconds. Unset when the
+  // overlay's clock value does not parse; zero is a real start.
+  optional double start_seconds = 3;
+  optional double end_seconds = 4;
   // The cue's own id in the overlay document.
   optional string id = 5;
 }
