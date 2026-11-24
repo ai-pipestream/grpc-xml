@@ -1095,11 +1095,19 @@ message MetaCitation {
 message MetaDescriptive {
   // The statement's field name, lower-cased and unprefixed: `title`,
   // `creator`, `contributor`, `subject`, `publisher`, `description`,
-  // `language`, `rights`.
+  // `language`, `rights`, `date`, and the Dublin Core elements `type`,
+  // `source`, `format`, `coverage` and `relation`.
   string field = 1;
 
   // The statement, flattened and whitespace-collapsed.
   string value = 2;
+
+  // The encoding scheme the element names for its value (a `type` or
+  // `xsi:type` attribute such as `dcterms:DCMIType`), as written.
+  optional string scheme = 3;
+
+  // The element's `xml:lang`, as written.
+  optional string language = 4;
 }
 
 // MetaItem is one piece of the document's declaration about itself,
