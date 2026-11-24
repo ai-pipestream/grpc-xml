@@ -131,6 +131,7 @@ fn collector(source: &[doc::SourceType]) -> &doc::CollectorSource {
         doc::source_type::Source::Generation(_) => {
             panic!("this collector generates nothing; it maps what the document says")
         }
+        doc::source_type::Source::Xml(_) => panic!("the collector stamp comes first"),
     }
 }
 
