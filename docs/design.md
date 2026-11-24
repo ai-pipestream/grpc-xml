@@ -222,7 +222,7 @@ message would claim an empty declaration rather than an absent one. The
 root's `xsi:schemaLocation` goes to `source_meta.schema_location` in the
 source's own spelling and to `source_meta.schema_locations` as the decoded
 namespace-and-location pairs; the namespace bindings go to
-`source_meta.namespaces`, which is what makes a `xml.path` written in
+`source_meta.namespaces`, which is what makes an `XmlSource.path` written in
 qualified names resolvable from the Document alone.
 
 **Identity.** `schema_name` is set from the `SCHEMA_NAME` constant in
@@ -234,10 +234,10 @@ mimetype is derived from: `requested`, `root-namespace`, `public-id`,
 `root-element`, `archive-magic` or `generic-fallback`. `name`
 = `XmlInfo.title` when the dialect exposed one, otherwise the first `TITLE`
 item's text (none of the four dialects currently fill `XmlInfo.title`, so
-in practice it is the title item). Root namespace, root local name and
-dialect go on the body's `meta.custom_fields` as `xml.root_namespace`,
-`xml.root_local_name`, `xml.dialect`. Root meta is **first-writer-wins** in
-the coordinator's merge, so treat those as a hint; the per-item
+in practice it is the title item). Dialect and root namespace go on
+`source_meta.xml` (`XmlDocumentMeta`), and the root element's path
+(`/article`) on the body group's `XmlSource`. Root meta is
+**first-writer-wins** in the coordinator's merge, so treat those as a hint; the per-item
 `CollectorSource.model` carries the dialect authoritatively.
 
 **Text items.** `TITLE` → `TitleItem`, `SECTION_HEADER` →
@@ -250,14 +250,15 @@ the one exception to placement: they are `TextItem`s in
 `CONTENT_LAYER_FURNITURE`, children of `#/furniture` rather than of the body
 or a section, and they neither close a section nor end a list. Everything
 else is `CONTENT_LAYER_BODY`. Both `text` and `orig` are set. Per item,
-`meta.custom_fields` carries `xml.path`, plus `xml.role`, `xml.element_id`
-and `xml.ordinal` when the event has them.
+the `source` list holds the collector stamp and then an `XmlSource`: `path`,
+plus `role`, `element_id`, `ordinal`, `from_cdata` and the element's own
+`xml:lang` when the event has them. No item carries a `custom_fields` bag.
 
-The element the item was read from has its own slots and is **not** among
-those custom fields. `TextItemBase.source_element_name` is its qualified
+The element the item was read from has its own slots and is **not** on
+the `XmlSource`. `TextItemBase.source_element_name` is its qualified
 name as written, and `source_namespace` its resolved namespace URI,
-recorded **only when it differs from the root's**, which the body meta
-already states. A `mml:math` inside a JATS article is the case worth
+recorded **only when it differs from the root's**, which
+`source_meta.xml` already states. A `mml:math` inside a JATS article is the case worth
 stating; repeating one URI on every item of a single-namespace document
 would be noise. No item writes the identity in both places.
 
@@ -267,10 +268,8 @@ way it already mirrors `label_raw`. The fold states them there, and the
 sentence above holds for every item kind without an exception: one typed
 place, and no item writing the identity in both.
 
-`xml.from_cdata` stays a custom field on every item kind. It is a fact
-about how the parser read the text rather than about the document, and it
-is written only when true, so its absence means ordinary character data
-rather than a false entry on every item.
+`XmlSource.from_cdata` is a fact about how the parser read the text
+rather than about the document; false means ordinary character data.
 
 **Inline runs** (`emit_inline_spans`). `TextItem.spans` folds onto
 `TextItemBase.spans`: styles onto `Formatting` (including its `monospace`,
@@ -291,12 +290,14 @@ its `#name` form. Every item that declared an identifier becomes a
 both directions.
 
 **Pictures.** A `PICTURE` event becomes a placeholder `PictureItem` in the
-picture arena with `image` unset: no bytes, no uri, no size. An XML picture
-is a reference, never pixels. The text such an event carries is never
-prose: every dialect lifts it from an attribute (the JATS `xlink:href`, the
-USPTO drawing `file`, the DocLang `uri`), so it is a reference and it lands
-in `meta.custom_fields["xml.href"]` beside the `xml.path` / `xml.role` /
-`xml.element_id` locators the item would have had as a text item.
+picture arena whose `image` holds only a reference: no bytes, no size, no
+dpi. An XML picture is a reference, never pixels. The text such an event
+carries is never prose: every dialect lifts it from an attribute (the JATS
+`xlink:href`, the USPTO drawing `file`, the DocLang `uri`), so it is a
+reference and it is `ImageRef.uri`, verbatim, with a mimetype read from
+its extension (`application/octet-stream` when the extension names none).
+A picture that names nothing has no `image`. The path, role and element id
+ride on the picture's `XmlSource` like any item's.
 `captions` stays empty: a figure's real caption reaches the fold as its own
 `CAPTION` event.
 
@@ -337,7 +338,7 @@ declares and the Document plane has no member for, stays on the typed wire
 and leaves the projection's slot unset rather than becoming a different
 alignment.
 
-**XBRL facts.** One `TableItem` (`meta.custom_fields["xml.table"] = "facts"`)
+**XBRL facts.** One `TableItem` (`TableData.kind = TABLE_KIND_XBRL_FACTS`)
 created lazily on the first fact: header row `concept | context | period |
 unit | value | decimals`, one row per fact. Concept is `prefix:localName`,
 period is an instant, an ISO `start/end` interval or `forever`, unit is the
@@ -377,13 +378,15 @@ the schema documents as a nested payload addressable for fan-out parsing,
 which is precisely what an island is. `item_ref` points back at the
 placeholder, so a coordinator that hands the fragment to the HTML collector
 knows where the result belongs, and `integrity_errors` holds that pointer to
-the same merge contract as every other ref. The count stays in
-`body.meta.custom_fields["xml.html_islands"]`.
+the same merge contract as every other ref. The attachments are the
+count: one per island, each with `kind = "html-island"`. The placeholder
+group and the island's text item both carry an `XmlSource` with
+`role = "html-island"`.
 
 **Image payloads.** An XML picture is a filename or an `xlink:href`, never
-pixels: the `PictureItem` is a placeholder and its `image` stays unset. This
-collector does not fetch what the href names, and never invents an
-`ImageRef`.
+pixels: the `PictureItem`'s `image` is the reference (`ImageRef.uri`) and
+nothing else. This collector does not fetch what the href names, and never
+fills `ImageRef.data`, `size` or `dpi` for it.
 
 **Pairing a figure's own caption with its picture.** A `<fig>` caption
 reaches the fold as a standalone `CAPTION` event after the graphic, so it
@@ -441,8 +444,8 @@ such a stage needs to attach a label afterwards. Nothing here should grow a
 taxonomy reader.
 
 **USPTO claims as list items.** They stream as `TEXT` with `role = "claim"`
-and an ordinal, and that is what they fold to; the claim numbering is in
-`xml.ordinal`.
+and an ordinal, and that is what they fold to; the claim numbering is
+`XmlSource.ordinal`.
 
 ### 4.4 The generic fallback
 

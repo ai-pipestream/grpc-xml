@@ -171,13 +171,13 @@ never edited here.
 
 | Wire event | Document |
 |---|---|
-| `info` | `name` (the title), `origin.mimetype = application/xml`, and `xml.dialect` / `xml.root_namespace` / `xml.root_local_name` on the body meta |
+| `info` | `name` (the title), `origin.mimetype = application/xml`, `source_meta.xml` (dialect, root namespace), and the root element's path on the body's `XmlSource` |
 | `text_item` | A `BaseTextItem` variant chosen by label: `TitleItem`, `SectionHeaderItem`, `ListItem`, `CodeItem`, `FormulaItem`, else `TextItem`, with `text` and `orig` set |
 | `text_item` labelled `PAGE_HEADER` / `PAGE_FOOTER` | A `TextItem` under `#/furniture`, in the furniture content layer, so page chrome never reads as body text |
-| `text_item` labelled `PICTURE` | A placeholder `PictureItem` with `image` unset and no captions; the reference the parser lifted from the markup (`xlink:href`, drawing `file`, DocLang `uri`) lands in `meta.custom_fields["xml.href"]` |
+| `text_item` labelled `PICTURE` | A `PictureItem` with no captions whose `image` is only a reference: the one the parser lifted from the markup (`xlink:href`, drawing `file`, DocLang `uri`) is `ImageRef.uri`, verbatim, with a mimetype from its extension and no bytes, size or dpi |
 | `table_start` / `table_row` / `table_end` | One `TableItem`: both `grid` and flat `table_cells`, offsets computed honoring spans, the caption created as a `CAPTION` item and referenced |
-| `fact` | One row of a single lazily created "facts" table: concept, context, period, unit, value, decimals |
-| `html_island` | **Not mapped**: the HTML collector's job. The count lands in `body.meta.custom_fields["xml.html_islands"]` |
+| `fact` | One row of a single lazily created table with `TableData.kind = TABLE_KIND_XBRL_FACTS`: concept, context, period, unit, value, decimals |
+| `html_island` | **Not mapped**: the HTML collector's job. A placeholder group (with the island's text and raw markup under it) and a `SubDocumentRef` in `attachments` to parse it with |
 | `status` | Nothing; it describes the stream, not the document |
 
 Structure nests by heading rather than staying flat: a section header of
@@ -190,8 +190,9 @@ levels, so there is nothing to fill.
 Every item carries a `CollectorSource` (`collector = "xml"`, `model` = the
 dialect, `version` = this build, no `confidence`), and **no `prov`**: these
 dialects have no pages and no boxes. The source locators (positional path,
-element id, source role, ordinal) are per-item `meta.custom_fields` under
-`xml.` keys. Refs are dense and local (`#/texts/0`, `#/pictures/0`,
+element id, source role, ordinal, CDATA, `xml:lang`) ride on a typed
+`XmlSource` in the same `source` list, after the collector stamp; no item
+carries a `custom_fields` bag. Refs are dense and local (`#/texts/0`, `#/pictures/0`,
 `#/tables/1`) with `parent` and `children` reciprocal, which is what lets the
 coordinator merge the fragment additively;
 `document_fold::integrity_errors` is that contract as
