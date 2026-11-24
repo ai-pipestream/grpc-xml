@@ -176,7 +176,211 @@ message Document {
 message CollectorWarning {
   // The collector that raised it ("libreoffice", "calamine", "pdf", ...).
   CollectorSource source = 1;
+  // The warning in words, for a person. A consumer that acts on a warning
+  // reads the typed fields below, never this text.
   string message = 2;
+  // What happened. WARNING_CODE_UNSPECIFIED on a warning that so far carries
+  // words only: a collector's own free-text note, passed on verbatim.
+  WarningCode code = 3;
+  // The 1-based page the warning is about, when it is about one page.
+  optional int32 page_no = 4;
+  // The self_ref of the item the warning is about ("#/tables/3"), when it
+  // is about one item.
+  optional string item_ref = 5;
+  // For a warning about content that was cut: how many bytes were kept and
+  // how many the source held. bytes_total is unset when the source's size
+  // is not known (an archive that lost its framing part way through).
+  optional uint64 bytes_kept = 6;
+  optional uint64 bytes_total = 7;
+  // How many occurrences this one entry stands for, when a collector folded
+  // repeats of the same finding into it. Unset means one.
+  optional uint64 count = 8;
+}
+
+// WarningCode names what a CollectorWarning reports, so a consumer can count
+// or act on one kind of loss without matching message text. A warning is
+// never a failure: the parse stands, and the code says what is missing from
+// it or how it was produced. A warning with no typed meaning keeps
+// WARNING_CODE_UNSPECIFIED and its words.
+enum WarningCode {
+  WARNING_CODE_UNSPECIFIED = 0;
+
+  // -- Another path produced the document ------------------------------
+
+  // A collector that was planned for this document failed, and another path
+  // produced the body in its place (the PDF inspector failing, with the
+  // in-process CV path reading the document instead). The document is
+  // complete as that other path reads it; what only the failed collector
+  // would have supplied is absent.
+  WARNING_CODE_COLLECTOR_FALLBACK = 1;
+  // The PDF inspector classified the document (scanned, mixed, damaged
+  // text layer) and the in-process CV path read it instead of the
+  // inspector's own extraction. A routing decision, not a loss.
+  WARNING_CODE_ROUTED_TO_CV = 2;
+  // The request asked for the text layer as it is (pipeline NATIVE) and got
+  // it, although the inspector's classification says recognition would
+  // have read more. No layout, OCR or table-structure model ran.
+  WARNING_CODE_TEXT_LAYER_TAKEN_AS_IS = 3;
+  // An option the request set does not apply to this input (form fields
+  // asked of a file that is not a PDF) and had no effect.
+  WARNING_CODE_OPTION_NOT_APPLICABLE = 4;
+
+  // -- A pass that did not run -----------------------------------------
+
+  // This deployment runs without the layout model, so no region of the
+  // document carries a model-assigned label: no tables, pictures, headings
+  // or formulas were told apart from plain text.
+  WARNING_CODE_LAYOUT_PASS_DISABLED = 10;
+  // This deployment runs without the table-structure model: table cells
+  // come from line geometry alone.
+  WARNING_CODE_TABLE_STRUCTURE_PASS_DISABLED = 11;
+  // This deployment runs without the figure classifier: pictures carry no
+  // class.
+  WARNING_CODE_FIGURE_CLASSIFICATION_PASS_DISABLED = 12;
+  // No configured PDF backend can read form fields, so the document's
+  // AcroForm widgets, if it has any, are absent. Different from a document
+  // without a form, which raises nothing.
+  WARNING_CODE_FORM_FIELDS_UNSUPPORTED = 13;
+  // A PDF backend that reads form fields failed while reading this
+  // document's; its widgets, if it has any, are absent.
+  WARNING_CODE_FORM_FIELDS_UNREADABLE = 14;
+
+  // -- PDF backends ----------------------------------------------------
+
+  // The PDF backend said it skipped or repaired content on page_no while
+  // reading it (a damaged content stream, an object it could not decode).
+  // The page holds what the backend could read.
+  WARNING_CODE_BACKEND_CONTENT_SKIPPED = 20;
+  // The totals in the PDF backend's trailer do not match what arrived:
+  // items were lost between the backend and this document.
+  WARNING_CODE_BACKEND_COUNT_MISMATCH = 21;
+  // A PDF backend configured for the consensus vote could not open the
+  // document, or was taken out of the vote after repeated page failures.
+  // Pages were decided by the backends that remained.
+  WARNING_CODE_CONSENSUS_BACKEND_FAILED = 22;
+  // The backends configured for the consensus vote disagree on how many
+  // pages the document has.
+  WARNING_CODE_CONSENSUS_PAGE_COUNT_DISAGREEMENT = 23;
+  // page_no was decided by fewer backends than the vote was configured
+  // with; with one backend left it is that backend's reading, unvoted.
+  WARNING_CODE_CONSENSUS_PAGE_UNDERVOTED = 24;
+
+  // -- Pages -----------------------------------------------------------
+
+  // page_no was sent to a model service and no answer for it came back
+  // before the stream ended. The page has no items from that service.
+  WARNING_CODE_PAGE_UNANSWERED = 30;
+  // The model answered for page_no, but its output could not be mapped
+  // into document items. The page has no items from that answer.
+  WARNING_CODE_PAGE_OUTPUT_UNMAPPED = 31;
+  // The model returned nothing at all for page_no.
+  WARNING_CODE_PAGE_EMPTY_RESPONSE = 32;
+  // A model pass over page_no did not finish (one of several passes a
+  // model makes over a page); the page holds what the finished passes
+  // read.
+  WARNING_CODE_PAGE_PASS_INCOMPLETE = 33;
+  // The page image the request asked for could not be rendered for
+  // page_no: Document.pages[page_no].image is absent.
+  WARNING_CODE_PAGE_PREVIEW_FAILED = 34;
+  // The picture regions of page_no were to be recognized from a sharper
+  // render of the page; that render failed, and they were recognized from
+  // the page raster at its lower resolution.
+  WARNING_CODE_PICTURE_OCR_AT_PAGE_RESOLUTION = 35;
+  // An image crop that enrichment (code, formula, picture or chart
+  // reading) needed could not be rendered, for page_no or for item_ref;
+  // the item was enriched from its text alone, or not at all.
+  WARNING_CODE_ENRICHMENT_CROP_MISSING = 36;
+  // A page render handed to the in-process models could not be decoded or
+  // was over the size cap; page_no was not read by them.
+  WARNING_CODE_PAGE_RENDER_UNREADABLE = 37;
+  // The model call for page_no failed (the endpoint refused it, timed out
+  // or returned an error), so there is no model output for the page at
+  // all. The page has no items from that service.
+  WARNING_CODE_PAGE_MODEL_CALL_FAILED = 38;
+
+  // -- Items -----------------------------------------------------------
+
+  // The table-structure model stopped before the end of the table at
+  // item_ref. Cells past the cut-off were placed by line geometry, not by
+  // the model.
+  WARNING_CODE_TABLE_STRUCTURE_TRUNCATED = 40;
+  // The table at item_ref has more cells than the model service returned a
+  // grid for; its grid is absent or partial.
+  WARNING_CODE_TABLE_GRID_OMITTED = 41;
+  // A second reader's cells for the sheet at item_ref were incomplete (its
+  // stream failed, or it could not read the sheet), so they were not
+  // adopted: the sheet keeps the first reader's cells.
+  WARNING_CODE_SHEET_CELLS_NOT_ADOPTED = 42;
+  // The payload behind item_ref was longer than the text kept from it:
+  // bytes_kept of bytes_total. The item's text is the kept prefix and
+  // nothing else.
+  WARNING_CODE_PAYLOAD_TRUNCATED = 43;
+  // The payload behind item_ref is stored in an encoding that was not
+  // decoded (a compressed HTTP body); the item carries no text from it.
+  WARNING_CODE_PAYLOAD_NOT_DECODED = 44;
+  // Pictures the source or model referred to carry no image bytes (on
+  // page_no or at item_ref).
+  WARNING_CODE_PICTURE_IMAGES_SKIPPED = 45;
+  // An enrichment result for item_ref could not be applied to it (the item
+  // it names is not in the document, or its kind does not take the
+  // annotation); the result is not in the document.
+  WARNING_CODE_ENRICHMENT_NOT_APPLIED = 46;
+
+  // -- Streams and archives --------------------------------------------
+
+  // A collector's stream ended before the collector said it was complete.
+  // The document holds what arrived; what the collector had not yet sent
+  // is absent.
+  WARNING_CODE_COLLECTOR_STREAM_INCOMPLETE = 50;
+  // An archive lost its record framing after bytes_kept bytes; the records
+  // before that point are in the document and the rest is absent.
+  WARNING_CODE_ARCHIVE_TRUNCATED = 51;
+  // What a collector's trailer says it produced does not match what
+  // arrived from it.
+  WARNING_CODE_COLLECTOR_COUNT_MISMATCH = 52;
+  // On a streamed parse, the event that reconciles the streamed pages with
+  // the repaired whole document could not be produced. The pages already
+  // sent stand unrepaired.
+  WARNING_CODE_REPAIR_EVENT_SKIPPED = 53;
+
+  // -- What a collector reports about its source -----------------------
+  //
+  // A collector that carries its own warning codes on its service contract
+  // maps each to the value below that says what a consumer can rely on; the
+  // collector's exact finding stays in the message.
+
+  // The source holds a construct the collector has no mapping for. Its text
+  // is in the document; its structure is not.
+  WARNING_CODE_SOURCE_CONSTRUCT_UNMAPPED = 60;
+  // A reference inside the source points at nothing the source holds (a
+  // dangling id, a manifest entry with no file, an entity with no
+  // declaration). The referring content is in the document; the link is
+  // not.
+  WARNING_CODE_SOURCE_REFERENCE_UNRESOLVED = 61;
+  // A part of the source was left out by rule: an external resource the
+  // collector does not fetch, an archive member of a kind it does not read,
+  // an obfuscated or nested resource. Nothing of that part is in the
+  // document.
+  WARNING_CODE_SOURCE_PART_IGNORED = 62;
+  // Bytes that are not valid in the source's encoding were replaced; the
+  // text around them is intact.
+  WARNING_CODE_SOURCE_ENCODING_SUBSTITUTION = 63;
+  // The source's text was repaired before it was read, so an offset into
+  // the document's text need not match an offset into the source's bytes.
+  WARNING_CODE_SOURCE_TEXT_REPAIRED = 64;
+  // The source's metadata could not be read, in whole or in part; the
+  // content is unaffected.
+  WARNING_CODE_SOURCE_METADATA_UNREADABLE = 65;
+  // The source breaks its own format and the collector recovered; the
+  // document holds the collector's best reading of the broken part.
+  WARNING_CODE_SOURCE_STRUCTURE_MALFORMED = 66;
+  // The collector stopped at one of its own limits (a record or row cap);
+  // the document holds the content up to the limit and nothing after it.
+  WARNING_CODE_SOURCE_CONTENT_TRUNCATED = 67;
+  // The source ends before its own structure says it should (a partial
+  // trailing record, a file shorter than its declared layout). What was
+  // complete is in the document.
+  WARNING_CODE_SOURCE_INPUT_INCOMPLETE = 68;
 }
 
 // TextAnalysis is one analyzer run over a window of the document's text
@@ -284,6 +488,13 @@ message DocumentOrigin {
   // Which collector's answer each resolved singular field carries.
   // Extension beyond the upstream dialect.
   repeated FieldSource field_sources = 8;
+  // The character encoding the source's bytes were decoded with, as the
+  // source declared it or the collector detected it (an IANA charset name).
+  optional string source_encoding = 9;
+  // The media type the caller declared for the source. It is the caller's
+  // claim, kept apart from `mimetype`, which is what the producer settled
+  // on.
+  optional string declared_mimetype = 10;
 }
 
 // ContentLayer defines the semantic layer where content appears in the document.
@@ -326,6 +537,15 @@ message GroupItem {
   // Sheet attributes when this group is a spreadsheet sheet (extension
   // beyond the upstream dialect).
   optional SheetMeta sheet = 9;
+  // Who produced this group, as items state it on their own `source`
+  // (extension beyond the upstream dialect).
+  repeated SourceType source = 10;
+  // Spine attributes when this group is one spine item of an EPUB
+  // (extension beyond the upstream dialect).
+  optional SpineItemMeta spine = 11;
+  // Slide attributes when this group is a presentation slide (extension
+  // beyond the upstream dialect).
+  optional SlideMeta slide = 12;
 }
 
 // RefItem is a JSON Pointer reference to another item in the document.
@@ -440,7 +660,47 @@ message SourceType {
     // Model-generated content names its generation (extension beyond the
     // upstream dialect).
     GenerationSource generation = 3;
+    // Where in an XML source the content came from (extension beyond the
+    // upstream dialect).
+    XmlSource xml = 4;
+    // Which part of a MIME message the content came from (extension beyond
+    // the upstream dialect).
+    MimePartSource mime_part = 5;
   }
+}
+
+// MimePartSource locates content in the MIME message it was read from.
+message MimePartSource {
+  // The part's position in the message's part tree ("1.2").
+  string part_id = 1;
+  // The part's Content-ID, without its angle brackets, when it has one.
+  optional string content_id = 2;
+  // The part's own content type, as its header states it.
+  optional string content_type = 3;
+}
+
+// XmlSource locates content in the XML source it was read from.
+message XmlSource {
+  // The element's path from the root, in the source's own element names.
+  string path = 1;
+  // The role the collector's dialect mapping gave the element (what it was
+  // read as), in the dialect's own vocabulary.
+  string role = 2;
+  // The element's id attribute, when it has one.
+  optional string element_id = 3;
+  // The element's position among the elements the collector read, in
+  // document order.
+  optional uint64 ordinal = 4;
+  // True when the text came from a CDATA section.
+  bool from_cdata = 5;
+  // For an annotation that the source attaches to other elements (an XBRL
+  // footnote): the ids of the elements it annotates.
+  repeated string annotates = 6;
+  // The link role the source gives that attachment (an XBRL footnote's
+  // xlink:role).
+  optional string link_role = 7;
+  // The xml:lang in force on the element.
+  optional string language = 8;
 }
 
 // BaseMeta contains metadata fields common to most document items.
@@ -545,7 +805,7 @@ enum DocItemLabel {
   DOC_ITEM_LABEL_FIELD_VALUE = 28;
   DOC_ITEM_LABEL_FIELD_HINT = 29;
   DOC_ITEM_LABEL_MARKER = 30;
-  // The three below have no upstream name. Producers put them on the item
+  // The ones below have no upstream name. Producers put them on the item
   // type a consumer that does not know them still reads sensibly, and the
   // canonical renderer writes the nearest upstream label.
   // A stamp or seal impression; carried on a PictureItem, rendered as
@@ -557,6 +817,8 @@ enum DocItemLabel {
   // An algorithm or pseudocode listing; carried on a CodeItem (or a
   // TextItem), rendered as "code".
   DOC_ITEM_LABEL_ALGORITHM = 33;
+  // A block quotation; carried on a TextItem, rendered as "text".
+  DOC_ITEM_LABEL_QUOTE = 34;
 }
 
 // Script defines the vertical positioning of text.
@@ -942,6 +1204,10 @@ message TextItemBase {
 
   // Markup attributes in source order, including lexical presence and locations.
   repeated SourceAttribute source_attributes = 26;
+
+  // The source's named page style this item belongs to, for header and
+  // footer text that repeats on every page of that style.
+  optional string page_style_name = 27;
 }
 
 // A markup attribute's decoded value and source spelling. Presence distinguishes
@@ -1089,6 +1355,11 @@ message ImageRef {
   // The size as the source spelled it when it is not a bare number pair
   // (20%, 5cm, 0.8 of the text width); `size` stays unset then.
   optional string size_raw = 5;
+  // The image's own bytes, encoded as `mimetype` says, when the producer
+  // holds them. A producer that has the bytes fills this field; it does not
+  // spell them as a data: URI in `uri`, which is for a reference to an
+  // image held elsewhere.
+  optional bytes data = 6;
 }
 
 // Size represents 2D dimensions (width and height).
@@ -1320,6 +1591,12 @@ message PictureMeta {
   // The source's accessibility title, kept beside the description so one
   // slot never has to hold two source strings.
   optional string accessibility_title = 12;
+  // The source's alternative text for the picture (an HTML alt attribute),
+  // verbatim.
+  optional string alt_text = 13;
+  // The id the source's own packaging gives the image resource (an EPUB
+  // manifest item id, an office relationship id).
+  optional string source_id = 14;
   map<string, google.protobuf.Value> custom_fields = 100;
 }
 
@@ -1428,6 +1705,23 @@ message TableData {
   optional RecordLayoutMeta record_layout = 10;
   // Named source table declarations, distinct from the sheet-wide cell grid.
   repeated DeclaredSheetTable declared_tables = 11;
+  // Cells the source holds for this table whose row and column could not be
+  // resolved. They belong to the table but are in neither `table_cells` nor
+  // `grid`; each keeps its text and, where the source names its cells, its
+  // source_name.
+  repeated TableCell unplaced_cells = 12;
+  // What the table is, when it is not a table the source laid out.
+  TableKind kind = 13;
+}
+
+// TableKind tells a table the collector built from the source's data from
+// one the source itself lays out.
+enum TableKind {
+  // A table as the source lays it out.
+  TABLE_KIND_UNSPECIFIED = 0;
+  // One row per XBRL fact, built by the collector from the facts of an
+  // XBRL instance.
+  TABLE_KIND_XBRL_FACTS = 1;
 }
 
 // One named table declared by a workbook, preserving its own schema and bands.
@@ -1472,6 +1766,9 @@ message TableCell {
   // upstream dialect).
   optional Alignment align = 16;
   optional VerticalAlignment valign = 17;
+  // The cell's own name in the source (a text table's "A1"), when the
+  // source names its cells.
+  optional string source_name = 18;
 }
 
 // KeyValueItem represents a key-value pair extracted from forms.
@@ -1588,7 +1885,9 @@ message FieldItem {
   optional int32 selected_index = 12;
   // The field's span in the document's annotation space.
   optional FineRef span = 13;
-  // Fieldmark parameters, a genuinely open per-field vocabulary.
+  // Fieldmark parameters as text, a genuinely open per-field vocabulary.
+  // A producer that knows each parameter's stored type fills
+  // typed_parameters instead; this map then stays empty.
   map<string, string> parameters = 14;
 
   // The interactive state of the field, typed (extensions beyond the
@@ -1617,6 +1916,30 @@ message FieldItem {
   // The field's tooltip or alternate description (PDF /TU), upstream's
   // PdfWidget.widget_description.
   optional string description = 21;
+  // The field's parameters in the type the source stored each one in, in
+  // source order. The names are the source's own open vocabulary; the
+  // values are typed.
+  repeated FieldParameter typed_parameters = 22;
+}
+
+// FieldParameter is one named parameter of a form field, in its stored
+// type.
+message FieldParameter {
+  string name = 1;
+  oneof value {
+    bool bool_value = 2;
+    int64 int_value = 3;
+    double double_value = 4;
+    string string_value = 5;
+    // A list-of-text value (a dropdown's entries).
+    StringList string_list = 6;
+  }
+}
+
+// StringList is a list of strings where a oneof needs one as a single
+// arm.
+message StringList {
+  repeated string values = 1;
 }
 
 // PageItem represents metadata about a single page in the document.
@@ -1735,6 +2058,10 @@ message InlineSpan {
   optional string highlight_color = 15;
   // Interlinear annotation over the run (ruby text).
   optional string annotation = 16;
+  // The frame the link opens in, as the source states it ("_blank").
+  optional string hyperlink_target_frame = 17;
+  // The link's name as authored, when the source gives links names.
+  optional string hyperlink_name = 18;
 }
 
 // ReferenceKind names what an inline reference points at.
@@ -1823,6 +2150,111 @@ message DocumentMeta {
   optional string application_version = 40;
   optional string company = 41;
   optional string manager = 42;
+  // Dated events in the source's own history (a journal article's received
+  // and accepted dates). `created` and `modified` keep their meaning; this
+  // list holds every dated event the source names, including those two
+  // when the source lists them here.
+  repeated HistoryDate history_dates = 43;
+  // The people and bodies credited with the work, each with the roles the
+  // source gives. `authors` stays the plain list of names.
+  repeated Creator creators = 44;
+  // The front matter block a markup source opens with (a Markdown or Org
+  // file's YAML or TOML header), as a typed tree in source order, and the
+  // syntax it was written in.
+  optional FrontMatterFormat front_matter_format = 45;
+  repeated FrontMatterEntry front_matter = 46;
+  // What an XML source is, beyond its namespaces and schema locations.
+  optional XmlDocumentMeta xml = 47;
+  // The publisher the source names.
+  optional string publisher = 48;
+  // The picture that is the work's cover (a book's cover image, an office
+  // file's thumbnail), when the source marks one.
+  optional RefItem cover = 49;
+  // What an EPUB package says about its own files.
+  optional EpubPackageMeta epub = 50;
+}
+
+// EpubPackageMeta names the files an EPUB package is built from, as paths
+// inside the container.
+message EpubPackageMeta {
+  // The package document.
+  optional string opf_href = 1;
+  // The navigation document (EPUB 3) and the NCX table of contents
+  // (EPUB 2), where the package has them.
+  optional string nav_href = 2;
+  optional string ncx_href = 3;
+  // The id the package's unique-identifier attribute names: the
+  // Identifier.id of the one entry in DocumentMeta.identifiers that the
+  // package declares as its own.
+  optional string unique_identifier_id = 4;
+}
+
+// HistoryDate is one dated event in a source's history.
+message HistoryDate {
+  // The event as the source names it ("received", "accepted", "rev-recd").
+  string kind = 1;
+  // The date as a wall-clock value, for a source that states a date without
+  // an instant; `instant` when it states one. `raw` keeps the source's own
+  // spelling and is the only field set when the value does not parse.
+  optional CivilDateTime civil = 2;
+  optional google.protobuf.Timestamp instant = 3;
+  optional string raw = 4;
+}
+
+// Creator is one person or body credited with the work.
+message Creator {
+  string name = 1;
+  // The roles the source gives, as it writes them (MARC relator codes such
+  // as "aut" and "edt").
+  repeated string roles = 2;
+  // The name in its sorting form ("Austen, Jane"), when the source states
+  // one.
+  optional string file_as = 3;
+}
+
+// FrontMatterFormat is the syntax a front matter block was written in.
+enum FrontMatterFormat {
+  FRONT_MATTER_FORMAT_UNSPECIFIED = 0;
+  FRONT_MATTER_FORMAT_YAML = 1;
+  FRONT_MATTER_FORMAT_TOML = 2;
+}
+
+// FrontMatterValue is one value of a front matter block, in the type the
+// source's syntax gives it. It exists for front matter only: data whose
+// shape the fleet knows gets its own typed field.
+message FrontMatterValue {
+  oneof kind {
+    string text = 1;
+    double number = 2;
+    bool boolean = 3;
+    CivilDateTime datetime = 4;
+    FrontMatterList list = 5;
+    FrontMatterMap map = 6;
+    int64 integer = 7;
+  }
+}
+
+message FrontMatterList {
+  repeated FrontMatterValue values = 1;
+}
+
+// FrontMatterMap keeps its entries in source order.
+message FrontMatterMap {
+  repeated FrontMatterEntry entries = 1;
+}
+
+message FrontMatterEntry {
+  string key = 1;
+  FrontMatterValue value = 2;
+}
+
+// XmlDocumentMeta says what an XML source is.
+message XmlDocumentMeta {
+  // The dialect the collector read the source as ("jats", "uspto", "xbrl",
+  // "doclang", "mets_gbs").
+  optional string dialect = 1;
+  // The namespace of the source's root element.
+  optional string root_namespace = 2;
 }
 
 // Identifier is one source-scoped identifier.
@@ -1832,6 +2264,10 @@ message Identifier {
   string value = 2;
   // The scope the source attaches (electronic vs print ISSN).
   optional string scope = 3;
+  // The identifier's own id in the source (the id attribute of an EPUB
+  // dc:identifier), when it has one, so another field can name this
+  // identifier.
+  optional string id = 4;
 }
 
 // Classification is one classification code the source declares.
@@ -1902,6 +2338,13 @@ message CellValue {
     // The source's error literal (a spreadsheet #DIV/0!, a conversion
     // failure marker).
     string error = 5;
+    // An exact decimal the source states (a packed-decimal amount, a
+    // monetary fact). A producer writes `number` only for a value the
+    // source itself holds as floating point.
+    ExactDecimal decimal = 6;
+    // An exact integer the source states; a double holds integers exactly
+    // only up to 2^53.
+    int64 integer = 7;
   }
   // The source's display format string for the value.
   optional string number_format = 10;
@@ -1913,6 +2356,14 @@ message CellValue {
   // Source number-format identifier, including reserved/localized formats
   // whose display code is unavailable.
   optional uint32 number_format_id = 13;
+}
+
+// ExactDecimal is a decimal number with no rounding: unscaled * 10^-scale.
+message ExactDecimal {
+  // The signed integer digits without a decimal point ("-1234567"); it may
+  // be longer than an int64 holds.
+  string unscaled = 1;
+  int32 scale = 2;
 }
 
 // CivilDateTime is a wall-clock date or datetime as the source wrote it,
@@ -2010,6 +2461,21 @@ message MediaMeta {
   // Distinct speaker labels, in first-appearance order.
   repeated string speakers = 2;
   optional string codec = 3;
+  // The audio stream's sample rate and channel count, as the container
+  // states them. Unset when the stream was not probed: unknown, not zero.
+  optional uint32 sample_rate_hz = 4;
+  optional uint32 channels = 5;
+  // Whether the container also holds a video stream. Unset when the
+  // container was not probed.
+  optional bool has_video = 6;
+  // The video stream's codec, when has_video is true and the probe names it.
+  optional string video_codec = 7;
+  // The duration the container declares, in the unit of duration_ms.
+  // duration_ms is what was transcribed; a declared duration that is longer
+  // means the transcript stops before the media does.
+  optional double declared_duration_ms = 8;
+  // The number of tokens the transcription model produced for this media.
+  optional uint64 token_count = 9;
 }
 
 // GenerationSource attributes model-generated content to its generation.
@@ -2137,6 +2603,12 @@ message ChangeRecord {
   // The text the change removed or replaced, when the source keeps it.
   optional string content = 6;
   optional string timestamp_raw = 7;
+  // The change this one supersedes, when the source nests changes (text
+  // one author inserted and another then deleted). Its id and target are
+  // unset where the source keeps only its kind, author, time and comment.
+  optional ChangeRecord successor = 8;
+  // The author's comment on the change.
+  optional string comment = 9;
 }
 
 // NamedAnchor is one named position the source declares.
@@ -2162,6 +2634,11 @@ message ValueCondition {
 message EmailParty {
   optional string name = 1;
   string address = 2;
+  // The party's address in the mail system's own form when that is not an
+  // internet address (an Exchange legacy distinguished name), and the
+  // address type the source names for it ("EX", "SMTP").
+  optional string native_address = 3;
+  optional string address_type = 4;
 }
 
 // EmailMeta is the typed message envelope of a mail source.
@@ -2182,6 +2659,16 @@ message EmailMeta {
   // only field set when it does not parse.
   optional google.protobuf.Timestamp sent = 10;
   optional string sent_raw = 11;
+  // Where replies go, when the message names it apart from `from`.
+  repeated EmailParty reply_to = 12;
+  // Who submitted the message, when the message names a sender apart from
+  // its authors in `from`.
+  repeated EmailParty sender = 13;
+  // The delivery instant, with the same _raw twin as `sent`.
+  optional google.protobuf.Timestamp received = 14;
+  optional string received_raw = 15;
+  // The message's own top-level content type, as its header states it.
+  optional string content_type = 16;
 }
 
 // Hypothesis is one alternate reading a generative engine offered.
@@ -2325,6 +2812,17 @@ message NamedRange {
   // The defining expression when the range is a formula rather than a
   // rectangle; `range` stays unset then.
   optional string expression = 6;
+  // What the workbook uses the name for, each set only when the source
+  // says so: a filter's criteria range, a print area, the column or row
+  // headers to repeat on every printed page, and whether the name is hidden
+  // from the user.
+  bool filter_criteria = 7;
+  bool print_area = 8;
+  bool repeat_columns = 9;
+  bool repeat_rows = 10;
+  bool hidden = 11;
+  // True when a database range keeps an auto filter on its header row.
+  bool auto_filter = 12;
 }
 
 // PivotSpec is one pivot table definition.
@@ -2358,6 +2856,27 @@ message RecordLayoutMeta {
   optional uint64 prefix_bytes = 5;
   // Rows the producer's row cap dropped; zero means the table is complete.
   optional uint64 rows_truncated = 6;
+  // The name of the record schema the table was decoded with (a copybook's
+  // 01-level name).
+  optional string schema_name = 7;
+  // For a file that mixes record types: the selector value of the records
+  // this table holds.
+  optional string selector = 8;
+  // How many records this table holds, before any row cap.
+  optional uint64 rows = 9;
+  // What the caller supplied the layout as.
+  RecordLayoutSource layout_source = 10;
+}
+
+// RecordLayoutSource names the form a fixed-record layout was supplied in.
+enum RecordLayoutSource {
+  RECORD_LAYOUT_SOURCE_UNSPECIFIED = 0;
+  // A COBOL copybook.
+  RECORD_LAYOUT_SOURCE_COPYBOOK = 1;
+  // The collector's own typed layout message.
+  RECORD_LAYOUT_SOURCE_LAYOUT = 2;
+  // A layout written as a Docling JSON document.
+  RECORD_LAYOUT_SOURCE_DOCLING_JSON = 3;
 }
 
 // FormFieldKind is the interactive type of a form field (FieldItem
@@ -2389,4 +2908,47 @@ message BarcodeAnnotation {
   string value = 2;
   // The decoding engine.
   string provenance = 3;
+}
+
+// SlideMeta carries a presentation slide's own attributes.
+message SlideMeta {
+  // The slide's layout as the source identifies it: the authoring
+  // application's own layout number, and the layout's name where the source
+  // names its layouts. Zero is a real layout number, so it is
+  // presence-tracked.
+  optional int32 layout_id = 1;
+  optional string layout_name = 2;
+  // The master page the slide is based on.
+  optional string master_page_name = 3;
+}
+
+// SpineItemMeta carries what an EPUB package says about one spine item.
+message SpineItemMeta {
+  // The manifest item the spine entry names, and that item's media type.
+  string idref = 1;
+  string media_type = 2;
+  // False when the package marks the item as outside the linear reading
+  // order.
+  bool linear = 3;
+  // The item's position in the spine, from zero.
+  uint32 spine_index = 4;
+  // The manifest item's properties, as written ("nav", "scripted").
+  repeated string properties = 5;
+  // The media overlay document that narrates this item, and its cues.
+  optional string overlay_href = 6;
+  repeated MediaOverlayCue overlay_cues = 7;
+}
+
+// MediaOverlayCue pairs one stretch of an EPUB's text with the audio clip
+// that narrates it.
+message MediaOverlayCue {
+  // The text fragment and the audio file, as the overlay references them.
+  string text_href = 1;
+  string audio_href = 2;
+  // The clip's start and end in the audio file, in seconds. Unset when the
+  // overlay's clock value does not parse; zero is a real start.
+  optional double start_seconds = 3;
+  optional double end_seconds = 4;
+  // The cue's own id in the overlay document.
+  optional string id = 5;
 }
