@@ -178,7 +178,7 @@ never edited here.
 | `table_start` / `table_row` / `table_end` | One `TableItem`: both `grid` and flat `table_cells`, offsets computed honoring spans, the caption created as a `CAPTION` item and referenced |
 | `fact` | One row of a single lazily created table with `TableData.kind = TABLE_KIND_XBRL_FACTS`: concept, context, period, unit, value, decimals |
 | `html_island` | **Not mapped**: the HTML collector's job. A placeholder group (with the island's text and raw markup under it) and a `SubDocumentRef` in `attachments` to parse it with |
-| `status` | Nothing; it describes the stream, not the document |
+| `status` | Its warnings become `Document.warnings`, each with a fleet `WarningCode` and its count; the counts describe the stream and stay there |
 
 Structure nests by heading rather than staying flat: a section header of
 level N is parented to the nearest open header of a level below N (`#/body`

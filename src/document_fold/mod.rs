@@ -246,7 +246,8 @@ impl DocumentFold {
             // it knows the stream is over.
             // A `document` event is this fold's own output; folding one back
             // in would double the fragment.
-            Some(Event::Status(_) | Event::Document(_)) | None => {}
+            Some(Event::Status(status)) => self.on_status(status),
+            Some(Event::Document(_)) | None => {}
         }
     }
 
@@ -498,14 +499,45 @@ impl DocumentFold {
                     self.source_meta.created_civil = civil;
                     self.source_meta.created = instant;
                 }
+                return;
             }
             "rev-recd" | "revised" | "corrected" | "updated" => {
-                self.source_meta.modified_raw = Some(written);
+                self.source_meta.modified_raw = Some(written.clone());
                 self.source_meta.modified_civil = civil;
                 self.source_meta.modified = instant;
             }
             _ => {}
         }
+        // Every dated event that is not the publication itself is part of
+        // the document's history (received, accepted, a revision), in the
+        // order the source states them. A revision also fills `modified`,
+        // which is the latest one; the history keeps them all.
+        self.source_meta.history_dates.push(doc::HistoryDate {
+            kind: date.kind.clone(),
+            civil,
+            instant,
+            raw: Some(written),
+        });
+    }
+
+    /// Copy the trailer's warnings into `Document.warnings`, so a consumer
+    /// that only takes the folded Document sees what the stream reported.
+    /// Each wire code maps to the fleet code that says what a consumer can
+    /// rely on; the exact finding stays in the message.
+    fn on_status(&mut self, status: &pb::ParseStatus) {
+        let source = self.fallback_source.clone();
+        self.document
+            .warnings
+            .extend(status.warnings.iter().map(|warning| doc::CollectorWarning {
+                source: Some(source.clone()),
+                message: warning.message.clone(),
+                code: fleet_warning_code(
+                    pb::WarningCode::try_from(warning.code).unwrap_or_default(),
+                ) as i32,
+                // Unset means one.
+                count: (warning.count > 1).then_some(warning.count),
+                ..doc::CollectorWarning::default()
+            }));
     }
 
     /// Route an item that carries document-level metadata into the typed
@@ -1367,6 +1399,25 @@ impl DocumentFold {
             source: note.source.clone(),
             ..pb::TextItem::default()
         });
+        // What the footnote annotates, the role its link gives it and its
+        // language, on the locator the item already carries.
+        let Some(base) = self.document.texts.last_mut().and_then(base_of) else {
+            return;
+        };
+        let position = base
+            .source
+            .iter()
+            .position(|source| matches!(source.source, Some(doc::source_type::Source::Xml(_))))
+            .unwrap_or_else(|| {
+                base.source.push(xml_source(doc::XmlSource::default()));
+                base.source.len() - 1
+            });
+        if let Some(doc::source_type::Source::Xml(locator)) = base.source[position].source.as_mut()
+        {
+            locator.annotates.clone_from(&note.targets);
+            locator.link_role = note.role.clone().filter(|role| !role.is_empty());
+            locator.language = note.language.clone().filter(|lang| !lang.is_empty());
+        }
     }
 
     /// Create the fact table with its header row and return its arena index.
@@ -1835,6 +1886,29 @@ fn doc_reference_kind(kind: i32) -> Option<i32> {
     Some(mapped as i32)
 }
 
+/// The fleet code a wire warning code stands for: what a consumer of the
+/// Document can rely on when it sees one.
+const fn fleet_warning_code(code: pb::WarningCode) -> doc::WarningCode {
+    match code {
+        pb::WarningCode::Unspecified => doc::WarningCode::Unspecified,
+        // An entity with no declaration and a fact naming a context or unit
+        // nobody declared are both references to nothing the source holds.
+        pb::WarningCode::UnexpandedEntity | pb::WarningCode::DanglingReference => {
+            doc::WarningCode::SourceReferenceUnresolved
+        }
+        // Left out by rule, with nothing of it in the stream: an external
+        // DTD, an element the mapper skips, a taxonomy, an archive member.
+        pb::WarningCode::ExternalIdIgnored
+        | pb::WarningCode::UnmappedElement
+        | pb::WarningCode::TaxonomyIgnored
+        | pb::WarningCode::ArchiveMemberIgnored => doc::WarningCode::SourcePartIgnored,
+        pb::WarningCode::EncodingSubstitution => doc::WarningCode::SourceEncodingSubstitution,
+        pb::WarningCode::TextRepaired => doc::WarningCode::SourceTextRepaired,
+        pb::WarningCode::MalformedValue => doc::WarningCode::SourceStructureMalformed,
+        pb::WarningCode::LimitReached => doc::WarningCode::SourceContentTruncated,
+    }
+}
+
 /// The item's XML locator: where it sits in the source and what the
 /// dialect read it as, as a typed `XmlSource` beside the collector stamp.
 ///
@@ -2064,21 +2138,49 @@ fn numeric_value(fact: &pb::Fact) -> Option<doc::CellValue> {
     // looks like, and only the decimal or double lexical form is a number:
     // Rust's float parser also takes "inf" and "NaN", which XBRL's decimal
     // type does not. The cell's text keeps the value as written either way.
-    if fact.is_nil || fact.unit_ref.is_none() || !is_xbrl_number(fact.value.trim()) {
+    let text = fact.value.trim();
+    if fact.is_nil || fact.unit_ref.is_none() || !is_xbrl_number(text) {
         return None;
     }
-    let magnitude: f64 = fact.value.trim().parse().ok()?;
-    let number = if fact.sign.as_deref() == Some("-") {
-        -magnitude.abs()
+    // An inline XBRL `sign="-"` makes the shown magnitude negative.
+    let negated = fact.sign.as_deref() == Some("-");
+    let kind = if text.contains(['e', 'E']) {
+        // The xs:double form states a double, so a double is exact for it.
+        let magnitude: f64 = text.parse().ok()?;
+        doc::cell_value::Kind::Number(if negated { -magnitude.abs() } else { magnitude })
     } else {
-        magnitude
+        // The xs:decimal form is exact, and so is its projection: a monetary
+        // amount past a double's 15 to 17 significant digits keeps them all.
+        doc::cell_value::Kind::Decimal(exact_decimal(text, negated)?)
     };
     Some(doc::CellValue {
-        kind: Some(doc::cell_value::Kind::Number(number)),
+        kind: Some(kind),
         number_format: None,
         formula_source: None,
         number_format_id: None,
         style_id: None,
+    })
+}
+
+/// An `xs:decimal` lexical value (already checked by [`is_xbrl_number`],
+/// with no exponent) as its unscaled digits and scale: `-007.50` is
+/// `-750` at scale 2. Leading zeros go, negative zero is `0`, and the scale
+/// is the number of fraction digits as written. `None` only for a scale
+/// past `i32`, which no document this server reads can hold.
+fn exact_decimal(text: &str, negated: bool) -> Option<doc::ExactDecimal> {
+    let negative = negated || text.starts_with('-');
+    let unsigned = text.trim_start_matches(['+', '-']);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = format!("{whole}{fraction}");
+    let digits = digits.trim_start_matches('0');
+    let unscaled = match (digits.is_empty(), negative) {
+        (true, _) => "0".to_owned(),
+        (false, true) => format!("-{digits}"),
+        (false, false) => digits.to_owned(),
+    };
+    Some(doc::ExactDecimal {
+        unscaled,
+        scale: i32::try_from(fraction.len()).ok()?,
     })
 }
 
@@ -2197,6 +2299,115 @@ mod tests {
             Some(MIMETYPE)
         );
         assert_eq!(integrity_errors(&document), Vec::<String>::new());
+    }
+
+    fn fact(value: &str, sign: Option<&str>) -> pb::Fact {
+        pb::Fact {
+            value: value.to_owned(),
+            unit_ref: Some("usd".to_owned()),
+            sign: sign.map(str::to_owned),
+            ..pb::Fact::default()
+        }
+    }
+
+    fn exact(unscaled: &str, scale: i32) -> doc::cell_value::Kind {
+        doc::cell_value::Kind::Decimal(doc::ExactDecimal {
+            unscaled: unscaled.to_owned(),
+            scale,
+        })
+    }
+
+    #[test]
+    fn a_decimal_fact_keeps_every_digit() {
+        let kind = |value: &str, sign: Option<&str>| numeric_value(&fact(value, sign))?.kind;
+        // Past a double's 15 to 17 significant digits.
+        assert_eq!(
+            kind("12345678901234567.89", None),
+            Some(exact("1234567890123456789", 2))
+        );
+        assert_eq!(kind("1234000000", None), Some(exact("1234000000", 0)));
+        assert_eq!(kind("+007.50", None), Some(exact("750", 2)));
+        assert_eq!(kind(".25", None), Some(exact("25", 2)));
+        assert_eq!(kind("-12.5", None), Some(exact("-125", 1)));
+        // An inline XBRL sign makes the shown magnitude negative.
+        assert_eq!(kind("12.5", Some("-")), Some(exact("-125", 1)));
+        assert_eq!(kind("-0.00", None), Some(exact("0", 2)), "no negative zero");
+        // The xs:double form is a double, which is what it states.
+        assert_eq!(
+            kind("-1.5E3", None),
+            Some(doc::cell_value::Kind::Number(-1500.0))
+        );
+        assert_eq!(
+            kind("1.5E3", Some("-")),
+            Some(doc::cell_value::Kind::Number(-1500.0))
+        );
+    }
+
+    #[test]
+    fn trailer_warnings_reach_the_document_with_a_fleet_code_and_their_count() {
+        let mut fold = DocumentFold::new();
+        let warning = |code: pb::WarningCode, message: &str, count: u64| pb::ParseWarning {
+            code: code as i32,
+            message: message.to_owned(),
+            count,
+        };
+        fold.consume(&pb::ParseXmlResponse {
+            event: Some(pb::parse_xml_response::Event::Status(pb::ParseStatus {
+                warnings: vec![
+                    warning(pb::WarningCode::UnmappedElement, "skipped <widget>", 3),
+                    warning(
+                        pb::WarningCode::LimitReached,
+                        "footnote link past its cap",
+                        1,
+                    ),
+                ],
+                ..pb::ParseStatus::default()
+            })),
+        });
+        let document = fold.take();
+        let found: Vec<(i32, &str, Option<u64>)> = document
+            .warnings
+            .iter()
+            .map(|w| (w.code, w.message.as_str(), w.count))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    doc::WarningCode::SourcePartIgnored as i32,
+                    "skipped <widget>",
+                    Some(3)
+                ),
+                (
+                    doc::WarningCode::SourceContentTruncated as i32,
+                    "footnote link past its cap",
+                    None
+                ),
+            ],
+            "a consumer of the Document alone sees what the trailer saw"
+        );
+        for warning in &document.warnings {
+            assert_eq!(
+                warning.source.as_ref().map(|s| s.collector.as_str()),
+                Some(crate::COLLECTOR)
+            );
+        }
+    }
+
+    #[test]
+    fn every_wire_warning_code_has_a_fleet_code() {
+        for code in 1..=10 {
+            let wire = pb::WarningCode::try_from(code).expect("a declared wire code");
+            assert_ne!(
+                fleet_warning_code(wire),
+                doc::WarningCode::Unspecified,
+                "{wire:?} maps to a fleet code"
+            );
+        }
+        assert!(
+            pb::WarningCode::try_from(11).is_err(),
+            "a new wire code needs a fleet mapping here"
+        );
     }
 
     #[test]
