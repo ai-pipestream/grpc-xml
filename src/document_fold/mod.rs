@@ -422,8 +422,9 @@ impl DocumentFold {
     /// it, and into `extra` only when it has none.
     ///
     /// `extra` is documented as being for source metadata that is genuinely
-    /// open vocabulary, so it holds what this schema has no field for
-    /// (`publisher`, `description`) and nothing that does. A first
+    /// open vocabulary, so it holds only what this schema has no field for
+    /// and nothing that does: a publisher, a description and a date written
+    /// as prose each have a slot. A first
     /// declaration wins for the single-valued slots: a catalogue record
     /// states a title once, and a second `dmdSec` restating it is the same
     /// title, not a correction.
@@ -447,6 +448,25 @@ impl DocumentFold {
             "language" => {
                 if self.source_meta.language.is_none() {
                     self.source_meta.language = Some(value);
+                }
+            }
+            "publisher" => {
+                if self.source_meta.publisher.is_none() {
+                    self.source_meta.publisher = Some(value);
+                }
+            }
+            "description" => {
+                if self.source_meta.description.is_none() {
+                    self.source_meta.description = Some(value);
+                }
+            }
+            // A calendar date arrives as a `MetaDate`; one that reaches here
+            // is prose ("circa 1876"). It is still the work's date, so it is
+            // `created_raw` with no instant read into it, as a date that does
+            // not parse is everywhere else.
+            "date" => {
+                if self.source_meta.created_raw.is_none() {
+                    self.source_meta.created_raw = Some(value);
                 }
             }
             other => {
@@ -2299,6 +2319,29 @@ mod tests {
             Some(MIMETYPE)
         );
         assert_eq!(integrity_errors(&document), Vec::<String>::new());
+    }
+
+    /// A catalogue date written as prose ("circa 1876") is still the date
+    /// the record states for the work: it is the raw twin of `created`, with
+    /// no instant read into it, not an entry in the open `extra` map.
+    #[test]
+    fn a_prose_catalogue_date_is_the_raw_creation_date() {
+        let mut fold = DocumentFold::new();
+        fold.consume(&pb::ParseXmlResponse {
+            event: Some(pb::parse_xml_response::Event::MetaItem(pb::MetaItem {
+                path: "/dmdSec/date".to_owned(),
+                value: Some(pb::meta_item::Value::Descriptive(pb::MetaDescriptive {
+                    field: "date".to_owned(),
+                    value: "circa 1876".to_owned(),
+                })),
+                source: None,
+            })),
+        });
+        let document = fold.take();
+        let meta = document.source_meta.as_ref().expect("the catalogue record");
+        assert_eq!(meta.created_raw.as_deref(), Some("circa 1876"));
+        assert_eq!(meta.created, None, "no instant is read into prose");
+        assert_eq!(meta.extra, std::collections::HashMap::new());
     }
 
     fn fact(value: &str, sign: Option<&str>) -> pb::Fact {
