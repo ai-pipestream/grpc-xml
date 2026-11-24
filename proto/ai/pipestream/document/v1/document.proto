@@ -293,6 +293,10 @@ enum WarningCode {
   // A page render handed to the in-process models could not be decoded or
   // was over the size cap; page_no was not read by them.
   WARNING_CODE_PAGE_RENDER_UNREADABLE = 37;
+  // The model call for page_no failed (the endpoint refused it, timed out
+  // or returned an error), so there is no model output for the page at
+  // all. The page has no items from that service.
+  WARNING_CODE_PAGE_MODEL_CALL_FAILED = 38;
 
   // -- Items -----------------------------------------------------------
 
@@ -2457,6 +2461,21 @@ message MediaMeta {
   // Distinct speaker labels, in first-appearance order.
   repeated string speakers = 2;
   optional string codec = 3;
+  // The audio stream's sample rate and channel count, as the container
+  // states them. Unset when the stream was not probed: unknown, not zero.
+  optional uint32 sample_rate_hz = 4;
+  optional uint32 channels = 5;
+  // Whether the container also holds a video stream. Unset when the
+  // container was not probed.
+  optional bool has_video = 6;
+  // The video stream's codec, when has_video is true and the probe names it.
+  optional string video_codec = 7;
+  // The duration the container declares, in the unit of duration_ms.
+  // duration_ms is what was transcribed; a declared duration that is longer
+  // means the transcript stops before the media does.
+  optional double declared_duration_ms = 8;
+  // The number of tokens the transcription model produced for this media.
+  optional uint64 token_count = 9;
 }
 
 // GenerationSource attributes model-generated content to its generation.
