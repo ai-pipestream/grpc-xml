@@ -31,9 +31,10 @@
 //!   coordinates, which among these dialects means the hOCR pages of a
 //!   Google Books export and nothing else. The single-document dialects have
 //!   no pages and no boxes, so their items carry none. Source locators — the
-//!   positional path, the element id, the source's own role vocabulary — go
-//!   in per-item `meta.custom_fields` under `xml.` keys, where they are data
-//!   rather than a fabricated coordinate.
+//!   positional path, the element id, the source's own role vocabulary, the
+//!   ordinal — ride on each item's typed `XmlSource`, beside its collector
+//!   stamp, where they are data rather than a fabricated coordinate. No item
+//!   carries a `custom_fields` bag.
 //!
 //! What is deliberately not mapped: `html_island` events (an XHTML fragment is
 //! the HTML collector's job, and re-parsing it here would produce a worse
@@ -42,10 +43,7 @@
 //! document structure). The count of islands the fold skipped is recorded on
 //! the body's meta so the omission is visible rather than silent.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-
-use prost_types::Value;
-use prost_types::value::Kind;
+use std::collections::{BTreeMap, BTreeSet};
 
 mod integrity;
 
@@ -135,8 +133,6 @@ pub struct DocumentFold {
     /// one and the self ref content under it names as its parent. Empty means
     /// the body is the parent.
     headings: Vec<(u32, String)>,
-    /// `html_island` events seen and not mapped.
-    islands_skipped: u64,
     /// Every source identifier this fold has given an item a home for, in
     /// first-writer-wins order. It becomes `Document.anchors`, and it is what
     /// turns a cross-reference into a resolved `FineRef`.
@@ -163,6 +159,9 @@ pub struct DocumentFold {
 struct PendingTable {
     /// The wire identifier rows and the end event carry.
     reference: String,
+    /// The table element's id attribute, which becomes an anchor once the
+    /// table has its arena position.
+    element_id: Option<String>,
     /// Everything about the item except its position in the arena, which is
     /// only known when it is appended at `table_end`.
     item: doc::TableItem,
@@ -208,7 +207,6 @@ impl DocumentFold {
             table: None,
             facts_table: None,
             headings: Vec::new(),
-            islands_skipped: 0,
             anchors: BTreeMap::new(),
             source_meta: doc::DocumentMeta::default(),
             summary: Vec::new(),
@@ -260,18 +258,8 @@ impl DocumentFold {
         if let Some(pending) = self.table.take() {
             self.append_table(pending);
         }
-        if self.islands_skipped > 0 {
-            let count = self.islands_skipped;
-            if let Some(body) = self.document.body.as_mut() {
-                body.meta
-                    .get_or_insert_default()
-                    .custom_fields
-                    .insert("xml.html_islands".to_owned(), number(count));
-            }
-        }
         self.publish_anchors();
         self.publish_source_meta();
-        self.islands_skipped = 0;
         self.facts_table = None;
         self.headings.clear();
         self.anchors.clear();
@@ -603,11 +591,12 @@ impl DocumentFold {
 
     /// `XmlInfo` names the document and the dialect that mapped it.
     ///
-    /// The dialect and the root element go on the body's meta rather than on
-    /// each item, because they are true of the whole fragment. The merge
+    /// The dialect and the root namespace go on `DocumentMeta.xml`, and the
+    /// root element's path on the body's `XmlSource`, rather than on each
+    /// item, because they are true of the whole fragment. The merge
     /// downstream is first-writer-wins for root meta: if another collector's
-    /// fragment already wrote `xml.dialect`, ours is dropped, which is
-    /// harmless because every item still carries the dialect in its
+    /// fragment already wrote its own, ours is dropped, which is harmless
+    /// because every item still carries the dialect in its
     /// `CollectorSource.model`.
     fn on_info(&mut self, info: &pb::XmlInfo) {
         let dialect = pb::XmlDialect::try_from(info.dialect).unwrap_or_default();
@@ -660,18 +649,21 @@ impl DocumentFold {
             self.source_meta.schema_location = Some(location.value.clone());
         }
         self.root_namespace.clone_from(&info.root_namespace);
-        let mut fields = BTreeMap::new();
-        fields.insert("xml.dialect", string(model));
-        if !info.root_namespace.is_empty() {
-            fields.insert("xml.root_namespace", string(&info.root_namespace));
-        }
+        self.source_meta.xml = Some(doc::XmlDocumentMeta {
+            dialect: Some(model.to_owned()),
+            root_namespace: (!info.root_namespace.is_empty()).then(|| info.root_namespace.clone()),
+        });
+        // The body stands for the root element, so its locator names it.
         if !info.root_local_name.is_empty() {
-            fields.insert("xml.root_local_name", string(&info.root_local_name));
-        }
-        if let Some(body) = self.document.body.as_mut() {
-            let meta = body.meta.get_or_insert_default();
-            for (key, value) in fields {
-                meta.custom_fields.insert(key.to_owned(), value);
+            let collector = self.source_of(None);
+            if let Some(body) = self.document.body.as_mut() {
+                body.source = vec![
+                    collector,
+                    xml_source(doc::XmlSource {
+                        path: format!("/{}", info.root_local_name),
+                        ..doc::XmlSource::default()
+                    }),
+                ];
             }
         }
     }
@@ -741,9 +733,8 @@ impl DocumentFold {
             self.current_parent()
         };
         let self_ref = format!("#/texts/{}", self.document.texts.len());
-        let fields = text_fields(item);
         let (element_name, namespace) = identity_of(item, &self.root_namespace);
-        let source = self.source_of(item.source.as_ref());
+        let source = self.sources_of(item);
         let variant = if label == pb::XmlItemLabel::Code {
             // TRAP, and the reason this branch exists: CodeItem does not wrap
             // a TextItemBase. Its base fields are inlined so that its single
@@ -755,15 +746,11 @@ impl DocumentFold {
                 self_ref: self_ref.clone(),
                 parent: Some(reference(&parent)),
                 content_layer: layer as i32,
-                meta: Some(doc::FloatingMeta {
-                    custom_fields: fields,
-                    ..doc::FloatingMeta::default()
-                }),
                 label: doc::DocItemLabel::Code as i32,
                 prov: provenance(item),
                 orig: item.text.clone(),
                 text: item.text.clone(),
-                source: vec![source],
+                source,
                 source_element_name: element_name,
                 source_namespace: namespace,
                 ..doc::CodeItem::default()
@@ -773,10 +760,6 @@ impl DocumentFold {
                 self_ref: self_ref.clone(),
                 parent: Some(reference(&parent)),
                 content_layer: layer as i32,
-                meta: Some(doc::BaseMeta {
-                    custom_fields: fields,
-                    ..doc::BaseMeta::default()
-                }),
                 label: doc_label(label) as i32,
                 // Provenance only where the source has coordinates. The
                 // single-document dialects have no pages and no boxes, and
@@ -784,7 +767,7 @@ impl DocumentFold {
                 prov: provenance(item),
                 orig: item.text.clone(),
                 text: item.text.clone(),
-                source: vec![source],
+                source,
                 spans: inline_spans(&item.spans),
                 source_element_name: element_name,
                 source_namespace: namespace,
@@ -938,29 +921,25 @@ impl DocumentFold {
     /// list items or cells is the HTML collector's answer, and the
     /// attachment is how a coordinator asks for it.
     fn on_html_island(&mut self, island: &pb::HtmlIsland) {
-        self.islands_skipped += 1;
         self.end_list_run();
         let parent = self.current_parent();
         let self_ref = format!("#/groups/{}", self.document.groups.len());
-        let mut fields = HashMap::new();
-        fields.insert("xml.html_island".to_owned(), flag(true));
-        if !island.path.is_empty() {
-            fields.insert("xml.path".to_owned(), string(&island.path));
-        }
-        if !island.namespace.is_empty() {
-            fields.insert("xml.namespace".to_owned(), string(&island.namespace));
-        }
-        if let Some(id) = island.element_id.as_ref().filter(|id| !id.is_empty()) {
-            fields.insert("xml.element_id".to_owned(), string(id));
-        }
+        let source = vec![
+            self.source_of(island.source.as_ref()),
+            xml_source(doc::XmlSource {
+                path: island.path.clone(),
+                role: HTML_ISLAND_KIND.to_owned(),
+                element_id: island.element_id.clone().filter(|id| !id.is_empty()),
+                ..doc::XmlSource::default()
+            }),
+        ];
         self.document.groups.push(doc::GroupItem {
             self_ref: self_ref.clone(),
             parent: Some(reference(&parent)),
             content_layer: doc::ContentLayer::Body as i32,
-            meta: Some(doc::BaseMeta {
-                custom_fields: fields,
-                ..doc::BaseMeta::default()
-            }),
+            // The island's namespace is stated once, on the text item that
+            // roots it, in the slot every other item states its own in.
+            source,
             name: Some(HTML_ISLAND_KIND.to_owned()),
             // No group label fits: an island is not a list, a chapter or a
             // form area, and claiming one would say what it is not.
@@ -991,25 +970,24 @@ impl DocumentFold {
     /// of a fragment that renders nothing.
     fn push_island_source(&mut self, group_ref: &str, island: &pb::HtmlIsland) {
         let self_ref = format!("#/texts/{}", self.document.texts.len());
-        let mut fields = HashMap::new();
-        fields.insert("xml.html_island".to_owned(), flag(true));
-        if !island.path.is_empty() {
-            fields.insert("xml.path".to_owned(), string(&island.path));
-        }
+        let source = vec![
+            self.source_of(island.source.as_ref()),
+            xml_source(doc::XmlSource {
+                path: island.path.clone(),
+                role: HTML_ISLAND_KIND.to_owned(),
+                ..doc::XmlSource::default()
+            }),
+        ];
         self.document.texts.push(doc::BaseTextItem {
             item: Some(doc::base_text_item::Item::Text(doc::TextItem {
                 base: Some(doc::TextItemBase {
                     self_ref: self_ref.clone(),
                     parent: Some(reference(group_ref)),
                     content_layer: doc::ContentLayer::Body as i32,
-                    meta: Some(doc::BaseMeta {
-                        custom_fields: fields,
-                        ..doc::BaseMeta::default()
-                    }),
                     label: doc::DocItemLabel::Text as i32,
                     orig: island.text.clone(),
                     text: island.text.clone(),
-                    source: vec![self.source_of(island.source.as_ref())],
+                    source,
                     // The fragment as the source wrote it. `text` above is a
                     // projection of exactly this, which is the pairing the
                     // schema documents for the field.
@@ -1030,42 +1008,40 @@ impl DocumentFold {
 
     /// Append one picture as a placeholder `PictureItem`.
     ///
-    /// `image` is left unset: an XML picture is a filename or an
-    /// `xlink:href`, never pixels, and this collector fetches nothing. A
-    /// picture whose reference is all we have is still a picture, and the
-    /// arena is where a downstream stage that can resolve it will look.
+    /// `image` holds the reference and nothing else: an XML picture is a
+    /// filename or an `xlink:href`, never pixels, and this collector fetches
+    /// nothing. A picture whose reference is all we have is still a picture,
+    /// and `ImageRef.uri` is where a downstream stage that can resolve it
+    /// will look.
     ///
     /// `captions` stays empty. The text a PICTURE event carries is not prose:
     /// every dialect lifts it from an attribute (the JATS `xlink:href`, the
     /// USPTO drawing `file`, the `DocLang` `uri`), so it is a locator and it
-    /// goes where the other locators go. A figure's real caption reaches the
+    /// goes in the image's `uri`. A figure's real caption reaches the
     /// fold as its own CAPTION event and folds as its own item.
     fn push_picture(&mut self, item: &pb::TextItem) {
         self.end_list_run();
         let parent = self.current_parent();
         let self_ref = format!("#/pictures/{}", self.document.pictures.len());
-        let source = self.source_of(item.source.as_ref());
-        let mut fields = text_fields(item);
+        let source = self.sources_of(item);
         let (element_name, namespace) = identity_of(item, &self.root_namespace);
-        if !item.text.is_empty() {
-            fields.insert("xml.href".to_owned(), string(&item.text));
-        }
         self.document.pictures.push(doc::PictureItem {
             self_ref: self_ref.clone(),
             parent: Some(reference(&parent)),
             content_layer: doc::ContentLayer::Body as i32,
-            // The locators the item would have carried as a text item, carried
-            // here instead: the path, the source's own role vocabulary, the
-            // element id, and the reference the parser lifted from the markup.
-            meta: Some(doc::PictureMeta {
-                custom_fields: fields,
-                ..doc::PictureMeta::default()
-            }),
             label: doc::DocItemLabel::Picture as i32,
-            // No image: no bytes, no uri, no size. An ImageRef here would
-            // claim a payload this collector does not have.
-            image: None,
-            source: vec![source],
+            // The reference the parser lifted from the markup is the image's
+            // uri, verbatim: no bytes, no size, no dpi, because the XML
+            // names a file and carries no pixels. A picture that names
+            // nothing has no image reference at all.
+            image: (!item.text.is_empty()).then(|| doc::ImageRef {
+                mimetype: image_mimetype(&item.text).to_owned(),
+                uri: item.text.clone(),
+                ..doc::ImageRef::default()
+            }),
+            // The path, the dialect's role and the element id ride on the
+            // item's XML locator, beside the collector stamp.
+            source,
             // Mirrored the same way CodeItem's are: PictureItem inlines its
             // base fields too, so the identity is stated on the item.
             source_element_name: element_name,
@@ -1086,13 +1062,7 @@ impl DocumentFold {
         if let Some(previous) = self.table.take() {
             self.append_table(previous);
         }
-        let mut fields = HashMap::new();
-        if !start.path.is_empty() {
-            fields.insert("xml.path".to_owned(), string(&start.path));
-        }
-        if let Some(id) = start.element_id.as_ref().filter(|id| !id.is_empty()) {
-            fields.insert("xml.element_id".to_owned(), string(id));
-        }
+        let element_id = start.element_id.clone().filter(|id| !id.is_empty());
         let mut captions = Vec::new();
         if let Some(caption) = start.caption.as_ref().filter(|c| !c.is_empty()) {
             // The caption is an item in its own right — the Document plane
@@ -1109,22 +1079,26 @@ impl DocumentFold {
             });
             captions.push(reference(&caption_ref));
         }
-        let source = self.source_of(start.source.as_ref());
+        let mut source = vec![self.source_of(start.source.as_ref())];
+        if !start.path.is_empty() || element_id.is_some() {
+            source.push(xml_source(doc::XmlSource {
+                path: start.path.clone(),
+                element_id: element_id.clone(),
+                ..doc::XmlSource::default()
+            }));
+        }
         // The parent is the ladder as it stood when the table opened, not as
         // it stands when the last row lands.
         let parent = self.current_parent();
         self.table = Some(PendingTable {
             reference: start.table_ref.clone(),
+            element_id,
             item: doc::TableItem {
                 parent: Some(reference(&parent)),
                 content_layer: doc::ContentLayer::Body as i32,
-                meta: Some(doc::FloatingMeta {
-                    custom_fields: fields,
-                    ..doc::FloatingMeta::default()
-                }),
                 label: doc::DocItemLabel::Table as i32,
                 captions,
-                source: vec![source],
+                source,
                 ..doc::TableItem::default()
             },
             grid: Vec::new(),
@@ -1225,14 +1199,7 @@ impl DocumentFold {
             ..doc::TableData::default()
         });
         let self_ref = item.self_ref.clone();
-        let element_id = item
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.custom_fields.get("xml.element_id"))
-            .and_then(|value| match value.kind.as_ref() {
-                Some(Kind::StringValue(id)) => Some(id.clone()),
-                _ => None,
-            });
+        let element_id = pending.element_id;
         let parent = item
             .parent
             .as_ref()
@@ -1407,8 +1374,6 @@ impl DocumentFold {
         let index = self.document.tables.len();
         let self_ref = format!("#/tables/{index}");
         let parent = self.current_parent();
-        let mut fields = HashMap::new();
-        fields.insert("xml.table".to_owned(), string("facts"));
         let header = doc::TableRow {
             cells: FACT_COLUMNS
                 .iter()
@@ -1420,12 +1385,11 @@ impl DocumentFold {
             self_ref: self_ref.clone(),
             parent: Some(reference(&parent)),
             content_layer: doc::ContentLayer::Body as i32,
-            meta: Some(doc::FloatingMeta {
-                custom_fields: fields,
-                ..doc::FloatingMeta::default()
-            }),
             label: doc::DocItemLabel::Table as i32,
             data: Some(doc::TableData {
+                // The facts of an instance, one row each, not a table the
+                // filer drew.
+                kind: doc::TableKind::XbrlFacts as i32,
                 table_cells: header.cells.clone(),
                 num_rows: 1,
                 num_cols: int_from_usize(FACT_COLUMNS.len()),
@@ -1529,6 +1493,14 @@ impl DocumentFold {
         doc::SourceType {
             source: Some(doc::source_type::Source::Collector(collector)),
         }
+    }
+
+    /// The collector stamp for a wire item, followed by its XML locator
+    /// when the wire states one.
+    fn sources_of(&self, item: &pb::TextItem) -> Vec<doc::SourceType> {
+        std::iter::once(self.source_of(item.source.as_ref()))
+            .chain(xml_locator(item))
+            .collect()
     }
 }
 
@@ -1863,42 +1835,56 @@ fn doc_reference_kind(kind: i32) -> Option<i32> {
     Some(mapped as i32)
 }
 
-/// Per-item `meta.custom_fields`: everything the wire item says that the
-/// Document plane has no typed slot for.
+/// The item's XML locator: where it sits in the source and what the
+/// dialect read it as, as a typed `XmlSource` beside the collector stamp.
 ///
-/// The `xml.` keys are this collector's own namespace for source locators,
-/// which is where the path, the role and the element id go. A positional
-/// path, a dialect's own role vocabulary and an ordinal are genuinely this
-/// collector's terms; the schema has no slot for any of them and inventing
-/// one would be claiming the fleet knows their shape.
-///
-/// The element's name and namespace are no longer among them: the schema
-/// grew `source_element_name` and `source_namespace` for exactly this, and
-/// mirrors them onto `CodeItem` and `PictureItem`, the two kinds that
-/// inline their base fields, so every item states its element in one typed
-/// place. They are set by [`identity_of`]. `from_cdata` stays,
-/// being a fact about how the parser read the text rather than about the
-/// document, and only when true: the absence of the key means ordinary
-/// character data, and a false entry on every other item would say the same
-/// thing at the cost of a field per item.
-fn text_fields(item: &pb::TextItem) -> HashMap<String, Value> {
-    let mut fields = HashMap::new();
-    if !item.path.is_empty() {
-        fields.insert("xml.path".to_owned(), string(&item.path));
+/// `None` when the wire states none of it (an item an archive driver
+/// synthesized rather than read from one element). `from_cdata` is a fact
+/// about how the parser read the text, and the language is the `xml:lang`
+/// the element itself declares.
+fn xml_locator(item: &pb::TextItem) -> Option<doc::SourceType> {
+    let locator = doc::XmlSource {
+        path: item.path.clone(),
+        role: item.role.clone(),
+        element_id: item.element_id.clone().filter(|id| !id.is_empty()),
+        ordinal: item.ordinal,
+        from_cdata: item.from_cdata,
+        language: item
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == "xml:lang" && !attribute.value.is_empty())
+            .map(|attribute| attribute.value.clone()),
+        ..doc::XmlSource::default()
+    };
+    (locator != doc::XmlSource::default()).then(|| xml_source(locator))
+}
+
+/// An `XmlSource` as one entry of an item's `source` list.
+const fn xml_source(locator: doc::XmlSource) -> doc::SourceType {
+    doc::SourceType {
+        source: Some(doc::source_type::Source::Xml(locator)),
     }
-    if !item.role.is_empty() {
-        fields.insert("xml.role".to_owned(), string(&item.role));
+}
+
+/// The media type a picture reference's extension names, or the generic
+/// binary type when it names none this collector knows. Never empty.
+fn image_mimetype(reference: &str) -> &'static str {
+    let path = reference.split(['?', '#']).next().unwrap_or(reference);
+    let extension = path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "tif" | "tiff" => "image/tiff",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "webp" => "image/webp",
+        "jp2" => "image/jp2",
+        _ => "application/octet-stream",
     }
-    if let Some(id) = item.element_id.as_ref().filter(|id| !id.is_empty()) {
-        fields.insert("xml.element_id".to_owned(), string(id));
-    }
-    if let Some(ordinal) = item.ordinal {
-        fields.insert("xml.ordinal".to_owned(), number(ordinal));
-    }
-    if item.from_cdata {
-        fields.insert("xml.from_cdata".to_owned(), flag(true));
-    }
-    fields
 }
 
 /// The last step of a positional path, without its index predicate.
@@ -1924,13 +1910,6 @@ fn identity_of(item: &pb::TextItem, root_namespace: &str) -> (Option<String>, Op
     let namespace = (!item.namespace.is_empty() && item.namespace != root_namespace)
         .then(|| item.namespace.clone());
     (name, namespace)
-}
-
-/// A `google.protobuf.Value` holding a boolean.
-fn flag(value: bool) -> Value {
-    Value {
-        kind: Some(Kind::BoolValue(value)),
-    }
 }
 
 /// The Document label for a wire label.
@@ -2180,26 +2159,6 @@ fn fine(target: &str) -> doc::FineRef {
 fn reference(target: &str) -> doc::RefItem {
     doc::RefItem {
         r#ref: target.to_owned(),
-    }
-}
-
-/// A `google.protobuf.Value` holding a string.
-fn string(text: &str) -> Value {
-    Value {
-        kind: Some(Kind::StringValue(text.to_owned())),
-    }
-}
-
-/// A `google.protobuf.Value` holding a number.
-fn number(value: u64) -> Value {
-    // JSON numbers are doubles, so this is the schema's own precision limit,
-    // not one this fold introduces. The counts and ordinals that reach here
-    // (claim numbers, list positions, island counts) are many orders of
-    // magnitude below 2^53.
-    #[allow(clippy::cast_precision_loss)]
-    let number = value as f64;
-    Value {
-        kind: Some(Kind::NumberValue(number)),
     }
 }
 

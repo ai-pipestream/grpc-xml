@@ -16,8 +16,6 @@
 
 mod common;
 
-use std::collections::HashMap;
-
 use common::{
     DOCLANG, DOCLANG_NESTED_LISTS, JATS, JATS_CALS_TABLE, JATS_WITH_ISLAND, USPTO, XBRL, client,
     options, parse_ok,
@@ -26,8 +24,6 @@ use grpc_xml::document::v1 as doc;
 use grpc_xml::document_fold::{DocumentFold, MIMETYPE, SCHEMA_NAME, integrity_errors};
 use grpc_xml::parse::{InputStats, ParseConfig};
 use grpc_xml::proto::v1 as pb;
-use prost_types::Value;
-use prost_types::value::Kind;
 
 // ------------------------------------------------------------------ harness
 
@@ -106,25 +102,104 @@ fn texts_labelled(document: &doc::Document, label: doc::DocItemLabel) -> Vec<Str
         .collect()
 }
 
-/// A string custom field, or `None` when it was not set.
-fn field<'a>(fields: &'a HashMap<String, prost_types::Value>, key: &str) -> Option<&'a str> {
-    match fields.get(key)?.kind.as_ref()? {
-        Kind::StringValue(text) => Some(text.as_str()),
-        _ => None,
-    }
+/// The item's XML locator, the typed source beside the collector stamp.
+fn xml(source: &[doc::SourceType]) -> &doc::XmlSource {
+    source
+        .iter()
+        .find_map(|source| match source.source.as_ref() {
+            Some(doc::source_type::Source::Xml(xml)) => Some(xml),
+            _ => None,
+        })
+        .expect("the item states where it sits in the source")
 }
 
-/// A numeric custom field, or `None` when it was not set.
-fn number(fields: &HashMap<String, prost_types::Value>, key: &str) -> Option<f64> {
-    match fields.get(key)?.kind.as_ref()? {
-        Kind::NumberValue(value) => Some(*value),
-        _ => None,
+/// Every `custom_fields` bag in the fragment that is not empty, by self ref.
+fn custom_field_bags(document: &doc::Document) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut check = |self_ref: &str, empty: bool| {
+        if !empty {
+            found.push(self_ref.to_owned());
+        }
+    };
+    for group in document.body.iter().chain(&document.groups) {
+        check(
+            &group.self_ref,
+            group
+                .meta
+                .as_ref()
+                .is_none_or(|m| m.custom_fields.is_empty()),
+        );
+    }
+    for item in &document.texts {
+        if let Some(doc::base_text_item::Item::Code(code)) = item.item.as_ref() {
+            check(
+                &code.self_ref,
+                code.meta
+                    .as_ref()
+                    .is_none_or(|m| m.custom_fields.is_empty()),
+            );
+        } else {
+            let base = base(item);
+            check(
+                &base.self_ref,
+                base.meta
+                    .as_ref()
+                    .is_none_or(|m| m.custom_fields.is_empty()),
+            );
+        }
+    }
+    for picture in &document.pictures {
+        check(
+            &picture.self_ref,
+            picture
+                .meta
+                .as_ref()
+                .is_none_or(|m| m.custom_fields.is_empty()),
+        );
+    }
+    for table in &document.tables {
+        check(
+            &table.self_ref,
+            table
+                .meta
+                .as_ref()
+                .is_none_or(|m| m.custom_fields.is_empty()),
+        );
+    }
+    found
+}
+
+#[test]
+fn no_fixture_folds_into_a_custom_field_bag() {
+    let islands = ParseConfig {
+        emit_html_islands: true,
+        ..ParseConfig::default()
+    };
+    for (name, fixture, config) in [
+        ("jats", JATS, ParseConfig::default()),
+        ("jats cals", JATS_CALS_TABLE, ParseConfig::default()),
+        ("jats island", JATS_WITH_ISLAND, islands),
+        ("uspto", USPTO, ParseConfig::default()),
+        ("xbrl", XBRL, ParseConfig::default()),
+        ("doclang", DOCLANG, ParseConfig::default()),
+    ] {
+        let (_, document) = fold(fixture, &config);
+        assert_eq!(custom_field_bags(&document), Vec::<String>::new(), "{name}");
     }
 }
 
 /// The collector attribution of a source list, which must be exactly one.
 fn collector(source: &[doc::SourceType]) -> &doc::CollectorSource {
-    assert_eq!(source.len(), 1, "one collector stamps each item once");
+    assert!(
+        matches!(source.len(), 1 | 2),
+        "one collector stamps each item once, beside at most its XML locator"
+    );
+    if let Some(second) = source.get(1) {
+        assert!(
+            matches!(second.source, Some(doc::source_type::Source::Xml(_))),
+            "the only other source is the item's XML locator"
+        );
+    }
     match source[0].source.as_ref().expect("a source is set") {
         doc::source_type::Source::Collector(collector) => collector,
         doc::source_type::Source::Track(_) => panic!("this collector emits no track sources"),
@@ -257,15 +332,20 @@ fn a_jats_article_folds_into_a_named_document_with_its_own_root_meta() {
     // parser reaches one — so the document is named after its TITLE item.
     assert_eq!(document.name, "Streaming XML Without a DOM");
 
-    let meta = body(&document).meta.as_ref().expect("body meta");
-    assert_eq!(field(&meta.custom_fields, "xml.dialect"), Some("jats"));
+    let xml_meta = document
+        .source_meta
+        .as_ref()
+        .and_then(|meta| meta.xml.as_ref())
+        .expect("the document says what XML it is");
+    assert_eq!(xml_meta.dialect.as_deref(), Some("jats"));
     assert_eq!(
-        field(&meta.custom_fields, "xml.root_namespace"),
+        xml_meta.root_namespace.as_deref(),
         Some("http://jats.nlm.nih.gov/ns/archiving/1.3/")
     );
     assert_eq!(
-        field(&meta.custom_fields, "xml.root_local_name"),
-        Some("article")
+        xml(&body(&document).source).path,
+        "/article",
+        "the body is the root element, and its locator names it"
     );
     assert_attribution(&document, "jats");
 }
@@ -329,18 +409,13 @@ fn a_jats_item_carries_its_locators_in_meta_and_the_bytes_it_came_from() {
         .map(base)
         .find(|base| base.text == "A pull parser yields events in document order.")
         .expect("the first body paragraph is folded");
-    let fields = &item.meta.as_ref().expect("item meta").custom_fields;
+    let locator = xml(&item.source);
     assert_eq!(
-        field(fields, "xml.path"),
-        Some("/article/body/sec/p"),
+        locator.path, "/article/body/sec/p",
         "the positional path is the locator, in place of a page"
     );
-    assert_eq!(field(fields, "xml.role"), None, "a body paragraph has none");
-    assert_eq!(
-        field(fields, "xml.element_name"),
-        None,
-        "the element identity has a typed home now, and is not written twice"
-    );
+    assert_eq!(locator.role, "", "a body paragraph has none");
+    assert!(item.meta.is_none(), "and no custom field bag holds it");
 
     // The source's own name for the element, in the slot the schema grew
     // for it rather than beside the positional path in a custom field.
@@ -506,11 +581,11 @@ fn a_jats_table_folds_into_a_grid_with_its_caption_referenced() {
     let table = &document.tables[0];
     assert_eq!(table.self_ref, "#/tables/0");
     assert_eq!(table.label, doc::DocItemLabel::Table as i32);
-    let fields = &table.meta.as_ref().expect("table meta").custom_fields;
     assert_eq!(
-        field(fields, "xml.path"),
-        Some("/article/body/sec[2]/table-wrap/table")
+        xml(&table.source).path,
+        "/article/body/sec[2]/table-wrap/table"
     );
+    assert!(table.meta.is_none(), "no custom field bag");
 
     let data = table.data.as_ref().expect("table data");
     assert_eq!(data.num_rows, 3);
@@ -558,25 +633,19 @@ fn uspto_claims_fold_as_numbered_text_items_keeping_their_role() {
         .texts
         .iter()
         .map(base)
-        .filter(|base| {
-            base.meta
-                .as_ref()
-                .is_some_and(|m| field(&m.custom_fields, "xml.role") == Some("claim"))
-        })
+        .filter(|base| xml(&base.source).role == "claim")
         .collect();
     assert_eq!(claims.len(), 3);
     assert_eq!(claims[0].label, doc::DocItemLabel::Text as i32);
     assert_eq!(claims[0].text, "1. A method comprising streaming items.");
-    let fields = &claims[0].meta.as_ref().expect("meta").custom_fields;
-    assert_eq!(number(fields, "xml.ordinal"), Some(1.0));
-    assert_eq!(field(fields, "xml.element_id"), Some("CLM-00001"));
+    let first = xml(&claims[0].source);
     assert_eq!(
-        number(
-            &claims[2].meta.as_ref().expect("meta").custom_fields,
-            "xml.ordinal"
-        ),
-        Some(3.0)
+        first.ordinal,
+        Some(1),
+        "an ordinal is a count, not a double"
     );
+    assert_eq!(first.element_id.as_deref(), Some("CLM-00001"));
+    assert_eq!(xml(&claims[2].source).ordinal, Some(3));
 
     // Claims arrive after the last heading, so that is what parents them.
     assert_parented(
@@ -600,27 +669,31 @@ fn a_drawing_folds_into_a_placeholder_picture_carrying_the_reference_it_named() 
     assert_eq!(picture.self_ref, "#/pictures/0");
     assert_eq!(picture.label, doc::DocItemLabel::Picture as i32);
     assert_eq!(picture.content_layer, doc::ContentLayer::Body as i32);
+    let image = picture
+        .image
+        .as_ref()
+        .expect("the file the drawing names is the image reference");
     assert_eq!(
-        picture.image, None,
-        "no bytes, no uri, no size: the XML names a file, it does not carry pixels"
+        image.uri, "US11999999-20260210-D00001.TIF",
+        "an attribute value is a locator, not a caption"
     );
+    assert_eq!(image.mimetype, "image/tiff");
+    assert_eq!(
+        image.data, None,
+        "the XML names a file, it does not carry pixels"
+    );
+    assert_eq!(image.size, None);
+    assert_eq!(image.dpi, 0);
     assert!(picture.prov.is_empty(), "no pages and no boxes here either");
     assert_eq!(collector(&picture.source).model.as_deref(), Some("uspto"));
 
     // The locators the item would have carried as a text item are carried
     // here instead, the reference the parser lifted from `file` among them.
-    let fields = &picture.meta.as_ref().expect("picture meta").custom_fields;
-    assert_eq!(
-        field(fields, "xml.path"),
-        Some("/us-patent-grant/description/img")
-    );
-    assert_eq!(field(fields, "xml.role"), Some("drawing"));
-    assert_eq!(field(fields, "xml.element_id"), Some("img-0001"));
-    assert_eq!(
-        field(fields, "xml.href"),
-        Some("US11999999-20260210-D00001.TIF"),
-        "an attribute value is a locator, not a caption"
-    );
+    let locator = xml(&picture.source);
+    assert_eq!(locator.path, "/us-patent-grant/description/img");
+    assert_eq!(locator.role, "drawing");
+    assert_eq!(locator.element_id.as_deref(), Some("img-0001"));
+    assert!(picture.meta.is_none(), "no custom field bag");
 
     // Nothing is captioned with that filename, here or in the text arena.
     assert!(
@@ -661,16 +734,10 @@ fn a_picture_with_no_reference_carries_no_href() {
         "{:?}",
         document.pictures[0].captions
     );
-    let fields = &document.pictures[0]
-        .meta
-        .as_ref()
-        .expect("picture meta")
-        .custom_fields;
-    assert_eq!(field(fields, "xml.path"), Some("/doc/figure"));
+    assert_eq!(xml(&document.pictures[0].source).path, "/doc/figure");
     assert_eq!(
-        field(fields, "xml.href"),
-        None,
-        "no key is invented for a picture that names nothing"
+        document.pictures[0].image, None,
+        "no reference is invented for a picture that names nothing"
     );
     assert!(
         document.texts.is_empty(),
@@ -713,8 +780,12 @@ fn xbrl_facts_fold_into_one_table_with_a_deterministic_row_per_fact() {
     assert_eq!(document.tables.len(), 1, "one fact table, created lazily");
 
     let table = &document.tables[0];
-    let fields = &table.meta.as_ref().expect("table meta").custom_fields;
-    assert_eq!(field(fields, "xml.table"), Some("facts"));
+    assert!(table.meta.is_none(), "no custom field bag");
+    assert_eq!(
+        table.data.as_ref().map(|data| data.kind),
+        Some(doc::TableKind::XbrlFacts as i32),
+        "the fact table says what it is in its typed kind"
+    );
     let data = table.data.as_ref().expect("table data");
     assert_eq!(data.num_cols, 11);
     assert_eq!(
@@ -926,9 +997,10 @@ fn a_code_block_folds_into_a_code_item_that_inlines_its_base_fields() {
         "<code id=\"snippet-1\">cargo test --offline</code>"
     );
     assert_eq!(collector(&code.source).model.as_deref(), Some("doclang"));
-    let fields = &code.meta.as_ref().expect("code meta").custom_fields;
-    assert_eq!(field(fields, "xml.element_id"), Some("snippet-1"));
-    assert_eq!(field(fields, "xml.path"), Some("/doclang/code"));
+    let locator = xml(&code.source);
+    assert_eq!(locator.element_id.as_deref(), Some("snippet-1"));
+    assert_eq!(locator.path, "/doclang/code");
+    assert!(code.meta.is_none(), "no custom field bag");
     assert!(
         body(&document)
             .children
@@ -941,11 +1013,6 @@ fn a_code_block_folds_into_a_code_item_that_inlines_its_base_fields() {
         Some("code"),
         "CodeItem inlines its own base fields, so the schema mirrors the \
          identity slots onto it and the fold states them there"
-    );
-    assert_eq!(
-        field(fields, "xml.element_name"),
-        None,
-        "and the custom-field copy is gone"
     );
 }
 
@@ -962,45 +1029,18 @@ fn every_item_states_its_element_in_the_typed_slot_and_nowhere_else() {
         Some("img"),
         "a picture states the element that named it, in the mirrored slot"
     );
-    assert_eq!(
-        field(
-            &picture.meta.as_ref().expect("picture meta").custom_fields,
-            "xml.element_name",
-        ),
-        None,
-        "and not beside its other locators any more"
-    );
 
     // No item of any kind says it twice, and the ones read from an element
     // do say it once. An item an archive driver synthesized rather than read
     // from one element states it in neither place, which is what an empty
     // element name on the wire means.
     let mut typed = usize::from(picture.source_element_name.is_some());
-    let in_meta = |name: &str, meta: Option<&HashMap<String, Value>>| {
-        assert!(
-            !meta.is_some_and(|fields| fields.contains_key("xml.element_name")
-                || fields.contains_key("xml.namespace")),
-            "{name} states its element in both places"
-        );
-    };
-    in_meta(
-        &picture.self_ref,
-        picture.meta.as_ref().map(|meta| &meta.custom_fields),
-    );
+    assert_eq!(custom_field_bags(&document), Vec::<String>::new());
     for item in &document.texts {
         if let Some(doc::base_text_item::Item::Code(code)) = item.item.as_ref() {
-            in_meta(
-                &code.self_ref,
-                code.meta.as_ref().map(|meta| &meta.custom_fields),
-            );
             typed += usize::from(code.source_element_name.is_some());
         } else {
-            let base = base(item);
-            in_meta(
-                &base.self_ref,
-                base.meta.as_ref().map(|meta| &meta.custom_fields),
-            );
-            typed += usize::from(base.source_element_name.is_some());
+            typed += usize::from(base(item).source_element_name.is_some());
         }
     }
     assert!(typed > 0, "the items read from elements do state one");
@@ -1019,11 +1059,14 @@ fn an_html_island_leaves_a_placeholder_naming_what_was_skipped() {
         vec!["Text before the island.", "Text after the island."],
         "the island contributes no paragraphs: its structure is not stated"
     );
-    let meta = body(&document).meta.as_ref().expect("body meta");
     assert_eq!(
-        number(&meta.custom_fields, "xml.html_islands"),
-        Some(1.0),
-        "what the projection dropped is stated, not hidden"
+        document
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.kind.as_deref() == Some("html-island"))
+            .count(),
+        1,
+        "what the projection dropped is stated, as an attachment to parse"
     );
 
     // The island held a place in the document, and the placeholder holds it
@@ -1037,20 +1080,27 @@ fn an_html_island_leaves_a_placeholder_naming_what_was_skipped() {
         Some("html-island"),
         "no group label fits an island, so it says so in the raw slot"
     );
-    let fields = &placeholder
-        .meta
-        .as_ref()
-        .expect("placeholder meta")
-        .custom_fields;
+    assert!(placeholder.meta.is_none(), "no custom field bag");
+    let locator = xml(&placeholder.source);
+    assert_eq!(locator.path, "/article/body/sec/xhtml:div");
+    assert_eq!(locator.element_id.as_deref(), Some("widget"));
+    assert_eq!(locator.role, "html-island");
     assert_eq!(
-        field(fields, "xml.path"),
-        Some("/article/body/sec/xhtml:div")
+        collector(&placeholder.source).model.as_deref(),
+        Some("jats"),
+        "a group is attributed like any item"
     );
-    assert_eq!(field(fields, "xml.element_id"), Some("widget"));
+    let island_text = placeholder
+        .children
+        .first()
+        .expect("the island's text item");
+    let island_text = base(&document.texts[arena_index(&island_text.r#ref)]);
     assert_eq!(
-        field(fields, "xml.namespace"),
-        Some("http://www.w3.org/1999/xhtml")
+        island_text.source_namespace.as_deref(),
+        Some("http://www.w3.org/1999/xhtml"),
+        "the island's namespace is on the item that roots it"
     );
+    assert_eq!(xml(&island_text.source).role, "html-island");
     // In reading order, between the two paragraphs, under the same heading.
     let heading = ref_of(&document, "Embedded markup");
     let siblings = children_of(&document, &heading);
@@ -1658,9 +1708,17 @@ fn a_document_that_declares_nothing_about_itself_carries_no_metadata() {
     // keywords: a document that says nothing about itself.
     let bare = "<?xml version=\"1.0\"?>\n<article><body><p>Just prose.</p></body></article>\n";
     let (_, document) = fold_default(bare);
-    assert!(
-        document.source_meta.is_none(),
-        "an absent declaration is not an empty one"
+    assert_eq!(
+        document.source_meta,
+        Some(doc::DocumentMeta {
+            xml: Some(doc::XmlDocumentMeta {
+                dialect: Some("jats".to_owned()),
+                root_namespace: None,
+            }),
+            ..doc::DocumentMeta::default()
+        }),
+        "an absent declaration is not an empty one: only what this collector \
+         read it as is stated"
     );
 }
 
@@ -2143,24 +2201,15 @@ fn a_foreign_namespace_reaches_the_typed_slot_and_a_cdata_section_the_meta() {
         .map(base)
         .find(|item| item.label == doc::DocItemLabel::Paragraph as i32)
         .expect("the paragraph");
-    let fields = &paragraph.meta.as_ref().expect("meta").custom_fields;
     assert_eq!(paragraph.source_element_name.as_deref(), Some("paragraph"));
-    assert_eq!(
-        field(fields, "xml.element_name"),
-        None,
-        "the identity is not written twice"
-    );
-    assert_eq!(
-        fields.get("xml.from_cdata").and_then(|v| match v.kind {
-            Some(Kind::BoolValue(flag)) => Some(flag),
-            _ => None,
-        }),
-        Some(true),
-        "how the parser read the text is a parse fact, and stays a custom field"
+    assert!(paragraph.meta.is_none(), "no custom field bag");
+    assert!(
+        xml(&paragraph.source).from_cdata,
+        "how the parser read the text is on its typed locator"
     );
     assert_eq!(
         paragraph.source_namespace, None,
-        "the root's own namespace is on the body meta, not repeated per item"
+        "the root's own namespace is on the document's XML meta, not repeated per item"
     );
 
     let formula = document
@@ -2169,17 +2218,15 @@ fn a_foreign_namespace_reaches_the_typed_slot_and_a_cdata_section_the_meta() {
         .map(base)
         .find(|item| item.label == doc::DocItemLabel::Formula as i32)
         .expect("the formula");
-    let fields = &formula.meta.as_ref().expect("meta").custom_fields;
     assert_eq!(formula.source_element_name.as_deref(), Some("mml:formula"));
     assert_eq!(
         formula.source_namespace.as_deref(),
         Some("http://www.w3.org/1998/Math/MathML"),
         "an item from another namespace says which one, because it differs"
     );
-    assert_eq!(
-        fields.get("xml.from_cdata"),
-        None,
-        "ordinary character data says nothing rather than saying false"
+    assert!(
+        !xml(&formula.source).from_cdata,
+        "ordinary character data is not marked as CDATA"
     );
 }
 
