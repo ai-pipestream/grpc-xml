@@ -119,6 +119,7 @@ const GBS_METS_CATALOGUED: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
           <mods:subject><mods:topic>Bibliographie</mods:topic></mods:subject>
           <mods:language><mods:languageTerm>ger</mods:languageTerm></mods:language>
           <dc:publisher>Verlag für Bücherkunde</dc:publisher>
+          <dc:description>Ein Bericht über Formate.</dc:description>
           <dc:date>1876-05-04</dc:date>
           <dc:identifier type="oclc">123456789</dc:identifier>
           <dc:rights>Public domain in the United States.</dc:rights>
@@ -1170,6 +1171,10 @@ async fn a_dmd_sec_decodes_into_the_typed_shapes_that_already_exist_for_it() {
             ("subject".to_owned(), "Bibliographie".to_owned()),
             ("language".to_owned(), "ger".to_owned()),
             ("publisher".to_owned(), "Verlag für Bücherkunde".to_owned()),
+            (
+                "description".to_owned(),
+                "Ein Bericht über Formate.".to_owned()
+            ),
         ],
         "a MODS wrapper is not a second statement of what it wraps"
     );
@@ -1288,13 +1293,14 @@ async fn the_gbs_document_carries_the_outline_and_the_catalogue_record() {
         meta.license.as_ref().and_then(|l| l.statement.as_deref()),
         Some("Public domain in the United States.")
     );
-    // Only what the schema has no field for lands in the open map.
+    // The publisher and the description have slots of their own, so the
+    // open map holds neither: every statement this record makes has a slot.
+    assert_eq!(meta.publisher.as_deref(), Some("Verlag für Bücherkunde"));
     assert_eq!(
-        meta.extra.get("publisher").map(String::as_str),
-        Some("Verlag für Bücherkunde")
+        meta.description.as_deref(),
+        Some("Ein Bericht über Formate.")
     );
-    assert!(!meta.extra.contains_key("title"), "{:?}", meta.extra);
-    assert!(!meta.extra.contains_key("subject"), "{:?}", meta.extra);
+    assert_eq!(meta.extra, std::collections::HashMap::new());
 }
 
 /// A line that states no `x_wconf`, or one that is not a number, used to be

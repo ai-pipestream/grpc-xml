@@ -209,10 +209,9 @@ undecoded is named on the trailer so the omission is visible.
 On the Document plane a statement lands in the typed slot `DocumentMeta` has
 for it (`title`, `authors` for a `creator` or a `contributor`, `keywords`
 because a catalogue `subject` is a topical term and there may be several,
-which the single-string `subject` field could not hold, and `language`), and
-in `extra`
-only when the schema has no field at all, which today means `publisher` and
-`description`. `extra` is documented as being for genuinely open vocabulary,
+which the single-string `subject` field could not hold, `language`,
+`publisher` and `description`), and in `extra` only when the schema has no
+field at all, such as a date written as prose. `extra` is documented as being for genuinely open vocabulary,
 so nothing with a slot goes in it.
 
 **Source metadata.** `Document.source_meta` carries what the document

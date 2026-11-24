@@ -422,8 +422,9 @@ impl DocumentFold {
     /// it, and into `extra` only when it has none.
     ///
     /// `extra` is documented as being for source metadata that is genuinely
-    /// open vocabulary, so it holds what this schema has no field for
-    /// (`publisher`, `description`) and nothing that does. A first
+    /// open vocabulary, so it holds only what this schema has no field for
+    /// (a date written as prose, a field a cataloguer invented) and nothing
+    /// that does: a publisher and a description each have a slot. A first
     /// declaration wins for the single-valued slots: a catalogue record
     /// states a title once, and a second `dmdSec` restating it is the same
     /// title, not a correction.
@@ -447,6 +448,16 @@ impl DocumentFold {
             "language" => {
                 if self.source_meta.language.is_none() {
                     self.source_meta.language = Some(value);
+                }
+            }
+            "publisher" => {
+                if self.source_meta.publisher.is_none() {
+                    self.source_meta.publisher = Some(value);
+                }
+            }
+            "description" => {
+                if self.source_meta.description.is_none() {
+                    self.source_meta.description = Some(value);
                 }
             }
             other => {
