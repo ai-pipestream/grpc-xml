@@ -487,6 +487,10 @@ message DocumentOrigin {
   // The character encoding the source's bytes were decoded with, as the
   // source declared it or the collector detected it (an IANA charset name).
   optional string source_encoding = 9;
+  // The media type the caller declared for the source. It is the caller's
+  // claim, kept apart from `mimetype`, which is what the producer settled
+  // on.
+  optional string declared_mimetype = 10;
 }
 
 // ContentLayer defines the semantic layer where content appears in the document.
@@ -655,7 +659,20 @@ message SourceType {
     // Where in an XML source the content came from (extension beyond the
     // upstream dialect).
     XmlSource xml = 4;
+    // Which part of a MIME message the content came from (extension beyond
+    // the upstream dialect).
+    MimePartSource mime_part = 5;
   }
+}
+
+// MimePartSource locates content in the MIME message it was read from.
+message MimePartSource {
+  // The part's position in the message's part tree ("1.2").
+  string part_id = 1;
+  // The part's Content-ID, without its angle brackets, when it has one.
+  optional string content_id = 2;
+  // The part's own content type, as its header states it.
+  optional string content_type = 3;
 }
 
 // XmlSource locates content in the XML source it was read from.
@@ -2598,6 +2615,11 @@ message ValueCondition {
 message EmailParty {
   optional string name = 1;
   string address = 2;
+  // The party's address in the mail system's own form when that is not an
+  // internet address (an Exchange legacy distinguished name), and the
+  // address type the source names for it ("EX", "SMTP").
+  optional string native_address = 3;
+  optional string address_type = 4;
 }
 
 // EmailMeta is the typed message envelope of a mail source.
@@ -2618,6 +2640,16 @@ message EmailMeta {
   // only field set when it does not parse.
   optional google.protobuf.Timestamp sent = 10;
   optional string sent_raw = 11;
+  // Where replies go, when the message names it apart from `from`.
+  repeated EmailParty reply_to = 12;
+  // Who submitted the message, when the message names a sender apart from
+  // its authors in `from`.
+  repeated EmailParty sender = 13;
+  // The delivery instant, with the same _raw twin as `sent`.
+  optional google.protobuf.Timestamp received = 14;
+  optional string received_raw = 15;
+  // The message's own top-level content type, as its header states it.
+  optional string content_type = 16;
 }
 
 // Hypothesis is one alternate reading a generative engine offered.
