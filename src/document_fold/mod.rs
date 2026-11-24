@@ -344,6 +344,8 @@ impl DocumentFold {
                     kind: identifier.kind.clone(),
                     value: identifier.value.clone(),
                     scope: identifier.scope.clone(),
+                    // The XML wire has no element id for an identifier.
+                    id: None,
                 });
             }
             Some(pb::meta_item::Value::Classification(classification)) => {
