@@ -111,7 +111,7 @@ message Document {
   repeated MetaTag meta_tags = 19;
 
   // Machine-readable structured data blocks embedded in the source
-  // (JSON-LD, microdata, OpenGraph), verbatim.
+  // (JSON-LD, microdata, OpenGraph), decoded.
   repeated StructuredData structured_data = 20;
 
   // Media stream metadata for audio and video sources.
@@ -195,6 +195,10 @@ message CollectorWarning {
   // How many occurrences this one entry stands for, when a collector folded
   // repeats of the same finding into it. Unset means one.
   optional uint64 count = 8;
+  // The sheet cell the warning is about, when it is about one cell: the
+  // sheet's name and the cell's zero-based row and column. item_ref still
+  // names the table the cell belongs to.
+  optional GridCell cell = 9;
 }
 
 // WarningCode names what a CollectorWarning reports, so a consumer can count
@@ -325,6 +329,10 @@ enum WarningCode {
   // it names is not in the document, or its kind does not take the
   // annotation); the result is not in the document.
   WARNING_CODE_ENRICHMENT_NOT_APPLIED = 46;
+  // A structured data block embedded in the source (JSON-LD) does not
+  // parse, so the document carries no items for it. The block's own text
+  // is still in the document, at item_ref.
+  WARNING_CODE_STRUCTURED_DATA_NOT_DECODED = 47;
 
   // -- Streams and archives --------------------------------------------
 
@@ -381,6 +389,13 @@ enum WarningCode {
   // trailing record, a file shorter than its declared layout). What was
   // complete is in the document.
   WARNING_CODE_SOURCE_INPUT_INCOMPLETE = 68;
+  // The collector failed part way through reading one part of the source
+  // (a shape, a cell, an embedded object) and went on with the next. What
+  // it had read of that part is in the document and the rest of the part
+  // is absent; item_ref, cell or page_no names the part where the
+  // collector knows it. Unlike SOURCE_CONTENT_TRUNCATED no limit was
+  // reached: the content after the part is in the document.
+  WARNING_CODE_SOURCE_PART_READ_FAILED = 69;
 }
 
 // TextAnalysis is one analyzer run over a window of the document's text
@@ -1327,6 +1342,12 @@ message ProvenanceItem {
   // Where the content sits in the source text, by line (1-based,
   // half-open), for line-addressed sources.
   optional LineSpan line_range = 8;
+
+  // How sure the reader is that the content at this location is what it
+  // read, from 0 to 1, when the reader states it per location (a speech
+  // recognizer's probability for one word, an OCR engine's for one line).
+  // Unset when the reader gives none: unknown, not zero.
+  optional double confidence = 9;
 }
 
 // LineSpan is a half-open 1-based source line range.
@@ -1360,6 +1381,10 @@ message ImageRef {
   // spell them as a data: URI in `uri`, which is for a reference to an
   // image held elsewhere.
   optional bytes data = 6;
+  // The reference exactly as the source wrote it (an HTML src attribute
+  // such as "../images/a.jpg"), when `uri` holds a resolved form of it.
+  // Unset when `uri` is the source's own spelling.
+  optional string source_ref = 7;
 }
 
 // Size represents 2D dimensions (width and height).
@@ -1379,7 +1404,10 @@ message DescriptionAnnotation {
   string provenance = 3;
 }
 
-// MiscAnnotation holds arbitrary annotation data as a struct.
+// MiscAnnotation holds arbitrary annotation data as a struct. It exists
+// for the upstream dialect only and no producer in the fleet writes it: an
+// annotation whose shape is known gets a typed arm on PictureAnnotation or
+// TableAnnotation, as the barcode did.
 message MiscAnnotation {
   string kind = 1;
   google.protobuf.Struct content = 2;
@@ -1417,7 +1445,8 @@ message PictureTabularChartData {
   TableData chart_data = 3;
 }
 
-// ChartLine represents a single line in a line chart.
+// ChartLine represents a single line in a line chart. `label` is the name
+// of the series the line draws.
 message ChartLine {
   string label = 1;
   repeated FloatPair values = 2;
@@ -1445,6 +1474,11 @@ message PictureBarChartData {
   string x_axis_label = 3;
   string y_axis_label = 4;
   repeated ChartBar bars = 5;
+  // The name of the series these bars belong to, as the source states it.
+  // The message holds one series, so a chart with several series is one
+  // annotation per series and this field tells them apart. Unset when the
+  // source does not name the series.
+  optional string series_name = 6;
 }
 
 // ChartStackedBar represents a stacked bar with multiple labeled segments.
@@ -1473,6 +1507,9 @@ message PicturePieChartData {
   string kind = 1;
   string title = 2;
   repeated ChartSlice slices = 3;
+  // The name of the series these slices belong to, as on
+  // PictureBarChartData.
+  optional string series_name = 4;
 }
 
 // ChartPoint represents a single point in a scatter chart.
@@ -1491,6 +1528,9 @@ message PictureScatterChartData {
   string x_axis_label = 3;
   string y_axis_label = 4;
   repeated ChartPoint points = 5;
+  // The name of the series these points belong to, as on
+  // PictureBarChartData.
+  optional string series_name = 6;
 }
 
 // PictureAnnotation is a union of all annotation types that can appear on a picture.
@@ -1503,7 +1543,7 @@ message PictureScatterChartData {
 message PictureAnnotation {
   oneof annotation {
     DescriptionAnnotation description = 1;
-    MiscAnnotation misc = 2;
+    MiscAnnotation misc = 2 [deprecated = true];
     PictureClassificationData classification = 3;
     PictureMoleculeData molecule = 4;
     PictureTabularChartData tabular_chart = 5;
@@ -1523,7 +1563,7 @@ message PictureAnnotation {
 message TableAnnotation {
   oneof annotation {
     DescriptionAnnotation description = 1;
-    MiscAnnotation misc = 2;
+    MiscAnnotation misc = 2 [deprecated = true];
   }
 }
 
@@ -1712,6 +1752,12 @@ message TableData {
   repeated TableCell unplaced_cells = 12;
   // What the table is, when it is not a table the source laid out.
   TableKind kind = 13;
+  // Where grid cell (0, 0) sits in the source's own grid, for a table cut
+  // out of a larger one: a sheet whose used range starts at M50 has origin
+  // row 49, col 12, and its grid holds the used range only. A cell's
+  // position in the source is its grid position plus the origin. Unset
+  // when the grid starts at the source's first row and column.
+  optional GridCell origin = 14;
 }
 
 // TableKind tells a table the collector built from the source's data from
@@ -2172,6 +2218,81 @@ message DocumentMeta {
   optional RefItem cover = 49;
   // What an EPUB package says about its own files.
   optional EpubPackageMeta epub = 50;
+  // Titles the source states beside its main one (a subtitle, a short
+  // title, the title of the collection it belongs to), each with its kind.
+  // `title` stays the main title.
+  repeated TitleVariant title_variants = 51;
+  // Dublin Core statements the source makes that have no field of their
+  // own above (source, type, format, coverage, relation), one entry per
+  // statement in source order. A statement that has a typed field (a
+  // dc:creator is `creators`, a dc:publisher is `publisher`) goes there
+  // and is not repeated here.
+  repeated DublinCoreStatement dublin_core = 52;
+}
+
+// TitleVariant is one title a source states beside its main title.
+message TitleVariant {
+  string value = 1;
+  TitleKind kind = 2;
+  // The kind as the source spelled it, when it is none of the named ones
+  // (kind is TITLE_KIND_OTHER then).
+  optional string kind_raw = 3;
+  // BCP 47 language tag of this title, when the source states one.
+  optional string language = 4;
+}
+
+// TitleKind names what a TitleVariant is to the main title. The values
+// follow the EPUB 3 title-type vocabulary, which JATS (subtitle, alt-title)
+// and MODS (titleInfo type) map onto.
+enum TitleKind {
+  TITLE_KIND_UNSPECIFIED = 0;
+  TITLE_KIND_SUBTITLE = 1;
+  // A shortened form of the title (a running head, an abbreviated title).
+  TITLE_KIND_SHORT = 2;
+  // The title of the series or collection the document belongs to.
+  TITLE_KIND_COLLECTION = 3;
+  // The designation of this edition ("Second edition").
+  TITLE_KIND_EDITION = 4;
+  // The complete title: main title, subtitle and the rest in one string.
+  TITLE_KIND_EXPANDED = 5;
+  // Any other kind; kind_raw holds the source's own word.
+  TITLE_KIND_OTHER = 6;
+}
+
+// DublinCoreStatement is one Dublin Core element a source states.
+message DublinCoreStatement {
+  DublinCoreElement element = 1;
+  string value = 2;
+  // The encoding scheme the source names for the value (opf:scheme,
+  // xsi:type), when it names one.
+  optional string scheme = 3;
+  // BCP 47 language tag of the value, when the source states one.
+  optional string language = 4;
+  // The term as the source wrote it when it refines an element or lies
+  // outside the fifteen ("dcterms:isPartOf"); `element` is then the
+  // element it refines, or DUBLIN_CORE_ELEMENT_UNSPECIFIED.
+  optional string term = 5;
+}
+
+// DublinCoreElement is one of the fifteen elements of the Dublin Core
+// Metadata Element Set, version 1.1.
+enum DublinCoreElement {
+  DUBLIN_CORE_ELEMENT_UNSPECIFIED = 0;
+  DUBLIN_CORE_ELEMENT_CONTRIBUTOR = 1;
+  DUBLIN_CORE_ELEMENT_COVERAGE = 2;
+  DUBLIN_CORE_ELEMENT_CREATOR = 3;
+  DUBLIN_CORE_ELEMENT_DATE = 4;
+  DUBLIN_CORE_ELEMENT_DESCRIPTION = 5;
+  DUBLIN_CORE_ELEMENT_FORMAT = 6;
+  DUBLIN_CORE_ELEMENT_IDENTIFIER = 7;
+  DUBLIN_CORE_ELEMENT_LANGUAGE = 8;
+  DUBLIN_CORE_ELEMENT_PUBLISHER = 9;
+  DUBLIN_CORE_ELEMENT_RELATION = 10;
+  DUBLIN_CORE_ELEMENT_RIGHTS = 11;
+  DUBLIN_CORE_ELEMENT_SOURCE = 12;
+  DUBLIN_CORE_ELEMENT_SUBJECT = 13;
+  DUBLIN_CORE_ELEMENT_TITLE = 14;
+  DUBLIN_CORE_ELEMENT_TYPE = 15;
 }
 
 // EpubPackageMeta names the files an EPUB package is built from, as paths
@@ -2447,12 +2568,87 @@ message MetaTag {
   string content = 2;
 }
 
-// StructuredData is one machine-readable data block embedded in the source,
-// verbatim.
+// StructuredData is one machine-readable data block embedded in the source
+// (a JSON-LD script, a microdata or RDFa scope), decoded into the things it
+// describes. The block's own text is not repeated here: where the source
+// holds it as text, `item_ref` names the document item that carries it.
 message StructuredData {
-  // The block's dialect: json-ld, microdata, opengraph, rdfa.
-  string kind = 1;
-  string json = 2;
+  // Superseded by `dialect` and `items`: the dialect as a free word and the
+  // block as JSON text. A producer fills the typed fields; these two stay
+  // for readers of documents written before them.
+  string kind = 1 [deprecated = true];
+  string json = 2 [deprecated = true];
+  // The dialect the block is written in.
+  StructuredDataKind dialect = 3;
+  // The things the block describes, in source order. Empty when the block
+  // did not parse (WARNING_CODE_STRUCTURED_DATA_NOT_DECODED says so).
+  repeated LinkedDataItem items = 4;
+  // The vocabularies the block declares for its terms (a JSON-LD @context
+  // IRI such as "https://schema.org", an RDFa vocab), in source order.
+  repeated string contexts = 5;
+  // The self_ref of the document item that holds the block's own text (the
+  // script element's text item), when there is one.
+  optional string item_ref = 6;
+}
+
+// StructuredDataKind names the dialect of a StructuredData block.
+enum StructuredDataKind {
+  STRUCTURED_DATA_KIND_UNSPECIFIED = 0;
+  STRUCTURED_DATA_KIND_JSON_LD = 1;
+  STRUCTURED_DATA_KIND_MICRODATA = 2;
+  STRUCTURED_DATA_KIND_RDFA = 3;
+  STRUCTURED_DATA_KIND_OPENGRAPH = 4;
+}
+
+// LinkedDataItem is one thing a structured data block describes: what it
+// is, which identifier it has and what the block says about it. It is the
+// model JSON-LD nodes, microdata items and RDFa subjects share.
+message LinkedDataItem {
+  // The item's identifier (a JSON-LD @id, a microdata itemid, an RDFa
+  // about), when the source gives it one.
+  optional string id = 1;
+  // The item's types as the source wrote them (a JSON-LD @type, a
+  // microdata itemtype, an RDFa typeof): "Article",
+  // "https://schema.org/Person".
+  repeated string types = 2;
+  // What the block says about the item, in source order.
+  repeated LinkedDataProperty properties = 3;
+}
+
+// LinkedDataProperty is one named property of a LinkedDataItem with every
+// value the source gives it.
+message LinkedDataProperty {
+  // The property's name as the source wrote it ("headline",
+  // "https://schema.org/author", "og:title").
+  string name = 1;
+  // The property's values, in source order. A property the source states
+  // with no value (a JSON null) has none.
+  repeated LinkedDataValue values = 2;
+}
+
+// LinkedDataValue is one value of a LinkedDataProperty, in the type the
+// source gives it.
+message LinkedDataValue {
+  oneof kind {
+    string text = 1;
+    // A number the source writes with a fraction or an exponent.
+    double number = 2;
+    // A number the source writes as an integer.
+    int64 integer = 3;
+    bool boolean = 4;
+    // A thing described in place.
+    LinkedDataItem item = 5;
+    // A thing named by its identifier alone and described elsewhere (a
+    // JSON-LD object that holds only @id, a microdata itemref, an RDFa
+    // resource).
+    string reference = 6;
+  }
+  // BCP 47 language tag of a text value, when the source states one
+  // (a JSON-LD @language).
+  optional string language = 7;
+  // The datatype the source names for the value (a JSON-LD value object's
+  // @type, an RDFa datatype), when it names one.
+  optional string datatype = 8;
 }
 
 // MediaMeta describes the media stream a transcript came from.
