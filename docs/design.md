@@ -173,7 +173,10 @@ modification declaration, in three fields that say three different things:
 with no time zone in it; `created` only for a whole calendar date, read as
 midnight UTC; `created_raw` for the source's own spelling as far as it goes
 (a `pub-date` with only a year yields `2026`, never a fabricated first of
-January). A cited-reference entry becomes a `REFERENCE` item like any other
+January). Every other dated event (`received`, `accepted`, a revision)
+is a `source_meta.history_dates` entry with its kind, civil date, instant
+and spelling, in source order; a revision also fills `modified`, which
+holds the latest one. A cited-reference entry becomes a `REFERENCE` item like any other
 bibliography entry. Identifiers, classification codes, licence terms and
 funding awards land on `source_meta.identifiers`, `.classifications`,
 `.license` and `.funding` field for field. Nothing here goes through
@@ -399,8 +402,17 @@ one.
 **Unconsumed source attributes** (`include_attributes`). They are an
 inspection aid on the typed stream, not document structure.
 
-**Warnings and counts** from the trailer. They describe the stream, not the
-document.
+**Counts** from the trailer. They describe the stream, not the document.
+The trailer's **warnings** do reach the Document: each becomes a
+`Document.warnings` entry with this collector's stamp, the message, its
+`count` when it stands for more than one, and the fleet code its wire code
+stands for (`UNMAPPED_ELEMENT`, `EXTERNAL_ID_IGNORED`, `TAXONOMY_IGNORED`
+and `ARCHIVE_MEMBER_IGNORED` → `SOURCE_PART_IGNORED`; `UNEXPANDED_ENTITY`
+and `DANGLING_REFERENCE` → `SOURCE_REFERENCE_UNRESOLVED`;
+`ENCODING_SUBSTITUTION`, `TEXT_REPAIRED` → their `SOURCE_` twins;
+`MALFORMED_VALUE` → `SOURCE_STRUCTURE_MALFORMED`; `LIMIT_REACHED` →
+`SOURCE_CONTENT_TRUNCATED`), so a consumer of the Document alone never
+sees a clean document the stream did not report.
 
 **Processing instructions.** An instruction is addressed to an application,
 and this service is not that application: acting on one is exactly the
@@ -418,12 +430,16 @@ columns — `concept`, `entity_scheme`, `entity`, `context`, `period`, `unit`,
 `value`, `decimals`, `precision`, `sign`, `nil` — declared in
 `TableData.columns` with the type each holds. The cells that have a machine
 value carry it in `TableCell.value`: the fact's number with the source's
-sign applied, `decimals` and `precision` as numbers (`INF` is the floating
+sign applied, as an exact `ExactDecimal` (unscaled digits and scale) for
+the `xs:decimal` form and a double only for the `xs:double` form with an
+exponent, `decimals` and `precision` as numbers (`INF` is the floating
 point infinity, not a marker), and `sign` and `nil` as booleans. A fact's
 segment and scenario axes become a `KeyValueItem` with real `GraphData`,
 one KEY cell per axis linked to the VALUE cell holding its member, and the
 fact row's `context` cell points at it. An XBRL footnote is narrative a
-filer attached to a number, so it folds as a `FOOTNOTE` item; a label names
+filer attached to a number, so it folds as a `FOOTNOTE` item whose
+`XmlSource` names the facts it annotates (`annotates`, the locators'
+`xlink:href`s), its `xlink:role` (`link_role`) and its `xml:lang`; a label names
 a concept in a schema this service never reads and stays on the wire.
 
 ### 4.3 A boundary, not a deferral: XBRL label linkbases

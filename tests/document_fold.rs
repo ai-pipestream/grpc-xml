@@ -860,7 +860,11 @@ fn the_fact_table_declares_its_column_types_and_types_its_cells() {
     let value = data.grid[1].cells[6].value.as_ref().expect("a typed value");
     assert_eq!(
         value.kind,
-        Some(doc::cell_value::Kind::Number(1_234_000_000.0))
+        Some(doc::cell_value::Kind::Decimal(doc::ExactDecimal {
+            unscaled: "1234000000".to_owned(),
+            scale: 0,
+        })),
+        "an xs:decimal is exact, never the nearest double"
     );
     let decimals = data.grid[1].cells[7]
         .value
@@ -2391,8 +2395,91 @@ fn a_fact_value_is_a_number_only_in_the_numeric_lexical_form() {
             ("NaN", None),
             ("inf", None),
             ("-1.5E3", Some(doc::cell_value::Kind::Number(-1500.0))),
-            (".25", Some(doc::cell_value::Kind::Number(0.25))),
+            (
+                ".25",
+                Some(doc::cell_value::Kind::Decimal(doc::ExactDecimal {
+                    unscaled: "25".to_owned(),
+                    scale: 2,
+                }))
+            ),
         ],
         "the text stays as written; only a number in XBRL's own form is typed"
     );
+}
+
+const JATS_HISTORY: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<article xmlns="http://jats.nlm.nih.gov/ns/archiving/1.3/">
+  <front>
+    <article-meta>
+      <title-group><article-title>Dated</article-title></title-group>
+      <pub-date pub-type="epub"><day>20</day><month>02</month><year>2026</year></pub-date>
+      <history>
+        <date date-type="received"><day>02</day><month>11</month><year>2025</year></date>
+        <date date-type="accepted"><month>01</month><year>2026</year></date>
+        <date date-type="rev-recd"><day>04</day><month>03</month><year>2026</year></date>
+      </history>
+    </article-meta>
+  </front>
+  <body><p>Body.</p></body>
+</article>
+"#;
+
+/// One history date as (kind, spelling, civil date, has an instant).
+type Dated<'a> = (&'a str, Option<&'a str>, Option<(i32, i32, i32)>, bool);
+
+#[test]
+fn every_dated_event_in_the_history_reaches_the_document() {
+    let (_, document) = fold(
+        JATS_HISTORY,
+        &ParseConfig {
+            emit_source_metadata: true,
+            ..ParseConfig::default()
+        },
+    );
+    let meta = document.source_meta.as_ref().expect("declared metadata");
+    let history: Vec<Dated> = meta
+        .history_dates
+        .iter()
+        .map(|date| {
+            (
+                date.kind.as_str(),
+                date.raw.as_deref(),
+                date.civil.as_ref().map(|c| (c.year, c.month, c.day)),
+                date.instant.is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        history,
+        [
+            ("received", Some("2025-11-02"), Some((2025, 11, 2)), true),
+            ("accepted", Some("2026-01"), Some((2026, 1, 0)), false),
+            ("rev-recd", Some("2026-03-04"), Some((2026, 3, 4)), true),
+        ],
+        "received and accepted used to vanish; a revision is history too"
+    );
+    assert_eq!(meta.created_raw.as_deref(), Some("2026-02-20"));
+    assert_eq!(meta.modified_raw.as_deref(), Some("2026-03-04"));
+}
+
+#[test]
+fn an_xbrl_footnote_names_the_facts_it_annotates() {
+    let (_, document) = fold_default(XBRL);
+    let note = document
+        .texts
+        .iter()
+        .map(base)
+        .find(|item| item.label == doc::DocItemLabel::Footnote as i32)
+        .expect("the footnote");
+    let locator = xml(&note.source);
+    assert_eq!(
+        locator.annotates,
+        ["#f-assets"],
+        "what the footnote is attached to"
+    );
+    assert_eq!(
+        locator.link_role.as_deref(),
+        Some("http://www.xbrl.org/2003/role/footnote")
+    );
+    assert_eq!(locator.language.as_deref(), Some("en"));
 }
